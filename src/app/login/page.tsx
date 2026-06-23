@@ -1,0 +1,39 @@
+"use client";
+
+import { signIn } = from "next-auth/react";
+
+export default function LoginPage() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center bg-rise-black px-6">
+      {/* Logo */}
+      <div className="mb-8 flex flex-col items-center gap-2">
+        <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-rise-red">
+          <span className="text-3xl font-black text-white">R</span>
+        </div>
+        <h1 className="text-4xl font-black tracking-tight text-white">
+          Rise <span className="text-rise-red">OS</span>
+        </h1>
+        <p className="text-sm text-white/50 tracking-widest uppercase">
+          Sports Dynasty Governance
+        </p>
+      </div>
+
+      {/* Login Card */}
+      <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-white/5 p-8">
+        <h2 className="text-xl font-bold text-white mb-2">Welcome</h2>
+        <p className="text-sm text-white/40 mb-8">
+          Sign in with Discord to access your league.
+        </p>
+
+        <button
+          onClick={() => signIn("discord", { callbackUrl: "/dashboard" })}
+          className="w-full flex items-center justify-center gap-3 rounded-xl bg-[#5865F2] hover:bg-[#4752C4] transition-colors px-6 py-4 text-white font-semibold text-sm"
+        >
+          {/* Discord Icon */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className="w-5 h-5"
+          >
+            <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.002.022.015.043.03.056a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13
