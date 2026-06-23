@@ -1,0 +1,37 @@
+{
+  "name": "Rise OS",
+  "short_name": "Rise OS",
+  "description": "Sports Dynasty Governance Layer",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1A1A1A",
+  "theme_color": "#E8284A",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["sports", "productivity"],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "url": "/dashboard",
+      "description": "Go to your league dashboard"
+    },
+    {
+      "name": "Franchise",
+      "url": "/franchise",
+      "description": "Manage your franchise"
+    }
+  ]
+}
