@@ -1,0 +1,141 @@
+"use client";
+
+import { useSession } from "next-auth/react";
+import { useRouter, useParams } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+
+export default function FranchiseDetailPage() {
+  const { status } = useSession();
+  const router = useRouter();
+  const { leagueId, franchiseId } = useParams<{ leagueId: string; franchiseId: string }>();
+  const [franchise, setFranchise] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (status === "unauthenticated") router.push("/login");
+  }, [status, router]);
+
+  useEffect(() => {
+    if (franchiseId) fetchFranchise();
+  }, [franchiseId]);
+
+  async function fetchFranchise() {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/franchises/${leagueId}/${franchiseId}`);
+      if (res.ok) setFranchise(await res.json());
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleLogoUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch(`/api/franchises/${leagueId}/${franchiseId}`, {
+        method: "PUT",
+        body: formData,
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setFranchise((prev: any) => ({ ...prev, logo_url: updated.logo_url }));
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  if (status === "loading" || loading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-rise-black">
+        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+      </main>
+    );
+  }
+
+  if (!franchise) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-rise-black">
+        <p className="text-white/40">Franchise not found.</p>
+      </main>
+    );
+  }
+
+  return (
+    <main className="min-h-screen bg-rise-black px-4 py-8">
+      <button onClick={() => router.back()} className="flex items-center gap-2 text-white/40 text-sm mb-6">
+        ← Back
+      </button>
+
+      <div className="flex flex-col items-center mb-8">
+        <button onClick={() => fileRef.current?.click()} className="relative mb-4 group" disabled={uploading}>
+          {franchise.logo_url ? (
+            <img src={franchise.logo_url} alt={franchise.name}
+              className="w-24 h-24 rounded-2xl object-cover border border-white/10" />
+          ) : (
+            <div className="w-24 h-24 rounded-2xl border border-white/10 flex items-center justify-center"
+              style={{ backgroundColor: franchise.primary_color ?? "#ffffff20" }}>
+              <span className="text-white font-black text-2xl">
+                {franchise.abbreviation ?? franchise.name.slice(0, 3).toUpperCase()}
+              </span>
+            </div>
+          )}
+          <div className="absolute inset-0 rounded-2xl bg-black/50 flex items-center justify-center opacity-0 group-active:opacity-100 transition-opacity">
+            <span className="text-white text-xs font-bold">{uploading ? "Uploading..." : "Change"}</span>
+          </div>
+        </button>
+
+        <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif"
+          className="hidden" onChange={handleLogoUpload} />
+
+        <h1 className="text-2xl font-black text-white text-center">{franchise.name}</h1>
+        {franchise.abbreviation && (
+          <p className="text-white/30 text-xs uppercase tracking-widest mt-1">{franchise.abbreviation}</p>
+        )}
+      </div>
+
+      {/* Color swatches */}
+      <div className="flex gap-3 mb-6 justify-center">
+        {franchise.primary_color && (
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-full border border-white/20" style={{ backgroundColor: franchise.primary_color }} />
+            <span className="text-white/40 text-xs">{franchise.primary_color}</span>
+          </div>
+        )}
+        {franchise.secondary_color && (
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-full border border-white/20" style={{ backgroundColor: franchise.secondary_color }} />
+            <span className="text-white/40 text-xs">{franchise.secondary_color}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-5 grid grid-cols-3 gap-4 text-center">
+          <div>
+            <p className="text-2xl font-black text-white">{franchise.wins ?? 0}</p>
+            <p className="text-white/30 text-xs uppercase tracking-wide mt-1">Wins</p>
+          </div>
+          <div>
+            <p className="text-2xl font-black text-white">{franchise.losses ?? 0}</p>
+            <p className="text-white/30 text-xs uppercase tracking-wide mt-1">Losses</p>
+          </div>
+          <div>
+            <p className="text-2xl font-black text-white">{franchise.championships ?? 0}</p>
+            <p className="text-white/30 text-xs uppercase tracking-wide mt-1">Titles</p>
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
