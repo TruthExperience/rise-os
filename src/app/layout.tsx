@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import SessionProvider from "@/components/providers/SessionProvider";
+import BottomNav from "@/components/ui/BottomNav";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -49,7 +50,12 @@ export default function RootLayout({
         />
       </head>
       <body className={inter.className}>
-        <SessionProvider>{children}</SessionProvider>
+        <SessionProvider>
+          <div className="pb-16">
+            {children}
+          </div>
+          <BottomNav />
+        </SessionProvider>
       </body>
     </html>
   );
