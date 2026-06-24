@@ -69,6 +69,8 @@ const LICENCE_SELECT = `
   qr_token,
   created_at,
   updated_at,
+  driver_id,
+  league_id,
   driver:drivers (
     id,
     discord_username,
