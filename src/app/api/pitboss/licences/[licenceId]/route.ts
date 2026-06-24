@@ -1,219 +1,70 @@
-// src/app/api/pitboss/licences/[licenceId]/route.ts
-import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+type Params = { params: Promise<{ licenceId: string }> }
 
-type Params = { params: { licenceId: string } }
+const VALID_STATUSES = ['active', 'suspended', 'revoked', 'expired']
 
-// Valid status transitions
-const TRANSITIONS: Record<string, string[]> = {
-  active:    ['suspended', 'revoked', 'expired'],
-  suspended: ['active', 'revoked'],
-  revoked:   [],
-  expired:   [],
-}
+const SELECT = `
+  id, licence_number, role_code, title, tier, era_endorsements, status,
+  issued_at, expires_at, photo_url, qr_token, created_at, updated_at,
+  driver:driver_id ( id, discord_username, display_name, discord_avatar, tier, pp_total, super_licence_status ),
+  league:league_id ( id, name, slug )
+`
 
-// GET — fetch single licence with full driver + league detail
 export async function GET(_req: NextRequest, { params }: Params) {
-  const { licenceId } = params
+  const { licenceId } = await params
+  const supabase = await createClient()
 
   const { data, error } = await supabase
     .schema('pitboss')
     .from('licences')
-    .select(`
-      id,
-      licence_number,
-      role_code,
-      title,
-      tier,
-      era_endorsements,
-      status,
-      issued_at,
-      expires_at,
-      photo_url,
-      qr_token,
-      driver:drivers (
-        id,
-        discord_id,
-        discord_username,
-        display_name,
-        discord_avatar,
-        tier,
-        pp_total,
-        super_licence_status,
-        era_endorsements,
-        driver_leagues (
-          role,
-          certified,
-          certified_at,
-          joined_at
-        ),
-        driver_gamertags (
-          platform,
-          gamertag,
-          is_primary
-        )
-      ),
-      league:rise_os.leagues (
-        id,
-        name,
-        slug,
-        sport,
-        discord_server_id
-      )
-    `)
+    .select(SELECT)
     .eq('id', licenceId)
-    .single()
+    .maybeSingle()
 
-  if (error || !data) {
-    return NextResponse.json({ error: 'Licence not found' }, { status: 404 })
+  if (error) {
+    console.error('[GET /api/pitboss/licences/[licenceId]]', error)
+    return NextResponse.json({ error: error.message }, { status: 500 })
   }
+  if (!data) return NextResponse.json({ error: 'Licence not found' }, { status: 404 })
 
-  // Enrich with current penalty point total from ledger
-  const { data: penalties } = await supabase
-    .schema('pitboss')
-    .from('penalty_ledger')
-    .select('points, reason, issued_at, expires_at')
-    .eq('driver_id', (data.driver as any).id)
-    .eq('league_id', (data as any).league?.id)
-    .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
-
-  const active_pp = penalties?.reduce((sum, p) => sum + p.points, 0) ?? 0
-
-  return NextResponse.json({ data: { ...data, active_pp, penalties: penalties ?? [] } })
+  return NextResponse.json({ data })
 }
 
-// PATCH — update licence fields and/or status
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const { licenceId } = params
-  const body = await req.json()
-  const {
-    status,
-    title,
-    tier,
-    era_endorsements,
-    expires_at,
-    photo_url,
-  } = body
+  const { licenceId } = await params
+  const supabase = await createClient()
 
-  // Fetch current licence
-  const { data: current, error: fetchError } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id, status, driver_id, league_id, role_code')
-    .eq('id', licenceId)
-    .single()
+  let body: Record<string, unknown>
+  try { body = await req.json() }
+  catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) }
 
-  if (fetchError || !current) {
-    return NextResponse.json({ error: 'Licence not found' }, { status: 404 })
-  }
+  const allowed = ['status', 'title', 'tier', 'expires_at', 'photo_url', 'era_endorsements']
+  const update: Record<string, unknown> = {}
+  for (const key of allowed) { if (key in body) update[key] = body[key] }
 
-  // Validate status transition if provided
-  if (status && status !== current.status) {
-    const allowed = TRANSITIONS[current.status] ?? []
-    if (!allowed.includes(status)) {
-      return NextResponse.json(
-        {
-          error: `Cannot transition licence from '${current.status}' to '${status}'`,
-          allowed_transitions: allowed,
-        },
-        { status: 422 }
-      )
-    }
-  }
-
-  // Build update payload — only include fields present in body
-  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() }
-  if (status          !== undefined) updates.status          = status
-  if (title           !== undefined) updates.title           = title
-  if (tier            !== undefined) updates.tier            = tier
-  if (era_endorsements !== undefined) updates.era_endorsements = era_endorsements
-  if (expires_at      !== undefined) updates.expires_at      = expires_at
-  if (photo_url       !== undefined) updates.photo_url       = photo_url
-
-  if (Object.keys(updates).length === 1) {
+  if (Object.keys(update).length === 0)
     return NextResponse.json({ error: 'No updatable fields provided' }, { status: 400 })
-  }
 
-  const { data: updated, error: updateError } = await supabase
+  if (update.status !== undefined && !VALID_STATUSES.includes(update.status as string))
+    return NextResponse.json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` }, { status: 400 })
+
+  update.updated_at = new Date().toISOString()
+
+  const { data, error } = await supabase
     .schema('pitboss')
     .from('licences')
-    .update(updates)
+    .update(update)
     .eq('id', licenceId)
-    .select()
-    .single()
+    .select(SELECT)
+    .maybeSingle()
 
-  if (updateError) {
-    console.error('[licences/[licenceId]:PATCH]', updateError)
-    return NextResponse.json({ error: updateError.message }, { status: 500 })
+  if (error) {
+    console.error('[PATCH /api/pitboss/licences/[licenceId]]', error)
+    return NextResponse.json({ error: error.message }, { status: 500 })
   }
+  if (!data) return NextResponse.json({ error: 'Licence not found' }, { status: 404 })
 
-  // Mirror critical status changes onto the driver's super_licence_status
-  if (status && ['suspended', 'revoked', 'active'].includes(status)) {
-    const superStatus =
-      status === 'suspended' ? 'review' :
-      status === 'revoked'   ? 'suspended' :
-      'active'
-
-    await supabase
-      .schema('pitboss')
-      .from('drivers')
-      .update({ super_licence_status: superStatus })
-      .eq('id', current.driver_id)
-  }
-
-  return NextResponse.json({ data: updated })
-}
-
-// DELETE — hard revoke (no physical delete; licences are permanent records)
-export async function DELETE(_req: NextRequest, { params }: Params) {
-  const { licenceId } = params
-
-  const { data: current, error: fetchError } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id, status, driver_id, league_id')
-    .eq('id', licenceId)
-    .single()
-
-  if (fetchError || !current) {
-    return NextResponse.json({ error: 'Licence not found' }, { status: 404 })
-  }
-
-  if (current.status === 'revoked') {
-    return NextResponse.json({ error: 'Licence is already revoked' }, { status: 409 })
-  }
-
-  if (!TRANSITIONS[current.status]?.includes('revoked')) {
-    return NextResponse.json(
-      { error: `Cannot revoke a licence with status '${current.status}'` },
-      { status: 422 }
-    )
-  }
-
-  const { data: revoked, error: revokeError } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .update({ status: 'revoked', updated_at: new Date().toISOString() })
-    .eq('id', licenceId)
-    .select()
-    .single()
-
-  if (revokeError) {
-    console.error('[licences/[licenceId]:DELETE]', revokeError)
-    return NextResponse.json({ error: revokeError.message }, { status: 500 })
-  }
-
-  // Escalate driver's super licence status to suspended
-  await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .update({ super_licence_status: 'suspended' })
-    .eq('id', current.driver_id)
-
-  return NextResponse.json({ data: revoked })
+  return NextResponse.json({ data })
 }
