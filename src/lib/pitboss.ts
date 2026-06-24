@@ -1,5 +1,3 @@
-
-
 import { createClient } from "@supabase/supabase-js";
 import type {
   Licence,
@@ -94,9 +92,9 @@ export async function fetchLicenceByToken(
   const col = isUUID ? "qr_token" : "licence_number";
 
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("licences")
     .select(LICENCE_SELECT)
-    .schema("pitboss")
     .eq(col, token)
     .maybeSingle();
 
@@ -109,9 +107,9 @@ export async function fetchLicenceById(
   id: string
 ): Promise<LicenceWithRelations | null> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("licences")
     .select(LICENCE_SELECT)
-    .schema("pitboss")
     .eq("id", id)
     .maybeSingle();
 
@@ -124,9 +122,9 @@ export async function fetchLicencesByLeague(
   leagueId: string
 ): Promise<LicenceWithRelations[]> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("licences")
     .select(LICENCE_SELECT)
-    .schema("pitboss")
     .eq("league_id", leagueId)
     .order("issued_at", { ascending: false });
 
@@ -139,9 +137,9 @@ export async function fetchLicencesByDriver(
   driverId: string
 ): Promise<LicenceWithRelations[]> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("licences")
     .select(LICENCE_SELECT)
-    .schema("pitboss")
     .eq("driver_id", driverId)
     .order("issued_at", { ascending: false });
 
@@ -154,6 +152,7 @@ export async function issueLicence(
   payload: IssueLicencePayload
 ): Promise<Licence> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .rpc("issue_licence", {
       p_driver_id:  payload.driver_id,
       p_league_id:  payload.league_id,
@@ -162,8 +161,7 @@ export async function issueLicence(
       p_tier:       payload.tier ?? null,
       p_photo_url:  payload.photo_url ?? null,
       p_expires_at: payload.expires_at ?? null,
-    })
-    .schema("pitboss");
+    });
 
   if (error) throw error;
   return data as Licence;
@@ -175,12 +173,12 @@ export async function updateLicence(
   payload: UpdateLicencePayload
 ): Promise<Licence> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("licences")
     .update({
       ...payload,
       updated_at: new Date().toISOString(),
     })
-    .schema("pitboss")
     .eq("id", id)
     .select()
     .single();
@@ -207,9 +205,9 @@ export async function reinstateLicence(id: string): Promise<Licence> {
 /** Auto-patch expired licences found during verify */
 export async function markExpired(id: string): Promise<void> {
   await supabase
+    .schema("pitboss")
     .from("licences")
     .update({ status: "expired", updated_at: new Date().toISOString() })
-    .schema("pitboss")
     .eq("id", id);
 }
 
@@ -275,9 +273,9 @@ export async function fetchDriverById(
   id: string
 ): Promise<Driver | null> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("drivers")
     .select("*")
-    .schema("pitboss")
     .eq("id", id)
     .maybeSingle();
 
@@ -289,9 +287,9 @@ export async function fetchDriverByDiscordId(
   discordId: string
 ): Promise<Driver | null> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("drivers")
     .select("*")
-    .schema("pitboss")
     .eq("discord_id", discordId)
     .maybeSingle();
 
@@ -303,9 +301,9 @@ export async function fetchDriverLeagues(
   driverId: string
 ): Promise<DriverLeague[]> {
   const { data, error } = await supabase
+    .schema("pitboss")
     .from("driver_leagues")
     .select("*")
-    .schema("pitboss")
     .eq("driver_id", driverId);
 
   if (error) throw error;
