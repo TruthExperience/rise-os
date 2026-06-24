@@ -38,7 +38,8 @@ export default function LeaguePage() {
   async function fetchLeagues() {
     setLoading(true);
     const { data } = await supabase
-      .from("rise_os.leagues")
+      .schema("rise_os")
+      .from("leagues")
       .select("*")
       .order("created_at", { ascending: false });
     setLeagues(data || []);
@@ -47,13 +48,19 @@ export default function LeaguePage() {
 
   async function createLeague() {
     if (!form.name || !form.sport) return;
-    const slug = form.name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-    const { error } = await supabase.from("rise_os.leagues").insert({
-      name: form.name,
-      sport: form.sport,
-      slug,
-      is_public: form.is_public,
-    });
+    const slug = form.name
+      .toLowerCase()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-z0-9-]/g, "");
+    const { error } = await supabase
+      .schema("rise_os")
+      .from("leagues")
+      .insert({
+        name: form.name,
+        sport: form.sport,
+        slug,
+        is_public: form.is_public,
+      });
     if (!error) {
       setCreating(false);
       setForm({ name: "", sport: "", is_public: true });
@@ -93,7 +100,9 @@ export default function LeaguePage() {
 
             {/* Name */}
             <div className="mb-4">
-              <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">League Name</label>
+              <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
+                League Name
+              </label>
               <input
                 type="text"
                 placeholder="e.g. TOPS CFB Dynasty"
@@ -105,7 +114,9 @@ export default function LeaguePage() {
 
             {/* Sport */}
             <div className="mb-4">
-              <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">Sport</label>
+              <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
+                Sport
+              </label>
               <div className="grid grid-cols-2 gap-2">
                 {SPORTS.map((s) => (
                   <button
@@ -128,9 +139,15 @@ export default function LeaguePage() {
               <span className="text-sm text-white">Public League</span>
               <button
                 onClick={() => setForm({ ...form, is_public: !form.is_public })}
-                className={`w-12 h-6 rounded-full transition-colors ${form.is_public ? "bg-rise-red" : "bg-white/20"}`}
+                className={`w-12 h-6 rounded-full transition-colors ${
+                  form.is_public ? "bg-rise-red" : "bg-white/20"
+                }`}
               >
-                <div className={`w-5 h-5 rounded-full bg-white mx-0.5 transition-transform ${form.is_public ? "translate-x-6" : ""}`} />
+                <div
+                  className={`w-5 h-5 rounded-full bg-white mx-0.5 transition-transform ${
+                    form.is_public ? "translate-x-6" : ""
+                  }`}
+                />
               </button>
             </div>
 
@@ -163,7 +180,9 @@ export default function LeaguePage() {
         <div className="flex flex-col items-center justify-center mt-20 gap-4">
           <p className="text-4xl">🏆</p>
           <p className="text-white font-bold">No leagues yet</p>
-          <p className="text-white/30 text-sm text-center">Create your first league to get started</p>
+          <p className="text-white/30 text-sm text-center">
+            Create your first league to get started
+          </p>
         </div>
       ) : (
         <div className="flex flex-col gap-3">
@@ -175,9 +194,17 @@ export default function LeaguePage() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-white font-bold">{league.name}</p>
-                  <p className="text-white/30 text-xs mt-1 uppercase tracking-wide">{league.sport}</p>
+                  <p className="text-white/30 text-xs mt-1 uppercase tracking-wide">
+                    {league.sport}
+                  </p>
                 </div>
-                <span className={`text-xs px-2 py-1 rounded-full ${league.is_public ? "bg-rise-red/20 text-rise-red" : "bg-white/10 text-white/40"}`}>
+                <span
+                  className={`text-xs px-2 py-1 rounded-full ${
+                    league.is_public
+                      ? "bg-rise-red/20 text-rise-red"
+                      : "bg-white/10 text-white/40"
+                  }`}
+                >
                   {league.is_public ? "Public" : "Private"}
                 </span>
               </div>
