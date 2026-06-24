@@ -1,7 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/app/api/auth/[...nextauth]/route";
+import { authOptions } from "@/lib/auth";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -15,7 +15,6 @@ export async function GET() {
 
   const discordId = (session.user as any).discord_id;
 
-  // Get driver first
   const { data: driver } = await supabaseAdmin
     .from("drivers")
     .select("id")
