@@ -1,183 +1,229 @@
 "use client";
 
 import { useSession } from "next-auth/react";
-import { useRouter, useParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-const SPORT_LABELS: Record<string, string> = {
-  cfb: "College Football",
-  nfl: "NFL",
-  nba: "NBA",
-  soccer: "Soccer",
-  nhl: "NHL",
-  sim_racing: "Sim Racing",
-  other: "Other",
-};
+const SPORTS = [
+ { id: "cfb", label: "College Football", emoji: "🏈" },
+ { id: "nfl", label: "NFL", emoji: "🏈" },
+ { id: "nba", label: "NBA", emoji: "🏀" },
+ { id: "soccer", label: "Soccer", emoji: "⚽" },
+ { id: "nhl", label: "NHL", emoji: "🏒" },
+ { id: "sim_racing", label: "Sim Racing", emoji: "🏎️" },
+ { id: "other", label: "Other", emoji: "🏆" },
+];
 
 const SPORT_EMOJI: Record<string, string> = {
-  cfb: "🏈",
-  nfl: "🏈",
-  nba: "🏀",
-  soccer: "⚽",
-  nhl: "🏒",
-  sim_racing: "🏎️",
-  other: "🏆",
+ cfb: "🏈",
+ nfl: "🏈",
+ nba: "🏀",
+ soccer: "⚽",
+ nhl: "🏒",
+ sim_racing: "🏎️",
+ other: "🏆",
 };
 
-export default function LeagueDetailPage() {
-  const { status } = useSession();
-  const router = useRouter();
-  const { id } = useParams<{ id: string }>();
-  const [league, setLeague] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
+export default function LeaguePage() {
+ const { status } = useSession();
+ const router = useRouter();
+ const [leagues, setLeagues] = useState<any[]>([]);
+ const [creating, setCreating] = useState(false);
+ const [loading, setLoading] = useState(true);
+ const [form, setForm] = useState({
+   name: "",
+   sport: "",
+   is_public: false,
+ });
 
-  useEffect(() => {
-    if (status === "unauthenticated") router.push("/login");
-  }, [status, router]);
+ useEffect(() => {
+   if (status === "unauthenticated") router.push("/login");
+ }, [status, router]);
 
-  useEffect(() => {
-    if (status === "authenticated" && id) fetchLeague();
-  }, [status, id]);
+ useEffect(() => {
+   fetchLeagues();
+ }, []);
 
-  async function fetchLeague() {
-    setLoading(true);
-    const res = await fetch(`/api/leagues/${id}`);
-    if (res.ok) setLeague(await res.json());
-    setLoading(false);
-  }
+ async function fetchLeagues() {
+   setLoading(true);
+   try {
+     const res = await fetch("/api/leagues");
+     const data = await res.json();
+     setLeagues(Array.isArray(data) ? data : []);
+   } catch (e) {
+     console.error(e);
+     setLeagues([]);
+   } finally {
+     setLoading(false);
+   }
+ }
 
-  async function handleLogoUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+ async function createLeague() {
+   if (!form.name || !form.sport) return;
+   const res = await fetch("/api/leagues", {
+     method: "POST",
+     headers: { "Content-Type": "application/json" },
+     body: JSON.stringify(form),
+   });
+   if (res.ok) {
+     setCreating(false);
+     setForm({ name: "", sport: "", is_public: false });
+     fetchLeagues();
+   }
+ }
 
-    setUploading(true);
-    const ext = file.name.split(".").pop();
-    const path = `${id}/logo.${ext}`;
+ if (status === "loading") {
+   return (
+     <main className="flex min-h-screen items-center justify-center bg-rise-black">
+       <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+     </main>
+   );
+ }
 
-    const { error: uploadError } = await supabase.storage
-      .from("league-logos")
-      .upload(path, file, { upsert: true });
+ return (
+   <main className="min-h-screen bg-rise-black px-4 py-8">
+     {/* Header */}
+     <div className="flex items-center justify-between mb-8">
+       <div>
+         <h1 className="text-2xl font-black text-white">Leagues</h1>
+         <p className="text-xs text-white/30 uppercase tracking-widest">Rise OS</p>
+       </div>
+       <button
+         onClick={() => setCreating(true)}
+         className="rounded-xl bg-rise-red px-4 py-2 text-xs font-bold text-white"
+       >
+         + New
+       </button>
+     </div>
 
-    if (uploadError) {
-      console.error(uploadError);
-      setUploading(false);
-      return;
-    }
+     {/* Create League Modal */}
+     {creating && (
+       <div className="fixed inset-0 z-50 flex items-end bg-black/60 px-4 pb-8">
+         <div className="w-full rounded-2xl border border-white/10 bg-[#111111] p-6">
+           <h2 className="text-lg font-black text-white mb-6">Create League</h2>
 
-    const { data: { publicUrl } } = supabase.storage
-      .from("league-logos")
-      .getPublicUrl(path);
+           <div className="mb-4">
+             <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
+               League Name
+             </label>
+             <input
+               type="text"
+               placeholder="e.g. TOPS CFB Dynasty"
+               value={form.name}
+               onChange={(e) => setForm({ ...form, name: e.target.value })}
+               className="w-full rounded-xl bg-white/5 border border-white/10 px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-rise-red"
+             />
+           </div>
 
-    const res = await fetch(`/api/leagues/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ logo_url: publicUrl }),
-    });
+           <div className="mb-4">
+             <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
+               Sport
+             </label>
+             <div className="grid grid-cols-2 gap-2">
+               {SPORTS.map((s) => (
+                 <button
+                   key={s.id}
+                   onClick={() => setForm({ ...form, sport: s.id })}
+                   className={`rounded-xl border px-3 py-2 text-sm text-left transition-colors ${
+                     form.sport === s.id
+                       ? "border-rise-red bg-rise-red/10 text-white"
+                       : "border-white/10 bg-white/5 text-white/50"
+                   }`}
+                 >
+                   {s.emoji} {s.label}
+                 </button>
+               ))}
+             </div>
+           </div>
 
-    if (res.ok) {
-      setLeague((prev: any) => ({ ...prev, logo_url: publicUrl }));
-    }
-    setUploading(false);
-  }
+           <div className="mb-6 flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+             <span className="text-sm text-white">Public League</span>
+             <button
+               onClick={() => setForm({ ...form, is_public: !form.is_public })}
+               className={`w-12 h-6 rounded-full transition-colors ${
+                 form.is_public ? "bg-rise-red" : "bg-white/20"
+               }`}
+             >
+               <div
+                 className={`w-5 h-5 rounded-full bg-white mx-0.5 transition-transform ${
+                   form.is_public ? "translate-x-6" : ""
+                 }`}
+               />
+             </button>
+           </div>
 
-  if (status === "loading" || loading) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-rise-black">
-        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
-      </main>
-    );
-  }
+           <div className="flex gap-3">
+             <button
+               onClick={() => setCreating(false)}
+               className="flex-1 rounded-xl border border-white/10 py-3 text-sm text-white/50"
+             >
+               Cancel
+             </button>
+             <button
+               onClick={createLeague}
+               disabled={!form.name || !form.sport}
+               className="flex-1 rounded-xl bg-rise-red py-3 text-sm font-bold text-white disabled:opacity-40"
+             >
+               Create
+             </button>
+           </div>
+         </div>
+       </div>
+     )}
 
-  if (!league) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-rise-black">
-        <p className="text-white/40">League not found.</p>
-      </main>
-    );
-  }
-
-  return (
-    <main className="min-h-screen bg-rise-black px-4 py-8">
-      {/* Back */}
-      <button
-        onClick={() => router.back()}
-        className="flex items-center gap-2 text-white/40 text-sm mb-6"
-      >
-        ← Back
-      </button>
-
-      {/* Logo */}
-      <div className="flex flex-col items-center mb-8">
-        <button
-          onClick={() => fileRef.current?.click()}
-          className="relative mb-4 group"
-          disabled={uploading}
-        >
-          {league.logo_url ? (
-            <img
-              src={league.logo_url}
-              alt={league.name}
-              className="w-24 h-24 rounded-2xl object-cover border border-white/10"
-            />
-          ) : (
-            <div className="w-24 h-24 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-4xl">
-              {SPORT_EMOJI[league.sport] ?? "🏆"}
-            </div>
-          )}
-          <div className="absolute inset-0 rounded-2xl bg-black/50 flex items-center justify-center opacity-0 group-active:opacity-100 transition-opacity">
-            <span className="text-white text-xs font-bold">
-              {uploading ? "Uploading..." : "Change"}
-            </span>
-          </div>
-        </button>
-
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/gif"
-          className="hidden"
-          onChange={handleLogoUpload}
-        />
-
-        <h1 className="text-2xl font-black text-white text-center">{league.name}</h1>
-        <p className="text-white/30 text-xs uppercase tracking-widest mt-1">
-          {SPORT_LABELS[league.sport] ?? league.sport}
-        </p>
-      </div>
-
-      {/* Info Cards */}
-      <div className="flex flex-col gap-3">
-        <InfoRow label="Visibility" value={league.is_public ? "Public" : "Private"} />
-        <InfoRow label="Seasons" value={league.season_count ?? 0} />
-        <InfoRow
-          label="Created"
-          value={new Date(league.created_at).toLocaleDateString("en-US", {
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-          })}
-        />
-        {league.discord_server_id && (
-          <InfoRow label="Discord" value={league.discord_server_id} />
-        )}
-      </div>
-    </main>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 flex items-center justify-between">
-      <span className="text-white/40 text-sm">{label}</span>
-      <span className="text-white text-sm font-semibold">{String(value)}</span>
-    </div>
-  );
+     {/* Leagues List */}
+     {loading ? (
+       <div className="flex justify-center mt-20">
+         <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+       </div>
+     ) : leagues.length === 0 ? (
+       <div className="flex flex-col items-center justify-center mt-20 gap-4">
+         <p className="text-4xl">🏆</p>
+         <p className="text-white font-bold">No leagues yet</p>
+         <p className="text-white/30 text-sm text-center">
+           Create your first league to get started
+         </p>
+       </div>
+     ) : (
+       <div className="flex flex-col gap-3">
+         {leagues.map((league) => (
+           <div
+             key={league.id}
+             onClick={() => router.push(`/league/${league.id}`)}
+             className="rounded-2xl border border-white/10 bg-white/5 p-5 cursor-pointer active:scale-95 transition-transform"
+           >
+             <div className="flex items-center gap-4">
+               {league.logo_url ? (
+                 <img
+                   src={league.logo_url}
+                   alt={league.name}
+                   className="w-12 h-12 rounded-xl object-cover border border-white/10 flex-shrink-0"
+                 />
+               ) : (
+                 <div className="w-12 h-12 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-2xl flex-shrink-0">
+                   {SPORT_EMOJI[league.sport] ?? "🏆"}
+                 </div>
+               )}
+               <div className="flex-1 min-w-0">
+                 <p className="text-white font-bold truncate">{league.name}</p>
+                 <p className="text-white/30 text-xs mt-0.5 uppercase tracking-wide">
+                   {league.sport}
+                 </p>
+               </div>
+               <span
+                 className={`text-xs px-2 py-1 rounded-full flex-shrink-0 ${
+                   league.is_public
+                     ? "bg-rise-red/20 text-rise-red"
+                     : "bg-white/10 text-white/40"
+                 }`}
+               >
+                 {league.is_public ? "Public" : "Private"}
+               </span>
+             </div>
+           </div>
+         ))}
+       </div>
+     )}
+   </main>
+ );
 }
