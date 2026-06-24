@@ -101,7 +101,7 @@ export async function fetchLicenceByToken(
     .maybeSingle();
 
   if (error) throw error;
-  return data as LicenceWithRelations | null;
+  return data as unknown as LicenceWithRelations | null;
 }
 
 /** Fetch a single licence by its UUID primary key */
@@ -116,7 +116,7 @@ export async function fetchLicenceById(
     .maybeSingle();
 
   if (error) throw error;
-  return data as LicenceWithRelations | null;
+  return data as unknown as LicenceWithRelations | null;
 }
 
 /** Fetch all licences for a league (commissioner view) */
@@ -131,7 +131,7 @@ export async function fetchLicencesByLeague(
     .order("issued_at", { ascending: false });
 
   if (error) throw error;
-  return (data ?? []) as LicenceWithRelations[];
+  return (data ?? []) as unknown as LicenceWithRelations[];
 }
 
 /** Fetch all licences for a driver across all leagues */
@@ -146,7 +146,7 @@ export async function fetchLicencesByDriver(
     .order("issued_at", { ascending: false });
 
   if (error) throw error;
-  return (data ?? []) as LicenceWithRelations[];
+  return (data ?? []) as unknown as LicenceWithRelations[];
 }
 
 /** Issue a new licence — calls the DB function which handles sequencing */
