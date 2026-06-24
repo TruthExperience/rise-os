@@ -1,6 +1,12 @@
 import NextAuth from "next-auth";
 import DiscordProvider from "next-auth/providers/discord";
-import { supabase } from "@/lib/supabase";
+import { createClient } from "@supabase/supabase-js";
+
+// Service role client for server-side writes
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 const handler = NextAuth({
   providers: [
@@ -22,8 +28,8 @@ const handler = NextAuth({
         token.avatar = p.avatar;
         token.discriminator = p.discriminator;
 
-        // Upsert user into TOPS Supabase
-        await supabase.from("users").upsert(
+        // Upsert user into TOPS Supabase using service role
+        await supabaseAdmin.from("users").upsert(
           {
             discord_id: p.id,
             username: p.username,
