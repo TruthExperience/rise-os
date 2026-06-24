@@ -74,6 +74,7 @@ export default function CertPage() {
         return
       }
 
+      sessionStorage.setItem(`cert:${data.certification_id}`, JSON.stringify(data))
       router.push(`/pitboss/cert/${data.certification_id}`)
     } catch {
       setError('Network error — try again')
