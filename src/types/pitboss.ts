@@ -261,3 +261,4 @@ export interface ApiSuccess<T> {
 export interface ApiError {
   data: null;
   error: string;
+}
