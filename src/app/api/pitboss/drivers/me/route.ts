@@ -1,7 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/app/api/auth/[...nextauth]/route";
+import { authOptions } from "@/lib/auth";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,7 +17,6 @@ export async function GET() {
   const username = (session.user as any).name ?? session.user.email;
   const avatar = (session.user as any).image ?? null;
 
-  // Upsert driver on every GET — keeps profile in sync with Discord
   const { data, error } = await supabaseAdmin
     .from("drivers")
     .upsert(
