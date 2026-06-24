@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import CircuitLines from '@/components/pitboss/CircuitLines'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,8 +69,11 @@ const DIFFICULTY: Record<string, { label: string; cls: string }> = {
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-[#0A0A0F] text-[#F0F0F0] flex flex-col items-center justify-center px-4 py-12">
-      {children}
+    <div className="relative overflow-hidden min-h-screen bg-[#0A0A0F] text-[#F0F0F0] flex flex-col items-center justify-center px-4 py-12">
+      <CircuitLines />
+      <div className="relative z-10 w-full flex flex-col items-center">
+        {children}
+      </div>
     </div>
   )
 }
