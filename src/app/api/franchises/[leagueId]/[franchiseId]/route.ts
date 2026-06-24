@@ -7,13 +7,15 @@ const supabaseAdmin = createClient(
   { db: { schema: "rise_os" } }
 );
 
+const MAX_LOGO_BYTES = 5 * 1024 * 1024;
+
 export async function GET(_req: Request, { params }: { params: { leagueId: string; franchiseId: string } }) {
   const { data, error } = await supabaseAdmin
     .from("franchises")
     .select("*")
     .eq("id", params.franchiseId)
     .eq("league_id", params.leagueId)
-    .single();
+    .maybeSingle();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -29,9 +31,10 @@ export async function PATCH(req: Request, { params }: { params: { leagueId: stri
     .eq("id", params.franchiseId)
     .eq("league_id", params.leagueId)
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(data);
 }
 
@@ -39,6 +42,10 @@ export async function PUT(req: Request, { params }: { params: { leagueId: string
   const formData = await req.formData();
   const file = formData.get("file") as File;
   if (!file) return NextResponse.json({ error: "No file" }, { status: 400 });
+
+  if (file.size > MAX_LOGO_BYTES) {
+    return NextResponse.json({ error: "File too large (max 5MB)" }, { status: 400 });
+  }
 
   const ext = file.name.split(".").pop();
   const path = `${params.franchiseId}/logo.${ext}`;
@@ -63,9 +70,11 @@ export async function PUT(req: Request, { params }: { params: { leagueId: string
     .from("franchises")
     .update({ logo_url: publicUrl })
     .eq("id", params.franchiseId)
+    .eq("league_id", params.leagueId)
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(data);
 }
