@@ -1,5 +1,6 @@
 import NextAuth from "next-auth";
 import DiscordProvider from "next-auth/providers/discord";
+import { supabase } from "@/lib/supabase";
 
 const handler = NextAuth({
   providers: [
@@ -15,10 +16,22 @@ const handler = NextAuth({
   callbacks: {
     async jwt({ token, account, profile }) {
       if (account && profile) {
-        token.discordId = (profile as any).id;
-        token.username = (profile as any).username;
-        token.avatar = (profile as any).avatar;
-        token.discriminator = (profile as any).discriminator;
+        const p = profile as any;
+        token.discordId = p.id;
+        token.username = p.username;
+        token.avatar = p.avatar;
+        token.discriminator = p.discriminator;
+
+        // Upsert user into TOPS Supabase
+        await supabase.from("users").upsert(
+          {
+            discord_id: p.id,
+            username: p.username,
+            avatar: p.avatar,
+            email: p.email,
+          },
+          { onConflict: "discord_id" }
+        );
       }
       return token;
     },
