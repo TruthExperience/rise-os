@@ -22,6 +22,10 @@ export async function POST(req: Request, { params }: { params: { leagueId: strin
   const body = await req.json();
   const { name, abbreviation, primary_color, secondary_color } = body;
 
+  if (!name || typeof name !== "string") {
+    return NextResponse.json({ error: "name is required" }, { status: 400 });
+  }
+
   const { data, error } = await supabaseAdmin
     .from("franchises")
     .insert({ name, abbreviation, primary_color, secondary_color, league_id: params.leagueId })
