@@ -3,7 +3,6 @@
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
 
 const SPORTS = [
   { id: "cfb", label: "College Football", emoji: "🏈" },
@@ -16,7 +15,7 @@ const SPORTS = [
 ];
 
 export default function LeaguePage() {
-  const { data: session, status } = useSession();
+  const { status } = useSession();
   const router = useRouter();
   const [leagues, setLeagues] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
@@ -37,31 +36,20 @@ export default function LeaguePage() {
 
   async function fetchLeagues() {
     setLoading(true);
-    const { data } = await supabase
-      .schema("rise_os")
-      .from("leagues")
-      .select("*")
-      .order("created_at", { ascending: false });
-    setLeagues(data || []);
+    const res = await fetch("/api/leagues");
+    const data = await res.json();
+    setLeagues(Array.isArray(data) ? data : []);
     setLoading(false);
   }
 
   async function createLeague() {
     if (!form.name || !form.sport) return;
-    const slug = form.name
-      .toLowerCase()
-      .replace(/\s+/g, "-")
-      .replace(/[^a-z0-9-]/g, "");
-    const { error } = await supabase
-      .schema("rise_os")
-      .from("leagues")
-      .insert({
-        name: form.name,
-        sport: form.sport,
-        slug,
-        is_public: form.is_public,
-      });
-    if (!error) {
+    const res = await fetch("/api/leagues", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form),
+    });
+    if (res.ok) {
       setCreating(false);
       setForm({ name: "", sport: "", is_public: true });
       fetchLeagues();
@@ -98,7 +86,6 @@ export default function LeaguePage() {
           <div className="w-full rounded-2xl border border-white/10 bg-[#111111] p-6">
             <h2 className="text-lg font-black text-white mb-6">Create League</h2>
 
-            {/* Name */}
             <div className="mb-4">
               <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
                 League Name
@@ -112,7 +99,6 @@ export default function LeaguePage() {
               />
             </div>
 
-            {/* Sport */}
             <div className="mb-4">
               <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
                 Sport
@@ -134,7 +120,6 @@ export default function LeaguePage() {
               </div>
             </div>
 
-            {/* Visibility */}
             <div className="mb-6 flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-4 py-3">
               <span className="text-sm text-white">Public League</span>
               <button
@@ -151,7 +136,6 @@ export default function LeaguePage() {
               </button>
             </div>
 
-            {/* Actions */}
             <div className="flex gap-3">
               <button
                 onClick={() => setCreating(false)}
