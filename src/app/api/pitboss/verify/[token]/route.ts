@@ -17,7 +17,7 @@ export async function GET(
   const { data: cert, error } = await supabase
     .schema('pitboss')
     .from('certifications')
-    .select('*, drivers(display_name, discord_username), leagues:rise_os.leagues(name, slug)')
+    .select('*, drivers(display_name, discord_username), leagues:league_id(name, slug)')
     .eq('token', token)
     .single()
 
