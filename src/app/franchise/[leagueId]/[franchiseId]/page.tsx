@@ -11,6 +11,7 @@ export default function FranchiseDetailPage() {
   const [franchise, setFranchise] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -37,6 +38,7 @@ export default function FranchiseDetailPage() {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploading(true);
+    setUploadError(null);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -47,9 +49,13 @@ export default function FranchiseDetailPage() {
       if (res.ok) {
         const updated = await res.json();
         setFranchise((prev: any) => ({ ...prev, logo_url: updated.logo_url }));
+      } else {
+        const body = await res.json().catch(() => null);
+        setUploadError(body?.error ?? "Upload failed. Please try again.");
       }
     } catch (e) {
       console.error(e);
+      setUploadError("Upload failed. Please try again.");
     } finally {
       setUploading(false);
     }
@@ -98,13 +104,16 @@ export default function FranchiseDetailPage() {
         <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif"
           className="hidden" onChange={handleLogoUpload} />
 
+        {uploadError && (
+          <p className="text-rise-red text-xs mb-2">{uploadError}</p>
+        )}
+
         <h1 className="text-2xl font-black text-white text-center">{franchise.name}</h1>
         {franchise.abbreviation && (
           <p className="text-white/30 text-xs uppercase tracking-widest mt-1">{franchise.abbreviation}</p>
         )}
       </div>
 
-      {/* Color swatches */}
       <div className="flex gap-3 mb-6 justify-center">
         {franchise.primary_color && (
           <div className="flex items-center gap-2">
