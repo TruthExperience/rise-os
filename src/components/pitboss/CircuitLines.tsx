@@ -7,7 +7,7 @@ interface CircuitLinesProps {
 export default function CircuitLines({
   className = "",
   animated = true,
-  opacity = 0.15,
+  opacity = 0.12,
 }: CircuitLinesProps) {
   return (
     <svg
@@ -20,8 +20,8 @@ export default function CircuitLines({
     >
       <defs>
         <linearGradient id="circuit-fade" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#fbbf24" stopOpacity="0.6" />
-          <stop offset="100%" stopColor="#fbbf24" stopOpacity="0" />
+          <stop offset="0%" stopColor="#E8E020" stopOpacity="0.6" />
+          <stop offset="100%" stopColor="#E8E020" stopOpacity="0" />
         </linearGradient>
       </defs>
 
@@ -54,12 +54,11 @@ export default function CircuitLines({
         </path>
       ))}
 
-      {/* Junction nodes */}
       {[
         [220, 80], [460, 80], [380, 200], [420, 200],
         [300, 340], [540, 340], [220, 460], [420, 460],
       ].map(([cx, cy], i) => (
-        <circle key={i} cx={cx} cy={cy} r="3" fill="#fbbf24" fillOpacity="0.5" />
+        <circle key={i} cx={cx} cy={cy} r="3" fill="#E8E020" fillOpacity="0.5" />
       ))}
     </svg>
   );
