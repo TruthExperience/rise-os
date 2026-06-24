@@ -58,7 +58,10 @@ export default function BottomNav() {
     <nav className="fixed bottom-0 left-0 right-0 z-50 bg-[#111111] border-t border-white/10 pb-safe">
       <div className="flex items-center justify-around px-2 h-16">
         {navItems.map((item) => {
-          const active = pathname === item.href;
+          const active =
+            item.href === "/dashboard"
+              ? pathname === "/dashboard"
+              : pathname.startsWith(item.href);
           return (
             <Link
               key={item.href}
