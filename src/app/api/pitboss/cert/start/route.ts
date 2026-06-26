@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { createClient } from '@supabase/supabase-js'
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
 
 const PASS_MARKS: Record<string, number> = {
   trl: 95,
@@ -15,12 +22,16 @@ function shuffle<T>(arr: T[]): T[] {
   return a
 }
 
-// ─── POST /api/pitboss/cert/start ─────────────────────────────────────────────
-// Body: { league_id: string }
-// Returns: certification_id, started_at, pass_mark, questions (no correct_answer)
-// Server owns started_at — client timer is display only.
 export async function POST(req: NextRequest) {
-  const supabase = await createClient()
+  const session = await getServerSession(authOptions)
+  if (!session?.user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const discordId = (session.user as any).discordId
+  if (!discordId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
   let body: { league_id: string }
   try {
@@ -33,18 +44,6 @@ export async function POST(req: NextRequest) {
   if (!league_id) {
     return NextResponse.json({ error: 'league_id is required' }, { status: 400 })
   }
-
-  // ── Resolve driver from session ──────────────────────────────────────────────
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser()
-
-  if (authError || !user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const discordId = user.user_metadata?.provider_id ?? user.user_metadata?.sub ?? ''
 
   const { data: driver, error: driverError } = await supabase
     .schema('pitboss')
@@ -67,7 +66,6 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // ── Resolve league ───────────────────────────────────────────────────────────
   const { data: league, error: leagueError } = await supabase
     .schema('rise_os')
     .from('leagues')
@@ -83,7 +81,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'League not found' }, { status: 404 })
   }
 
-  // ── Lockout / duplicate checks ───────────────────────────────────────────────
   const now = new Date()
 
   const { data: latest } = await supabase
@@ -118,7 +115,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── Fetch questions ──────────────────────────────────────────────────────────
   const { data: questions, error: questionsError } = await supabase
     .schema('pitboss')
     .from('questions')
@@ -134,7 +130,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No questions available for this league' }, { status: 422 })
   }
 
-  // ── Create certification row ─────────────────────────────────────────────────
   const passMark = PASS_MARKS[league.slug] ?? 90
   const attemptNumber = latest ? latest.attempt_number + 1 : 1
 
@@ -157,12 +152,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to start certification' }, { status: 500 })
   }
 
-  // ── Strip correct_answer, shuffle both questions and each option set ─────────
   const sanitized = shuffle(questions).map((q) => ({
     id:         q.id,
     category:   q.category,
     question:   q.question,
-    options:    shuffle(q.options as string[]),
+    options:    shuffle(Object.values(q.options as Record<string, string>)),
     difficulty: q.difficulty,
   }))
 
