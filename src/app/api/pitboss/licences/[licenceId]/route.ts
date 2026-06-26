@@ -68,3 +68,51 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   return NextResponse.json({ data })
 }
+
+export async function DELETE(_req: NextRequest, { params }: Params) {
+  const { licenceId } = await params
+  const supabase = await createClient()
+
+  // Look up the licence first so we know which league to check the role against
+  const { data: existing, error: fetchError } = await supabase
+    .schema('pitboss')
+    .from('licences')
+    .select('id, league_id')
+    .eq('id', licenceId)
+    .maybeSingle()
+
+  if (fetchError) {
+    console.error('[DELETE /api/pitboss/licences/[licenceId]]', fetchError)
+    return NextResponse.json({ error: fetchError.message }, { status: 500 })
+  }
+  if (!existing) return NextResponse.json({ error: 'Licence not found' }, { status: 404 })
+
+  // Commissioner-only: caller must hold a commissioner role in this licence's league
+  const { data: isCommissioner, error: roleError } = await supabase
+    .schema('pitboss')
+    .rpc('has_league_role', { league: existing.league_id, min_role: 'commissioner' })
+
+  if (roleError) {
+    console.error('[DELETE /api/pitboss/licences/[licenceId]] role check', roleError)
+    return NextResponse.json({ error: 'Failed to verify permissions' }, { status: 500 })
+  }
+  if (!isCommissioner) {
+    return NextResponse.json({ error: 'Commissioner role required' }, { status: 403 })
+  }
+
+  const { data, error } = await supabase
+    .schema('pitboss')
+    .from('licences')
+    .delete()
+    .eq('id', licenceId)
+    .select(SELECT)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[DELETE /api/pitboss/licences/[licenceId]]', error)
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+  if (!data) return NextResponse.json({ error: 'Licence not found' }, { status: 404 })
+
+  return NextResponse.json({ data })
+}
