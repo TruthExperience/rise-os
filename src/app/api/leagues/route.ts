@@ -3,12 +3,12 @@ import { NextResponse } from "next/server";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { db: { schema: "rise_os" } }
-);
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
 
 export async function GET() {
   const { data, error } = await supabaseAdmin
+    .schema('rise_os')
     .from("leagues")
     .select("*")
     .order("created_at", { ascending: false });
@@ -27,6 +27,7 @@ export async function POST(req: Request) {
     .replace(/[^a-z0-9-]/g, "");
 
   const { data, error } = await supabaseAdmin
+    .schema('rise_os')
     .from("leagues")
     .insert({ name, sport, slug, is_public })
     .select()
