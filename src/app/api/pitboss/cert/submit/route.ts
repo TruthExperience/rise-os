@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { createClient } from '@supabase/supabase-js'
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
 
 const LOCKOUT_HOURS: Record<number, number> = {
   1: 24,
@@ -8,24 +15,16 @@ const LOCKOUT_HOURS: Record<number, number> = {
 }
 const DEFAULT_LOCKOUT_HOURS = 72
 
-// ─── POST /api/pitboss/cert/submit ────────────────────────────────────────────
-// Body: { certification_id: string, answers: Record<question_id, selected_option> }
-// Returns: status, score, pass_mark, passed, correct_count, total_questions,
-//          locked_until (if failed), breakdown (per-question result)
 export async function POST(req: NextRequest) {
-  const supabase = await createClient()
-
-  // ── Auth ─────────────────────────────────────────────────────────────────────
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser()
-
-  if (authError || !user) {
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  const session = await getServerSession(authOptions)
+  if (!session?.user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-
-  const discordId = user.user_metadata?.provider_id ?? user.user_metadata?.sub ?? ''
+  const discordId = (session.user as any).discordId
+  if (!discordId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
   const { data: driver, error: driverError } = await supabase
     .schema('pitboss')
@@ -42,7 +41,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
   }
 
-  // ── Parse body ───────────────────────────────────────────────────────────────
+  // ── Parse body ──────────────────────────────────────────────────────────────
   let body: { certification_id: string; answers: Record<string, string> }
   try {
     body = await req.json()
@@ -62,7 +61,7 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // ── Load certification ────────────────────────────────────────────────────────
+  // ── Load certification ──────────────────────────────────────────────────────
   const { data: cert, error: certError } = await supabase
     .schema('pitboss')
     .from('certifications')
@@ -85,7 +84,7 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // ── Load questions with correct_answer (server-only) ─────────────────────────
+  // ── Load questions with correct_answer (server-only) ────────────────────────
   const { data: questions, error: questionsError } = await supabase
     .schema('pitboss')
     .from('questions')
@@ -101,7 +100,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No questions found for this certification' }, { status: 422 })
   }
 
-  // ── Grade ─────────────────────────────────────────────────────────────────────
+  // ── Grade ───────────────────────────────────────────────────────────────────
   const breakdown = questions.map((q) => {
     const selected = answers[q.id] ?? null
     const correct  = selected === q.correct_answer
@@ -120,15 +119,15 @@ export async function POST(req: NextRequest) {
   const passed         = score >= Number(cert.pass_mark)
   const now            = new Date()
 
-  // ── Lockout if failed ─────────────────────────────────────────────────────────
+  // ── Lockout if failed ───────────────────────────────────────────────────────
   let lockedUntil: string | null = null
   if (!passed) {
-    const hours   = LOCKOUT_HOURS[cert.attempt_number] ?? DEFAULT_LOCKOUT_HOURS
+    const hours    = LOCKOUT_HOURS[cert.attempt_number] ?? DEFAULT_LOCKOUT_HOURS
     const lockDate = new Date(now.getTime() + hours * 60 * 60 * 1000)
-    lockedUntil   = lockDate.toISOString()
+    lockedUntil    = lockDate.toISOString()
   }
 
-  // ── Update certification row ──────────────────────────────────────────────────
+  // ── Update certification row ────────────────────────────────────────────────
   const { error: updateError } = await supabase
     .schema('pitboss')
     .from('certifications')
@@ -145,7 +144,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to save certification result' }, { status: 500 })
   }
 
-  // ── On pass: update driver_leagues + auto-issue licence ──────────────────────
+  // ── On pass: update driver_leagues + auto-issue licence ────────────────────
   if (passed) {
     const { error: dlError } = await supabase
       .schema('pitboss')
