@@ -1,37 +1,98 @@
+// src/app/api/pitboss/admin/rulebook/upload/route.ts
+// POST /api/pitboss/admin/rulebook/upload
+// Uploads a rulebook PDF to storage, extracts text, calls Anthropic to generate
+// exam questions, and inserts them into pitboss.questions.
+
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
-import { createClient } from '@supabase/supabase-js'
+import { createClient } from '@/lib/supabase/server'
 import Anthropic from '@anthropic-ai/sdk'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+})
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
+// ── Inline PDF text extraction (no pdf-parse dep needed) ─────────────────────
+function extractTextFromPDF(buffer: Buffer): string {
+  const str = buffer.toString('latin1')
+  const textChunks: string[] = []
 
+  const btEtRegex = /BT([\s\S]*?)ET/g
+  let match: RegExpExecArray | null
+
+  while ((match = btEtRegex.exec(str)) !== null) {
+    const block = match[1]
+    const strRegex = /\(([^)\\]*(?:\\.[^)\\]*)*)\)|<([0-9A-Fa-f]+)>/g
+    let strMatch: RegExpExecArray | null
+
+    while ((strMatch = strRegex.exec(block)) !== null) {
+      if (strMatch[1] !== undefined) {
+        const text = strMatch[1]
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\\(/g, '(')
+          .replace(/\\\)/g, ')')
+          .replace(/\\\\/g, '\\')
+          .replace(/\\(\d{3})/g, (_, oct) =>
+            String.fromCharCode(parseInt(oct, 8))
+          )
+        if (text.trim()) textChunks.push(text)
+      } else if (strMatch[2] !== undefined) {
+        const hex = strMatch[2]
+        let decoded = ''
+        for (let i = 0; i < hex.length; i += 2) {
+          const code = parseInt(hex.slice(i, i + 2), 16)
+          if (code > 31) decoded += String.fromCharCode(code)
+        }
+        if (decoded.trim()) textChunks.push(decoded)
+      }
+    }
+  }
+
+  return textChunks.join(' ').replace(/\s+/g, ' ').trim()
+}
+
+// ── Question generation prompt ────────────────────────────────────────────────
+function buildPrompt(leagueName: string, ruleText: string): string {
+  return `You are an expert exam question writer for competitive sim racing leagues.
+
+You have been given the official rulebook for the ${leagueName} league. Generate exactly 20 multiple-choice exam questions that test drivers' knowledge of the rules.
+
+REQUIREMENTS:
+- Each question must have exactly 4 options
+- Questions must cover a range of difficulty: ~6 easy, ~9 medium, ~5 hard
+- Questions must cover different categories from the rulebook (racing rules, penalties, governance, attendance, etc.)
+- The correct answer must be unambiguously correct based on the rulebook text
+- Options should be plausible — avoid obviously wrong distractors
+- Do NOT include question numbers in the question text
+
+RULEBOOK TEXT:
+${ruleText.slice(0, 12000)}
+
+Respond ONLY with a valid JSON array. No preamble, no markdown, no explanation. Format:
+[
+  {
+    "category": "string (e.g. Racing Rules, Penalties, Governance)",
+    "difficulty": "easy" | "medium" | "hard",
+    "question": "string",
+    "options": ["option text A", "option text B", "option text C", "option text D"],
+    "correct_answer": "exact text of the correct option (must match one of the options exactly)"
+  }
+]`
+}
+
+// ─── POST handler ─────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions)
-  if (!session?.user) {
+  const supabase = await createClient()
+
+  // ── Auth: must be commissioner ────────────────────────────────────────────
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  if (authError || !user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-  const discordId = (session.user as any).discordId
-  if (!discordId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
 
-  // ── Parse form data ──────────────────────────────────────────────────────────
-  const formData  = await req.formData()
-  const file      = formData.get('file') as File | null
-  const leagueId  = formData.get('league_id') as string | null
-  const version   = formData.get('version') as string | null
+  const discordId = user.user_metadata?.provider_id ?? user.user_metadata?.sub ?? ''
 
-  if (!file || !leagueId || !version) {
-    return NextResponse.json({ error: 'file, league_id, and version are required' }, { status: 400 })
-  }
-
-  // ── Auth: commissioner or owner only ────────────────────────────────────────
   const { data: driver } = await supabase
     .schema('pitboss')
     .from('drivers')
@@ -43,224 +104,185 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
   }
 
+  // ── Parse multipart form ──────────────────────────────────────────────────
+  let formData: FormData
+  try {
+    formData = await req.formData()
+  } catch {
+    return NextResponse.json({ error: 'Invalid form data' }, { status: 400 })
+  }
+
+  const file      = formData.get('file') as File | null
+  const league_id = formData.get('league_id') as string | null
+  const version   = (formData.get('version') as string | null) ?? '1.0'
+
+  if (!file || !league_id) {
+    return NextResponse.json(
+      { error: 'file and league_id are required' },
+      { status: 400 }
+    )
+  }
+
+  if (file.type !== 'application/pdf') {
+    return NextResponse.json({ error: 'Only PDF files are accepted' }, { status: 415 })
+  }
+
+  // ── Resolve league ────────────────────────────────────────────────────────
+  const { data: league, error: leagueError } = await supabase
+    .schema('rise_os')
+    .from('leagues')
+    .select('id, name, slug')
+    .eq('id', league_id)
+    .maybeSingle()
+
+  if (leagueError || !league) {
+    return NextResponse.json({ error: 'League not found' }, { status: 404 })
+  }
+
+  // ── Verify commissioner membership ────────────────────────────────────────
   const { data: membership } = await supabase
     .schema('pitboss')
     .from('driver_leagues')
     .select('role')
     .eq('driver_id', driver.id)
-    .eq('league_id', leagueId)
+    .eq('league_id', league_id)
     .maybeSingle()
 
-  if (!membership || !['commissioner', 'owner'].includes(membership.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  if (!membership || membership.role !== 'commissioner') {
+    return NextResponse.json(
+      { error: 'Only commissioners can upload rulebooks' },
+      { status: 403 }
+    )
   }
 
-  // ── Upload to Supabase Storage ───────────────────────────────────────────────
-  const bytes       = await file.arrayBuffer()
-  const buffer      = Buffer.from(bytes)
-  const storagePath = `${leagueId}/${Date.now()}-${file.name}`
+  // ── Upload PDF to storage ─────────────────────────────────────────────────
+  const arrayBuffer = await file.arrayBuffer()
+  const buffer      = Buffer.from(arrayBuffer)
+  const filename    = `${league.slug}/rulebook_v${version}_${Date.now()}.pdf`
 
   const { error: uploadError } = await supabase.storage
     .from('rule-documents')
-    .upload(storagePath, buffer, { contentType: file.type, upsert: false })
+    .upload(filename, buffer, {
+      contentType:  'application/pdf',
+      cacheControl: '3600',
+      upsert:       false,
+    })
 
   if (uploadError) {
+    console.error('[rulebook/upload] storage upload', uploadError)
     return NextResponse.json({ error: uploadError.message }, { status: 500 })
   }
 
-  // ── Send PDF to Claude for analysis ─────────────────────────────────────────
-  const base64 = buffer.toString('base64')
+  const { data: publicUrlData } = supabase.storage
+    .from('rule-documents')
+    .getPublicUrl(filename)
 
-  const aiResponse = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4000,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-          },
-          {
-            type: 'text',
-            text: `You are building a certification exam system for a motorsport league management platform.
-
-Analyze this rulebook document and return a JSON object with this exact structure (no markdown, no preamble, raw JSON only):
-
-{
-  "document_code": "short uppercase code e.g. TRL-USC",
-  "title": "full document title",
-  "role_code": "one of: DRV (driver), STW (steward), CMR (commissioner), TP (team principal), OWN (owner), ADM (admin) — pick the role this document primarily governs",
-  "role_rationale": "one sentence explaining why you picked this role",
-  "questions": [
-    {
-      "category": "category name e.g. Sporting, Financial, Governance",
-      "question": "question text",
-      "options": { "A": "...", "B": "...", "C": "...", "D": "..." },
-      "correct_answer": "A",
-      "explanation": "why this is correct",
-      "difficulty": "easy|medium|hard"
-    }
-  ]
-}
-
-Generate 20-30 questions that thoroughly test knowledge of this document. Questions should be specific to the rules and regulations in this document, not generic. Cover a range of difficulties. Do not expose correct answers in the question or options text.`,
-          },
-        ],
-      },
-    ],
-  })
-
-  let parsed: {
-    document_code: string
-    title: string
-    role_code: string
-    role_rationale: string
-    questions: {
-      category: string
-      question: string
-      options: Record<string, string>
-      correct_answer: string
-      explanation: string
-      difficulty: string
-    }[]
+  // ── Extract text from PDF buffer ──────────────────────────────────────────
+  let ruleText = ''
+  try {
+    ruleText = extractTextFromPDF(buffer)
+  } catch (err) {
+    console.error('[rulebook/upload] PDF extraction', err)
   }
 
+  if (ruleText.length < 200) {
+    return NextResponse.json(
+      {
+        error:
+          'Could not extract readable text from this PDF. ' +
+          'Please ensure the document is text-based (not scanned).',
+        storage_path: filename,
+        public_url:   publicUrlData?.publicUrl,
+      },
+      { status: 422 }
+    )
+  }
+
+  // ── Call Anthropic to generate questions ──────────────────────────────────
+  let generatedQuestions: Array<{
+    category:       string
+    difficulty:     string
+    question:       string
+    options:        string[]
+    correct_answer: string
+  }> = []
+
   try {
-    const text = aiResponse.content
+    const response = await anthropic.messages.create({
+      model:      'claude-sonnet-4-6',
+      max_tokens: 4096,
+      messages: [
+        {
+          role:    'user',
+          content: buildPrompt(league.name, ruleText),
+        },
+      ],
+    })
+
+    const raw = response.content
       .filter((b) => b.type === 'text')
-      .map((b) => (b as any).text)
+      .map((b) => (b as { type: 'text'; text: string }).text)
       .join('')
       .replace(/```json|```/g, '')
       .trim()
-    parsed = JSON.parse(text)
-  } catch {
-    return NextResponse.json({ error: 'Failed to parse AI response' }, { status: 500 })
-  }
 
-  // ── Upsert rule_books row ────────────────────────────────────────────────────
-  const { data: existing } = await supabase
-    .schema('pitboss')
-    .from('rule_books')
-    .select('id')
-    .eq('league_id', leagueId)
-    .eq('document_code', parsed.document_code)
-    .maybeSingle()
+    generatedQuestions = JSON.parse(raw)
 
-  let ruleBookId: string
-
-  if (existing) {
-    // Deactivate old questions for this rulebook
-    await supabase
-      .schema('pitboss')
-      .from('questions')
-      .update({ active: false })
-      .eq('rule_book_id', existing.id)
-
-    // Update rulebook version + storage path
-    await supabase
-      .schema('pitboss')
-      .from('rule_books')
-      .update({
-        version,
-        title:                  parsed.title,
-        status:                 'active',
-        document_path:          storagePath,
-        document_filename:      file.name,
-        document_size_bytes:    file.size,
-        document_mime_type:     file.type,
-        document_uploaded_at:   new Date().toISOString(),
-        updated_at:             new Date().toISOString(),
-      })
-      .eq('id', existing.id)
-
-    ruleBookId = existing.id
-  } else {
-    const { data: newBook, error: bookError } = await supabase
-      .schema('pitboss')
-      .from('rule_books')
-      .insert({
-        league_id:              leagueId,
-        document_code:          parsed.document_code,
-        title:                  parsed.title,
-        version,
-        status:                 'active',
-        authority_level:        5,
-        document_path:          storagePath,
-        document_filename:      file.name,
-        document_size_bytes:    file.size,
-        document_mime_type:     file.type,
-        document_uploaded_at:   new Date().toISOString(),
-      })
-      .select('id')
-      .single()
-
-    if (bookError || !newBook) {
-      return NextResponse.json({ error: 'Failed to create rulebook record' }, { status: 500 })
+    if (!Array.isArray(generatedQuestions)) {
+      throw new Error('Response is not an array')
     }
-
-    ruleBookId = newBook.id
+  } catch (err) {
+    console.error('[rulebook/upload] AI generation', err)
+    return NextResponse.json(
+      {
+        error:        'Failed to generate questions from rulebook',
+        storage_path: filename,
+        public_url:   publicUrlData?.publicUrl,
+      },
+      { status: 500 }
+    )
   }
 
-  // ── Upsert role_requirements ─────────────────────────────────────────────────
-  const { data: existingReq } = await supabase
-    .schema('pitboss')
-    .from('role_requirements')
-    .select('id')
-    .eq('league_id', leagueId)
-    .eq('role_code', parsed.role_code)
-    .maybeSingle()
+  // ── Validate and insert questions ─────────────────────────────────────────
+  const validDifficulties = ['easy', 'medium', 'hard']
+  const toInsert = generatedQuestions
+    .filter(
+      (q) =>
+        q.question &&
+        Array.isArray(q.options) &&
+        q.options.length === 4 &&
+        q.correct_answer &&
+        q.options.includes(q.correct_answer) &&
+        validDifficulties.includes(q.difficulty)
+    )
+    .map((q) => ({
+      league_id,
+      category:       q.category || 'General',
+      difficulty:     q.difficulty,
+      question:       q.question,
+      options:        q.options,
+      correct_answer: q.correct_answer,
+      active:         true,
+    }))
 
-  if (!existingReq) {
-    await supabase
-      .schema('pitboss')
-      .from('role_requirements')
-      .insert({
-        league_id:      leagueId,
-        role_code:      parsed.role_code,
-        question_count: parsed.questions.length,
-        pass_mark:      95,
-      })
-  } else {
-    await supabase
-      .schema('pitboss')
-      .from('role_requirements')
-      .update({ question_count: parsed.questions.length })
-      .eq('id', existingReq.id)
-  }
-
-  // ── Insert new questions ─────────────────────────────────────────────────────
-  const questionsToInsert = parsed.questions.map((q) => ({
-    league_id:    leagueId,
-    rule_book_id: ruleBookId,
-    role_code:    parsed.role_code,
-    category:     q.category,
-    question:     q.question,
-    options:      q.options,
-    correct_answer: q.correct_answer,
-    explanation:  q.explanation,
-    difficulty:   q.difficulty,
-    active:       true,
-    generated_by: 'claude',
-  }))
-
-  const { error: questionsError } = await supabase
+  const { data: inserted, error: insertError } = await supabase
     .schema('pitboss')
     .from('questions')
-    .insert(questionsToInsert)
+    .insert(toInsert)
+    .select('id')
 
-  if (questionsError) {
-    return NextResponse.json({ error: questionsError.message }, { status: 500 })
+  if (insertError) {
+    console.error('[rulebook/upload] questions insert', insertError)
+    return NextResponse.json({ error: insertError.message }, { status: 500 })
   }
 
   return NextResponse.json({
-    success:        true,
-    document_code:  parsed.document_code,
-    title:          parsed.title,
-    role_code:      parsed.role_code,
-    role_rationale: parsed.role_rationale,
-    questions_generated: parsed.questions.length,
-    rule_book_id:   ruleBookId,
-  })
+    success:             true,
+    storage_path:        filename,
+    public_url:          publicUrlData?.publicUrl,
+    text_length:         ruleText.length,
+    questions_generated: generatedQuestions.length,
+    questions_inserted:  inserted?.length ?? 0,
+    skipped:             generatedQuestions.length - (inserted?.length ?? 0),
+  }, { status: 201 })
 }
