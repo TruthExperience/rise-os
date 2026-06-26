@@ -1,61 +1,65 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// src/app/api/pitboss/cert/status/route.ts
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const supabase = await createClient()
 
-  const leagueId = req.nextUrl.searchParams.get("league_id");
+  const leagueId = req.nextUrl.searchParams.get('league_id')
   if (!leagueId) {
-    return NextResponse.json({ error: "league_id required" }, { status: 400 });
+    return NextResponse.json({ error: 'league_id required' }, { status: 400 })
   }
 
-  // Get driver record
+  // ── Auth — same pattern as cert/start and cert/submit ─────────────────────
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser()
+
+  if (authError || !user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const discordId = user.user_metadata?.provider_id ?? user.user_metadata?.sub ?? ''
+
+  // ── Driver lookup ──────────────────────────────────────────────────────────
   const { data: driver } = await supabase
-    .from("drivers")
-    .select("id, discord_id")
-    .schema("pitboss")
-    .eq("discord_id", session.user.id)
-    .maybeSingle();
+    .schema('pitboss')
+    .from('drivers')
+    .select('id')
+    .eq('discord_id', discordId)
+    .maybeSingle()
 
   if (!driver) {
     return NextResponse.json({
       status: null,
       locked_until: null,
       certification_id: null,
-    });
+      is_commissioner: false,
+    })
   }
 
-  // Check if commissioner — commissioners bypass all lockouts
+  // ── Commissioner check ─────────────────────────────────────────────────────
   const { data: membership } = await supabase
-    .from("driver_leagues")
-    .select("role")
-    .schema("pitboss")
-    .eq("driver_id", driver.id)
-    .eq("league_id", leagueId)
-    .maybeSingle();
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('role')
+    .eq('driver_id', driver.id)
+    .eq('league_id', leagueId)
+    .maybeSingle()
 
-  const isCommissioner = membership?.role === "commissioner";
+  const isCommissioner = membership?.role === 'commissioner'
 
-  // Get latest certification attempt
+  // ── Latest certification attempt ───────────────────────────────────────────
   const { data: cert } = await supabase
-    .from("certifications")
-    .select("id, status, locked_until, attempt_number")
-    .schema("pitboss")
-    .eq("driver_id", driver.id)
-    .eq("league_id", leagueId)
-    .order("created_at", { ascending: false })
+    .schema('pitboss')
+    .from('certifications')
+    .select('id, status, locked_until, attempt_number')
+    .eq('driver_id', driver.id)
+    .eq('league_id', leagueId)
+    .order('created_at', { ascending: false })
     .limit(1)
-    .maybeSingle();
+    .maybeSingle()
 
   if (!cert) {
     return NextResponse.json({
@@ -63,23 +67,23 @@ export async function GET(req: NextRequest) {
       locked_until: null,
       certification_id: null,
       is_commissioner: isCommissioner,
-    });
+    })
   }
 
-  // Commissioner lockout bypass — if locked, clear it
-  if (isCommissioner && cert.status === "failed" && cert.locked_until) {
+  // ── Commissioner lockout bypass ────────────────────────────────────────────
+  if (isCommissioner && cert.status === 'failed' && cert.locked_until) {
     await supabase
-      .from("certifications")
+      .schema('pitboss')
+      .from('certifications')
       .update({ locked_until: null })
-      .schema("pitboss")
-      .eq("id", cert.id);
+      .eq('id', cert.id)
 
     return NextResponse.json({
-      status: null, // treat as fresh attempt
+      status: null,
       locked_until: null,
       certification_id: null,
       is_commissioner: true,
-    });
+    })
   }
 
   return NextResponse.json({
@@ -87,5 +91,5 @@ export async function GET(req: NextRequest) {
     locked_until: cert.locked_until,
     certification_id: cert.id,
     is_commissioner: isCommissioner,
-  });
+  })
 }
