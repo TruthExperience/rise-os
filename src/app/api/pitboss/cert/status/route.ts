@@ -1,28 +1,30 @@
 // src/app/api/pitboss/cert/status/route.ts
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { createClient } from '@supabase/supabase-js'
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
 
 export async function GET(req: NextRequest) {
-  const supabase = await createClient()
+  const session = await getServerSession(authOptions)
+  if (!session?.user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const discordId = (session.user as any).discordId
+  if (!discordId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
   const leagueId = req.nextUrl.searchParams.get('league_id')
   if (!leagueId) {
     return NextResponse.json({ error: 'league_id required' }, { status: 400 })
   }
 
-  // ── Auth — same pattern as cert/start and cert/submit ─────────────────────
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser()
-
-  if (authError || !user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const discordId = user.user_metadata?.provider_id ?? user.user_metadata?.sub ?? ''
-
-  // ── Driver lookup ──────────────────────────────────────────────────────────
   const { data: driver } = await supabase
     .schema('pitboss')
     .from('drivers')
@@ -39,7 +41,6 @@ export async function GET(req: NextRequest) {
     })
   }
 
-  // ── Commissioner check ─────────────────────────────────────────────────────
   const { data: membership } = await supabase
     .schema('pitboss')
     .from('driver_leagues')
@@ -50,7 +51,6 @@ export async function GET(req: NextRequest) {
 
   const isCommissioner = membership?.role === 'commissioner'
 
-  // ── Latest certification attempt ───────────────────────────────────────────
   const { data: cert } = await supabase
     .schema('pitboss')
     .from('certifications')
@@ -70,7 +70,6 @@ export async function GET(req: NextRequest) {
     })
   }
 
-  // ── Commissioner lockout bypass ────────────────────────────────────────────
   if (isCommissioner && cert.status === 'failed' && cert.locked_until) {
     await supabase
       .schema('pitboss')
