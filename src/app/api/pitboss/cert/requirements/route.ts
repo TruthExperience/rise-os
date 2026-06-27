@@ -17,6 +17,8 @@ export async function GET(req: NextRequest) {
       pass_mark,
       question_count,
       role_code,
+      role_name,
+      description,
       league_id,
       league:league_id ( id, name, slug )
     `)
