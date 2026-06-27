@@ -10,6 +10,10 @@ export const metadata: Metadata = {
   title: "Rise OS",
   description: "Sports Dynasty Governance Layer",
   manifest: "/manifest.json",
+  icons: {
+    icon: "/favicon.ico",
+    apple: "/icons/icon-192x192.png",
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -42,6 +46,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
+        <link rel="icon" href="/favicon.ico" sizes="any" />
         <link rel="apple-touch-icon" href="/icons/icon-192x192.png" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta
