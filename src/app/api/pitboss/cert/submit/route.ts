@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
-import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/server'
 
 const CERT_WINDOW_MS = 60 * 60 * 1000
 const LOCKOUT_HOURS  = 24
 
 export async function POST(req: NextRequest) {
-  const supabase = await createClient()
+  const supabase = createAdminClient()
 
   const session = await getServerSession(authOptions)
   if (!session?.user) {
