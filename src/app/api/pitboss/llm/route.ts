@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { pbInfer, pbSteward } from '@/lib/pitboss-llm';
+import { pbInfer, pbSteward, type RuleArticle } from '@/lib/pitboss-llm';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -28,18 +28,18 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'incident required' }, { status: 400 });
       }
 
-      let regulations: { article_number: string; title: string; body: string }[] = [];
+      let regulations: RuleArticle[] = [];
 
       if (fetch_regulations && incident.incident_type) {
         const { data } = await supabase
           .schema('pitboss')
           .from('rule_articles')
-          .select('article_number, title, body, category')
+          .select('article_number, title, body, category, league_id, rule_book_id')
           .eq('active', true)
-          .or(`category.eq.sporting,category.eq.penalties,category.eq.governance`)
+          .or('category.eq.sporting,category.eq.penalties,category.eq.governance')
           .limit(10);
 
-        if (data) regulations = data;
+        if (data) regulations = data as RuleArticle[];
       }
 
       const result = await pbSteward(incident, regulations, league);
@@ -56,12 +56,12 @@ export async function POST(req: NextRequest) {
       const { data: articles } = await supabase
         .schema('pitboss')
         .from('rule_articles')
-        .select('article_number, title, body, chapter')
+        .select('article_number, title, body, category')
         .eq('active', true)
         .limit(30);
 
       const regsContext = articles
-        ? articles.map(a => `[${a.article_number}] ${a.title}: ${a.body}`).join('\n\n')
+        ? articles.map((a) => `[${a.article_number}] ${a.title}: ${a.body}`).join('\n\n')
         : 'No regulations available.';
 
       const result = await pbInfer({
@@ -94,10 +94,15 @@ Be concise and direct.`,
         .limit(20);
 
       if (!articles || articles.length === 0) {
-        return NextResponse.json({ error: 'No articles found for this rule book' }, { status: 404 });
+        return NextResponse.json(
+          { error: 'No articles found for this rule book' },
+          { status: 404 }
+        );
       }
 
-      const regsContext = articles.map(a => `[${a.article_number}] ${a.title}: ${a.body}`).join('\n\n');
+      const regsContext = articles
+        .map((a) => `[${a.article_number}] ${a.title}: ${a.body}`)
+        .join('\n\n');
 
       const result = await pbInfer({
         mode: 'certgen',
@@ -118,11 +123,14 @@ Format: [{ "question": "...", "options": { "A": "...", "B": "...", "C": "...", "
         questions = { raw: result.response, parse_error: true };
       }
 
-      return NextResponse.json({ questions, model: result.model, provider: result.provider });
+      return NextResponse.json({
+        questions,
+        model: result.model,
+        provider: result.provider,
+      });
     }
 
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
-
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Internal error';
     console.error('[pitboss/llm]', message);
