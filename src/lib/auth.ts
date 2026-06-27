@@ -1,55 +1,55 @@
-import { AuthOptions } from "next-auth";
-import DiscordProvider from "next-auth/providers/discord";
-import { createClient } from "@supabase/supabase-js";
+import { NextAuthOptions } from 'next-auth'
+import DiscordProvider from 'next-auth/providers/discord'
+import { createClient } from '@supabase/supabase-js'
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
-
-export const authOptions: AuthOptions = {
+export const authOptions: NextAuthOptions = {
   providers: [
     DiscordProvider({
-      clientId: process.env.DISCORD_CLIENT_ID!,
+      clientId:     process.env.DISCORD_CLIENT_ID!,
       clientSecret: process.env.DISCORD_CLIENT_SECRET!,
     }),
   ],
   secret: process.env.NEXTAUTH_SECRET,
   session: {
-    strategy: "jwt",
+    strategy: 'jwt',
   },
   callbacks: {
     async jwt({ token, account, profile }) {
       if (account && profile) {
-        const p = profile as any;
-        token.discordId = p.id;
-        token.username = p.username;
-        token.avatar = p.avatar;
-        token.discriminator = p.discriminator;
+        const p = profile as any
+        token.discordId     = p.id
+        token.username      = p.username
+        token.avatar        = p.avatar
+        token.discriminator = p.discriminator
 
-        await supabaseAdmin.from("users").upsert(
+        const supabaseAdmin = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_SERVICE_ROLE_KEY!
+        )
+
+        await supabaseAdmin.from('users').upsert(
           {
             discord_id: p.id,
-            username: p.username,
-            avatar: p.avatar,
-            email: p.email,
+            username:   p.username,
+            avatar:     p.avatar,
+            email:      p.email,
           },
-          { onConflict: "discord_id" }
-        );
+          { onConflict: 'discord_id' }
+        )
       }
-      return token;
+      return token
     },
     async session({ session, token }) {
       if (session.user) {
-        (session.user as any).discordId = token.discordId;
-        (session.user as any).username = token.username;
-        (session.user as any).avatar = token.avatar;
-        (session.user as any).discriminator = token.discriminator;
+        (session.user as any).discordId     = token.discordId
+        ;(session.user as any).username     = token.username
+        ;(session.user as any).avatar       = token.avatar
+        ;(session.user as any).discriminator = token.discriminator
       }
-      return session;
+      return session
     },
   },
   pages: {
-    signIn: "/login",
+    signIn: '/login',
   },
-};
+}
