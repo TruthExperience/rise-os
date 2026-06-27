@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -6,8 +6,10 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-export async function GET() {
-  const { data, error } = await supabase
+export async function GET(req: NextRequest) {
+  const leagueId = req.nextUrl.searchParams.get('league_id')
+
+  let query = supabase
     .schema('pitboss')
     .from('role_requirements')
     .select(`
@@ -16,9 +18,14 @@ export async function GET() {
       question_count,
       role_code,
       league_id,
-      leagues:rise_os.leagues!league_id ( id, name, slug )
+      league:league_id ( id, name, slug )
     `)
-    .eq('role_code', 'DRV')
+
+  if (leagueId) {
+    query = query.eq('league_id', leagueId)
+  }
+
+  const { data, error } = await query
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
