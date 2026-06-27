@@ -1,52 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
-import { createClient } from '@supabase/supabase-js'
+import { authOptions } from '@/app/api/auth/[...nextauth]/route'
+import { createClient } from '@/lib/supabase/server'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
-
-const LOCKOUT_HOURS: Record<number, number> = {
-  1: 24,
-  2: 48,
-  3: 72,
-}
-const DEFAULT_LOCKOUT_HOURS = 72
-
-const DRIVER_ROLE_CODES = new Set(['DRV'])
-
-const LICENCE_TITLES: Record<string, string> = {
-  DRV:  'Driver',
-  STW:  'Steward',
-  TP:   'Team Principal',
-  BSAC: 'BSAC Officer',
-  CRRB: 'CRRB Officer',
-  SLB:  'SLB Officer',
-  TWG:  'TWG Officer',
-  COM:  'Commissioner',
-}
+const CERT_WINDOW_MS = 60 * 60 * 1000
+const LOCKOUT_HOURS  = 24
 
 export async function POST(req: NextRequest) {
+  const supabase = await createClient()
+
   const session = await getServerSession(authOptions)
   if (!session?.user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-  const discordId = (session.user as any).discordId
+  const discordId = (session.user as any).discordId as string
   if (!discordId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return NextResponse.json({ error: 'Discord ID missing from session' }, { status: 401 })
   }
-
-  const { data: driver, error: driverError } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .maybeSingle()
-
-  if (driverError) return NextResponse.json({ error: driverError.message }, { status: 500 })
-  if (!driver) return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
 
   let body: { certification_id: string; answers: Record<string, string> }
   try {
@@ -56,28 +26,45 @@ export async function POST(req: NextRequest) {
   }
 
   const { certification_id, answers } = body
-
-  if (!certification_id) {
-    return NextResponse.json({ error: 'certification_id is required' }, { status: 400 })
-  }
-  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+  if (!certification_id || !answers || typeof answers !== 'object') {
     return NextResponse.json(
-      { error: 'answers must be an object mapping question_id to selected option' },
+      { error: 'certification_id and answers are required' },
       { status: 400 }
     )
   }
 
-  // ── Load certification (role_code lives on the row) ─────────────────────────
+  const { data: driver, error: driverError } = await supabase
+    .schema('pitboss')
+    .from('drivers')
+    .select('id')
+    .eq('discord_id', discordId)
+    .maybeSingle()
+
+  if (driverError) {
+    console.error('[cert/submit] driver lookup', driverError)
+    return NextResponse.json({ error: driverError.message }, { status: 500 })
+  }
+  if (!driver) {
+    return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
+  }
+
   const { data: cert, error: certError } = await supabase
     .schema('pitboss')
     .from('certifications')
-    .select('id, driver_id, league_id, role_code, status, pass_mark, started_at, attempt_number')
+    .select('id, driver_id, league_id, status, started_at, pass_mark, attempt_number')
     .eq('id', certification_id)
-    .eq('driver_id', driver.id)
     .maybeSingle()
 
-  if (certError) return NextResponse.json({ error: certError.message }, { status: 500 })
-  if (!cert) return NextResponse.json({ error: 'Certification not found' }, { status: 404 })
+  if (certError) {
+    console.error('[cert/submit] cert lookup', certError)
+    return NextResponse.json({ error: certError.message }, { status: 500 })
+  }
+  if (!cert) {
+    return NextResponse.json({ error: 'Certification not found' }, { status: 404 })
+  }
+  if (cert.driver_id !== driver.id) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
   if (cert.status !== 'in_progress') {
     return NextResponse.json(
       { error: `Certification is already ${cert.status}` },
@@ -85,116 +72,124 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const roleCode = cert.role_code ?? 'DRV'
+  const now     = new Date()
+  const elapsed = now.getTime() - new Date(cert.started_at).getTime()
 
-  // ── Load questions for this specific role only ───────────────────────────────
+  if (elapsed > CERT_WINDOW_MS) {
+    const lockedUntil = new Date(now.getTime() + LOCKOUT_HOURS * 60 * 60 * 1000)
+    await supabase
+      .schema('pitboss')
+      .from('certifications')
+      .update({ status: 'failed', score: 0, completed_at: now.toISOString(), locked_until: lockedUntil.toISOString() })
+      .eq('id', certification_id)
+    return NextResponse.json(
+      { error: 'Time expired — certification failed', locked_until: lockedUntil.toISOString() },
+      { status: 422 }
+    )
+  }
+
   const { data: questions, error: questionsError } = await supabase
     .schema('pitboss')
     .from('questions')
-    .select('id, correct_answer, explanation')
+    .select('id, correct_answer')
     .eq('league_id', cert.league_id)
-    .eq('role_code', roleCode)
     .eq('active', true)
 
-  if (questionsError) return NextResponse.json({ error: questionsError.message }, { status: 500 })
-  if (!questions || questions.length === 0) {
-    return NextResponse.json({ error: 'No questions found for this certification' }, { status: 422 })
+  if (questionsError || !questions) {
+    console.error('[cert/submit] questions fetch', questionsError)
+    return NextResponse.json({ error: 'Failed to fetch questions' }, { status: 500 })
   }
 
-  // ── Grade only questions that were in this exam ──────────────────────────────
-  const answeredIds = new Set(Object.keys(answers))
-  const questionsToGrade = questions.filter((q) => answeredIds.has(q.id))
-    .concat(questions.filter((q) => !answeredIds.has(q.id)))
-    .slice(0, questions.length)
+  const total   = questions.length
+  let   correct = 0
+  const breakdown: Record<string, { correct: boolean; correct_answer: string }> = {}
 
-  const breakdown = questions.map((q) => {
-    const selected = answers[q.id] ?? null
-    const correct  = selected === q.correct_answer
-    return {
-      question_id:    q.id,
-      selected,
-      correct_answer: q.correct_answer,
-      correct,
-      explanation:    q.explanation ?? null,
-    }
-  })
-
-  const correctCount   = breakdown.filter((b) => b.correct).length
-  const totalQuestions = breakdown.length
-  const score          = Math.round((correctCount / totalQuestions) * 100 * 100) / 100
-  const passed         = score >= Number(cert.pass_mark)
-  const now            = new Date()
-
-  let lockedUntil: string | null = null
-  if (!passed) {
-    const hours    = LOCKOUT_HOURS[cert.attempt_number] ?? DEFAULT_LOCKOUT_HOURS
-    const lockDate = new Date(now.getTime() + hours * 60 * 60 * 1000)
-    lockedUntil    = lockDate.toISOString()
+  for (const q of questions) {
+    const submitted = answers[q.id] ?? null
+    const isCorrect = submitted === q.correct_answer
+    if (isCorrect) correct++
+    breakdown[q.id] = { correct: isCorrect, correct_answer: q.correct_answer }
   }
 
-  const { error: updateError } = await supabase
-    .schema('pitboss')
-    .from('certifications')
-    .update({
-      status:       passed ? 'passed' : 'failed',
-      score,
-      completed_at: now.toISOString(),
-      locked_until: lockedUntil,
-    })
-    .eq('id', certification_id)
-
-  if (updateError) {
-    return NextResponse.json({ error: 'Failed to save certification result' }, { status: 500 })
-  }
+  const score  = total > 0 ? Math.round((correct / total) * 100 * 100) / 100 : 0
+  const passed = score >= Number(cert.pass_mark)
 
   if (passed) {
-    // Only update driver_leagues.certified for actual driver exams
-    if (DRIVER_ROLE_CODES.has(roleCode)) {
-      await supabase
-        .schema('pitboss')
-        .from('driver_leagues')
-        .update({ certified: true, certified_at: now.toISOString() })
-        .eq('driver_id', driver.id)
-        .eq('league_id', cert.league_id)
-    }
+    const token = crypto.randomUUID()
 
-    // Issue the correct licence type for this role
-    const { data: existingLicence } = await supabase
-      .schema('pitboss')
-      .from('licences')
-      .select('id')
+    await supabase.schema('pitboss').from('certifications')
+      .update({ status: 'passed', score, completed_at: now.toISOString(), token })
+      .eq('id', certification_id)
+
+    await supabase.schema('pitboss').from('driver_leagues')
+      .update({ certified: true, certified_at: now.toISOString() })
       .eq('driver_id', driver.id)
       .eq('league_id', cert.league_id)
-      .eq('role_code', roleCode)
+
+    const { data: league } = await supabase
+      .schema('rise_os').from('leagues')
+      .select('name').eq('id', cert.league_id).maybeSingle()
+
+    const { data: seqRow } = await supabase
+      .schema('pitboss').from('licence_sequences')
+      .select('id, last_number')
+      .eq('league_id', cert.league_id)
+      .eq('role_code', 'driver')
       .maybeSingle()
 
-    if (!existingLicence) {
-      const { error: licenceError } = await supabase.rpc('issue_licence', {
-        p_driver_id:  driver.id,
-        p_league_id:  cert.league_id,
-        p_role_code:  roleCode,
-        p_title:      LICENCE_TITLES[roleCode] ?? roleCode,
-        p_tier:       DRIVER_ROLE_CODES.has(roleCode) ? null : 'staff',
-        p_photo_url:  null,
-        p_expires_at: null,
-      })
-
-      if (licenceError) {
-        console.error('[POST /api/pitboss/cert/submit] issue_licence error', licenceError)
-      }
+    let nextNumber: number
+    if (!seqRow) {
+      nextNumber = 1
+      await supabase.schema('pitboss').from('licence_sequences')
+        .insert({ league_id: cert.league_id, role_code: 'driver', last_number: 1 })
+    } else {
+      nextNumber = seqRow.last_number + 1
+      await supabase.schema('pitboss').from('licence_sequences')
+        .update({ last_number: nextNumber }).eq('id', seqRow.id)
     }
-  }
 
-  return NextResponse.json({
-    certification_id,
-    role_code:       roleCode,
-    status:          passed ? 'passed' : 'failed',
-    passed,
-    score,
-    pass_mark:       cert.pass_mark,
-    correct_count:   correctCount,
-    total_questions: totalQuestions,
-    ...(lockedUntil ? { locked_until: lockedUntil } : {}),
-    breakdown,
-  })
+    const licenceNumber = `DRV-${String(nextNumber).padStart(5, '0')}`
+
+    const { data: newLicence } = await supabase
+      .schema('pitboss').from('licences')
+      .insert({
+        driver_id:      driver.id,
+        league_id:      cert.league_id,
+        licence_number: licenceNumber,
+        role_code:      'driver',
+        title:          `${league?.name ?? 'League'} Driver`,
+        status:         'active',
+      })
+      .select('id, licence_number')
+      .single()
+
+    return NextResponse.json({
+      passed:         true,
+      score,
+      pass_mark:      cert.pass_mark,
+      correct,
+      total,
+      token,
+      licence_number: newLicence?.licence_number ?? null,
+      licence_id:     newLicence?.id ?? null,
+      breakdown,
+    })
+  } else {
+    const lockedUntil = new Date(now.getTime() + LOCKOUT_HOURS * 60 * 60 * 1000)
+
+    await supabase.schema('pitboss').from('certifications')
+      .update({ status: 'failed', score, completed_at: now.toISOString(), locked_until: lockedUntil.toISOString() })
+      .eq('id', certification_id)
+
+    return NextResponse.json({
+      passed:       false,
+      score,
+      pass_mark:    cert.pass_mark,
+      correct,
+      total,
+      missed_by:    Math.round((Number(cert.pass_mark) - score) * 100) / 100,
+      locked_until: lockedUntil.toISOString(),
+      breakdown,
+    })
+  }
 }
