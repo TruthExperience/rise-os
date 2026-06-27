@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
-import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/server'
 
 const PASS_MARKS: Record<string, number> = {
   trl: 95,
@@ -18,7 +18,7 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 export async function POST(req: NextRequest) {
-  const supabase = await createClient()
+  const supabase = createAdminClient()
 
   const session = await getServerSession(authOptions)
   if (!session?.user) {
