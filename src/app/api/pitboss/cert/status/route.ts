@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
-import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/server'
 
 const CERT_WINDOW_MS = 60 * 60 * 1000
 
 export async function GET(req: NextRequest) {
-  const supabase = await createClient()
+  const supabase = createAdminClient()
   const { searchParams } = new URL(req.url)
 
   const league_id = searchParams.get('league_id')
