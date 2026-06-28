@@ -142,7 +142,7 @@ export async function PUT(
    })
    .eq('id', ruleBookId)
    .eq('league_id', params.id)
-   .select('id, title, document_url, document_filename, document_size_bytes, document_uploaded_at')
+   .select('id, title, document_url, document_filename, document_size_bytes, document_uploaded_at, status')
    .single()
 
  if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 })
