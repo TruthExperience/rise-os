@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
@@ -50,7 +50,7 @@ function formatDate(iso: string | null) {
   return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-export default function MyPenaltiesPage() {
+function MyPenaltiesInner() {
   const { data: session, status } = useSession()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -127,7 +127,6 @@ export default function MyPenaltiesPage() {
 
   return (
     <div className="min-h-screen bg-[#1A1A1A] pb-24">
-
       <div className="px-4 pt-12 pb-6 border-b border-gray-800">
         <button onClick={() => router.back()} className="text-white/50 text-sm mb-4 block">← Back</button>
         <h1 className="text-white font-bold text-2xl">Penalty Points</h1>
@@ -137,8 +136,6 @@ export default function MyPenaltiesPage() {
       </div>
 
       <div className="px-4 pt-5 space-y-6">
-
-        {/* PP Summary card */}
         <div className="bg-gray-900 rounded-2xl p-5">
           <div className="flex items-end justify-between mb-3">
             <div>
@@ -152,14 +149,12 @@ export default function MyPenaltiesPage() {
               </p>
             </div>
           </div>
-
           <div className="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
             <div
               className={`h-full rounded-full transition-all duration-500 ${ppBarColor(activePP)}`}
               style={{ width: `${barWidth}%` }}
             />
           </div>
-
           <div className="flex justify-between mt-1.5">
             <span className="text-gray-600 text-xs">0</span>
             <span className="text-yellow-600 text-xs">{PP_WARNING} ⚠</span>
@@ -168,7 +163,6 @@ export default function MyPenaltiesPage() {
           </div>
         </div>
 
-        {/* Filter tabs */}
         <div className="flex gap-2">
           {(['all', 'active', 'expired'] as const).map(f => (
             <button
@@ -183,7 +177,6 @@ export default function MyPenaltiesPage() {
           ))}
         </div>
 
-        {/* Penalty list */}
         {filtered.length === 0 ? (
           <div className="text-center py-12">
             <p className="text-green-400 text-lg font-semibold">Clean record ✓</p>
@@ -211,7 +204,6 @@ export default function MyPenaltiesPage() {
                     <p className="text-gray-600 text-xs">PP</p>
                   </div>
                 </div>
-
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2">
                   <span className="text-gray-600 text-xs">Issued {formatDate(p.issued_at)}</span>
                   {p.expires_at && (
@@ -238,5 +230,17 @@ export default function MyPenaltiesPage() {
         )}
       </div>
     </div>
+  )
+}
+
+export default function MyPenaltiesPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#1A1A1A] flex items-center justify-center">
+        <p className="text-white animate-pulse">Loading penalties…</p>
+      </div>
+    }>
+      <MyPenaltiesInner />
+    </Suspense>
   )
 }
