@@ -1,14 +1,8 @@
 'use client'
 
-// src/app/pitboss/steward/[id]/page.tsx
-// Full incident detail view for stewards.
-// Shows incident info, evidence, AI analysis, and the resolve panel.
-
 import { useEffect, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
-
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Incident {
   id: string
@@ -38,8 +32,6 @@ interface Incident {
   ai_analysed_at: string | null
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function formatDate(iso: string | null) {
   if (!iso) return '—'
   return new Date(iso).toLocaleDateString('en-GB', {
@@ -68,8 +60,6 @@ function SectionHeader({ title }: { title: string }) {
   )
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
-
 export default function IncidentDetailPage() {
   const { id } = useParams<{ id: string }>()
   const searchParams = useSearchParams()
@@ -81,34 +71,33 @@ export default function IncidentDetailPage() {
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState('')
 
-  // AI analysis state
-  const [analysing, setAnalysing] = useState(false)
+  const [analysing, setAnalysing]       = useState(false)
   const [analyseError, setAnalyseError] = useState('')
 
-  // Resolve form state
-  const [showResolve, setShowResolve] = useState(false)
-  const [verdict, setVerdict]         = useState('')
-  const [penalty, setPenalty]         = useState('')
-  const [penaltyPoints, setPenaltyPoints] = useState('')
-  const [stewardNotes, setStewardNotes]   = useState('')
-  const [overrideReason, setOverrideReason] = useState('')
-  const [resolving, setResolving]     = useState(false)
-  const [resolveError, setResolveError] = useState('')
+  const [showResolve, setShowResolve]         = useState(false)
+  const [verdict, setVerdict]                 = useState('')
+  const [penalty, setPenalty]                 = useState('')
+  const [penaltyPoints, setPenaltyPoints]     = useState('')
+  const [stewardNotes, setStewardNotes]       = useState('')
+  const [overrideReason, setOverrideReason]   = useState('')
+  const [resolving, setResolving]             = useState(false)
+  const [resolveError, setResolveError]       = useState('')
 
   useEffect(() => { loadIncident() }, [id])
 
   async function loadIncident() {
     setLoading(true)
     try {
-      const res = await fetch(`/api/pitboss/incidents/${id}`)
+      const res  = await fetch(`/api/pitboss/incidents/${id}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed to load incident')
-      setIncident(data)
 
-      // Pre-fill resolve form from AI suggestion if available
-      if (data.ai_verdict)  setVerdict(data.ai_verdict)
-      if (data.ai_penalty)  setPenalty(data.ai_penalty)
-      if (data.ai_points)   setPenaltyPoints(String(data.ai_points))
+      const inc = data.incident
+      setIncident(inc)
+
+      if (inc.ai_verdict) setVerdict(inc.ai_verdict)
+      if (inc.ai_penalty) setPenalty(inc.ai_penalty)
+      if (inc.ai_points)  setPenaltyPoints(String(inc.ai_points))
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -120,7 +109,7 @@ export default function IncidentDetailPage() {
     setAnalysing(true)
     setAnalyseError('')
     try {
-      const res = await fetch(`/api/pitboss/incidents/${id}`, {
+      const res  = await fetch(`/api/pitboss/incidents/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'analyse' }),
@@ -140,17 +129,16 @@ export default function IncidentDetailPage() {
     setResolving(true)
     setResolveError('')
     try {
-      const res = await fetch(`/api/pitboss/incidents/${id}`, {
+      const res  = await fetch(`/api/pitboss/incidents/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'resolve',
+          action:          'resolve',
           verdict,
-          penalty:        penalty || null,
-          penalty_points: penaltyPoints ? Number(penaltyPoints) : 0,
-          steward_notes:  stewardNotes || null,
+          penalty:         penalty || null,
+          penalty_points:  penaltyPoints ? Number(penaltyPoints) : 0,
+          steward_notes:   stewardNotes || null,
           override_reason: overrideReason || null,
-          resolved_by:    session?.user?.id ?? null,
         }),
       })
       const data = await res.json()
@@ -164,7 +152,6 @@ export default function IncidentDetailPage() {
     }
   }
 
-  // ── Loading / error ──────────────────────────────────────────────────────
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-rise-black">
@@ -183,9 +170,8 @@ export default function IncidentDetailPage() {
   }
 
   const isResolved = incident.status === 'resolved'
-  const hasAI = !!incident.ai_analysed_at
+  const hasAI      = !!incident.ai_analysed_at
 
-  // ── Render ───────────────────────────────────────────────────────────────
   return (
     <main className="min-h-screen bg-rise-black pb-28">
 
@@ -223,6 +209,9 @@ export default function IncidentDetailPage() {
                 <span className="text-white text-sm">{r.value}</span>
               </div>
             ))}
+            {!incident.season && !incident.round && !incident.lap && (
+              <p className="text-white/20 text-sm py-2">No context provided.</p>
+            )}
           </div>
         </div>
 
@@ -230,7 +219,9 @@ export default function IncidentDetailPage() {
         <div>
           <SectionHeader title="Description" />
           <div className="bg-white/5 rounded-2xl px-4 py-4">
-            <p className="text-white/80 text-sm leading-relaxed">{incident.description}</p>
+            <p className="text-white/80 text-sm leading-relaxed">
+              {incident.description || <span className="text-white/20">No description provided.</span>}
+            </p>
           </div>
         </div>
 
@@ -385,7 +376,6 @@ export default function IncidentDetailPage() {
             {showResolve && (
               <div className="mt-4 space-y-4">
 
-                {/* Verdict */}
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Verdict</p>
                   <div className="grid grid-cols-3 gap-2">
@@ -405,7 +395,6 @@ export default function IncidentDetailPage() {
                   </div>
                 </div>
 
-                {/* Penalty */}
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty</p>
                   <input
@@ -417,7 +406,6 @@ export default function IncidentDetailPage() {
                   />
                 </div>
 
-                {/* PP */}
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Points</p>
                   <input
@@ -431,7 +419,6 @@ export default function IncidentDetailPage() {
                   />
                 </div>
 
-                {/* Steward Notes */}
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Steward Notes</p>
                   <textarea
@@ -443,8 +430,7 @@ export default function IncidentDetailPage() {
                   />
                 </div>
 
-                {/* Override reason (if diverging from AI) */}
-                {hasAI && verdict !== incident.ai_verdict && (
+                {hasAI && verdict !== incident.ai_verdict && verdict !== '' && (
                   <div>
                     <p className="text-yellow-400 text-xs uppercase tracking-widest mb-2">
                       ⚠ Override Reason (differs from AI)
