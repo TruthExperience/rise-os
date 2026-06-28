@@ -57,20 +57,16 @@ function RulesInner() {
     checkUploadPermission()
   }, [authStatus, id])
 
-  async function fetchDocuments() {
-    setLoading(true)
+  async function fetchDocuments(showSpinner = true) {
+    if (showSpinner) setLoading(true)
     try {
-      // cache: 'no-store' forces a network fetch every time — without this,
-      // iOS WebKit can serve a stale cached GET response even though the
-      // server route itself is force-dynamic, which was causing the
-      // rulebook list to show PENDING right after a successful upload.
       const res = await fetch(`/api/league/${id}/rules`, { cache: 'no-store' })
       const data = await res.json()
       setDocuments(data.documents ?? [])
     } catch {
       setDocuments([])
     } finally {
-      setLoading(false)
+      if (showSpinner) setLoading(false)
     }
   }
 
@@ -117,7 +113,14 @@ function RulesInner() {
       if (!res.ok) throw new Error(data.error ?? 'Upload failed')
 
       setUploadSuccess(data.document.title)
-      await fetchDocuments()
+
+      // Optimistically update the card immediately from the PUT response
+      setDocuments(prev =>
+        prev.map(doc => doc.id === docId ? { ...doc, ...data.document } : doc)
+      )
+
+      // Background refetch to confirm server state — no spinner
+      fetchDocuments(false)
     } catch (err: any) {
       setUploadError(err.message)
     } finally {
