@@ -43,7 +43,6 @@ async function hasStewwardAccess(
   driverId: string,
   leagueId: string
 ): Promise<boolean> {
-  // Check active steward licence in this league
   const { data: licence } = await supabase
     .schema('pitboss')
     .from('licences')
@@ -56,7 +55,6 @@ async function hasStewwardAccess(
 
   if (licence) return true
 
-  // Check active steward licence in ANY league (commissioner/admin override)
   const { data: anyLicence } = await supabase
     .schema('pitboss')
     .from('licences')
@@ -68,8 +66,6 @@ async function hasStewwardAccess(
 
   if (anyLicence) return true
 
-  // Fetch all league memberships and parse comma-separated roles
-  // Roles in driver_leagues can be stored as "head_steward, bsac_chief, team_principal"
   const { data: memberships } = await supabase
     .schema('pitboss')
     .from('driver_leagues')
@@ -121,11 +117,10 @@ export async function GET(
     return NextResponse.json({ error: 'Incident not found' }, { status: 404 })
   }
 
-  const isSteward = await hasStewwardAccess(supabase, requestingDriver.id, incident.league_id)
-  const isParty =
-    incident.reported_by === requestingDriver.id ||
-    incident.accused_driver_id === requestingDriver.id ||
-    incident.resolved_by === requestingDriver.id
+  const isSteward  = await hasStewwardAccess(supabase, requestingDriver.id, incident.league_id)
+  const isAccused  = incident.accused_driver_id === requestingDriver.id
+  const isReporter = incident.reported_by === requestingDriver.id
+  const isParty    = isAccused || isReporter || incident.resolved_by === requestingDriver.id
 
   if (!isSteward && !isParty) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
@@ -153,8 +148,77 @@ export async function GET(
     .maybeSingle()
 
   return NextResponse.json({
-    incident: { ...incident, reporter, accused, league },
+    incident:   { ...incident, reporter, accused, league },
+    isAccused,
+    isSteward,
+    isReporter,
   })
+}
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  const session = await getServerSession(authOptions)
+  if (!session?.user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const supabase = createAdminClient()
+  const requestingDriver = await getRequestingDriver(supabase, session)
+
+  if (!requestingDriver) {
+    return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
+  }
+
+  const { data: incident } = await supabase
+    .schema('pitboss')
+    .from('incidents')
+    .select('id, accused_driver_id, status, league_id')
+    .eq('id', params.id)
+    .maybeSingle()
+
+  if (!incident) {
+    return NextResponse.json({ error: 'Incident not found' }, { status: 404 })
+  }
+
+  if (incident.status === 'resolved') {
+    return NextResponse.json({ error: 'Cannot respond to a resolved incident' }, { status: 409 })
+  }
+
+  const isSteward = await hasStewwardAccess(supabase, requestingDriver.id, incident.league_id)
+  const isAccused = incident.accused_driver_id === requestingDriver.id
+
+  if (!isAccused && !isSteward) {
+    return NextResponse.json(
+      { error: 'Only the accused driver or a steward can submit a defence' },
+      { status: 403 }
+    )
+  }
+
+  const body = await req.json()
+  const { accused_response, accused_evidence_urls } = body
+
+  if (!accused_response?.trim()) {
+    return NextResponse.json({ error: 'Response cannot be empty' }, { status: 400 })
+  }
+
+  const { error: updateError } = await supabase
+    .schema('pitboss')
+    .from('incidents')
+    .update({
+      accused_response:      accused_response.trim(),
+      accused_evidence_urls: accused_evidence_urls ?? null,
+      accused_response_at:   new Date().toISOString(),
+    })
+    .eq('id', params.id)
+
+  if (updateError) {
+    console.error('[incidents/id PATCH]', updateError)
+    return NextResponse.json({ error: updateError.message }, { status: 500 })
+  }
+
+  return NextResponse.json({ success: true })
 }
 
 export async function POST(
@@ -273,12 +337,13 @@ export async function POST(
     try {
       const ai = await pbSteward(
         {
-          incident_type: incident.incident_type,
-          description:   incident.description,
-          season:        incident.season,
-          round:         incident.round,
-          lap:           incident.lap,
-          league_id:     incident.league_id,
+          incident_type:    incident.incident_type,
+          description:      incident.description,
+          season:           incident.season,
+          round:            incident.round,
+          lap:              incident.lap,
+          league_id:        incident.league_id,
+          accused_response: incident.accused_response ?? undefined,
         },
         regulations,
         incident.league_id
