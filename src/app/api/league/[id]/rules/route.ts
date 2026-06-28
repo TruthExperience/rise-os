@@ -3,9 +3,6 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createClient } from '@supabase/supabase-js'
 
-// Force this route to always execute fresh — without this, Next.js App Router
-// statically caches GET handlers that don't use dynamic APIs (cookies/headers/etc),
-// which was causing the rulebook list to serve stale data after uploads.
 export const dynamic = 'force-dynamic'
 
 const UPLOAD_ROLES = ['commissioner', 'co_owner', 'admin', 'head_steward']
@@ -54,9 +51,8 @@ export async function PUT(
   }
 
   const pitboss = getPitboss()
-  const publicClient = getStorage() // default schema = public
+  const publicClient = getStorage()
 
-  // Resolve pitboss driver for role check
   const { data: driver } = await pitboss
     .from('drivers')
     .select('id')
@@ -67,7 +63,6 @@ export async function PUT(
     return NextResponse.json({ error: 'Driver not found' }, { status: 403 })
   }
 
-  // Resolve public.users UUID for the FK
   const { data: userRecord } = await publicClient
     .from('users')
     .select('id')
@@ -129,13 +124,13 @@ export async function PUT(
   const { data: updated, error: updateError } = await pitboss
     .from('rule_books')
     .update({
-      document_url:       signedData?.signedUrl ?? null,
-      document_path:      filename,
-      document_filename:  file.name,
-      document_size_bytes: file.size,
-      document_mime_type: file.type,
+      document_url:         signedData?.signedUrl ?? null,
+      document_path:        filename,
+      document_filename:    file.name,
+      document_size_bytes:  file.size,
+      document_mime_type:   file.type,
       document_uploaded_at: new Date().toISOString(),
-      document_uploaded_by: userRecord?.id ?? null, // public.users UUID — matches FK
+      document_uploaded_by: userRecord?.id ?? null,
     })
     .eq('id', ruleBookId)
     .eq('league_id', params.id)
