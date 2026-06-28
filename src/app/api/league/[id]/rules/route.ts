@@ -3,6 +3,11 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createClient } from '@supabase/supabase-js'
 
+// Force this route to always execute fresh — without this, Next.js App Router
+// statically caches GET handlers that don't use dynamic APIs (cookies/headers/etc),
+// which was causing the rulebook list to serve stale data after uploads.
+export const dynamic = 'force-dynamic'
+
 const UPLOAD_ROLES = ['commissioner', 'co_owner', 'admin', 'head_steward']
 
 function getPitboss() {
