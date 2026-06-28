@@ -60,7 +60,11 @@ function RulesInner() {
   async function fetchDocuments() {
     setLoading(true)
     try {
-      const res = await fetch(`/api/league/${id}/rules`)
+      // cache: 'no-store' forces a network fetch every time — without this,
+      // iOS WebKit can serve a stale cached GET response even though the
+      // server route itself is force-dynamic, which was causing the
+      // rulebook list to show PENDING right after a successful upload.
+      const res = await fetch(`/api/league/${id}/rules`, { cache: 'no-store' })
       const data = await res.json()
       setDocuments(data.documents ?? [])
     } catch {
