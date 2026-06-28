@@ -56,17 +56,14 @@ export default function LeagueDetailPage() {
   async function handleLogoUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-
     setUploading(true);
     try {
       const formData = new FormData();
       formData.append("file", file);
-
       const res = await fetch(`/api/leagues/${id}`, {
         method: "PUT",
         body: formData,
       });
-
       if (res.ok) {
         const updated = await res.json();
         setLeague((prev: any) => ({ ...prev, logo_url: updated.logo_url }));
@@ -103,6 +100,7 @@ export default function LeagueDetailPage() {
         ← Back
       </button>
 
+      {/* League header */}
       <div className="flex flex-col items-center mb-8">
         <button
           onClick={() => fileRef.current?.click()}
@@ -141,6 +139,37 @@ export default function LeagueDetailPage() {
         </p>
       </div>
 
+      {/* Quick actions */}
+      <p className="text-white/30 text-xs uppercase tracking-widest mb-3">League</p>
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        <NavCard
+          icon="📅"
+          label="Calendar"
+          sub="Season schedule"
+          onClick={() => router.push(`/season?league_id=${id}`)}
+        />
+        <NavCard
+          icon="🎓"
+          label="Certification"
+          sub="Pitboss exams"
+          onClick={() => router.push(`/pitboss/cert`)}
+        />
+        <NavCard
+          icon="⚠️"
+          label="Incidents"
+          sub="File a report"
+          onClick={() => router.push(`/pitboss/incidents`)}
+        />
+        <NavCard
+          icon="📖"
+          label="Rulebook"
+          sub="Regulations"
+          onClick={() => router.push(`/league/${id}/rules`)}
+        />
+      </div>
+
+      {/* Info rows */}
+      <p className="text-white/30 text-xs uppercase tracking-widest mb-3">Info</p>
       <div className="flex flex-col gap-3">
         <InfoRow label="Visibility" value={league.is_public ? "Public" : "Private"} />
         <InfoRow label="Seasons" value={league.season_count ?? 0} />
@@ -160,11 +189,32 @@ export default function LeagueDetailPage() {
   );
 }
 
+function NavCard({
+  icon,
+  label,
+  sub,
+  onClick,
+}: {
+  icon: string
+  label: string
+  sub: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="rounded-xl border border-white/10 bg-white/5 p-4 flex flex-col gap-1 text-left active:scale-[0.98] transition-transform"
+    >
+      <span className="text-2xl">{icon}</span>
+      <p className="text-sm font-bold text-white">{label}</p>
+      <p className="text-[10px] text-white/30">{sub}</p>
+    </button>
+  );
+}
+
 function InfoRow({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 flex items-center justify-between">
       <span className="text-white/40 text-sm">{label}</span>
       <span className="text-white text-sm font-semibold">{String(value)}</span>
-    </div>
-  );
-}
+    
