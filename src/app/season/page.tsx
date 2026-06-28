@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 
@@ -28,7 +28,7 @@ interface League {
 
 const LEAGUE_SLUGS = ['trl', 'wsc']
 
-export default function SeasonPage() {
+function SeasonInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { status } = useSession()
@@ -52,7 +52,6 @@ export default function SeasonPage() {
         const filtered = all.filter((l) => LEAGUE_SLUGS.includes(l.slug))
         setLeagues(filtered)
 
-        // Auto-select if league_id param present
         const paramId = searchParams.get('league_id')
         if (paramId) {
           const match = filtered.find((l) => l.id === paramId)
@@ -129,7 +128,6 @@ export default function SeasonPage() {
         </div>
       )}
 
-      {/* League selector */}
       {!selectedLeague && (
         <div className="flex flex-col gap-3">
           {leagues.map((league) => (
@@ -145,7 +143,6 @@ export default function SeasonPage() {
         </div>
       )}
 
-      {/* Calendar */}
       {selectedLeague && (
         <div className="flex flex-col gap-2">
           {loadingRounds && (
@@ -245,5 +242,17 @@ export default function SeasonPage() {
         </div>
       )}
     </main>
+  )
+}
+
+export default function SeasonPage() {
+  return (
+    <Suspense fallback={
+      <main className="flex min-h-screen items-center justify-center bg-rise-black">
+        <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+      </main>
+    }>
+      <SeasonInner />
+    </Suspense>
   )
 }
