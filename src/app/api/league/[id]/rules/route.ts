@@ -1,148 +1,271 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
-import { createClient } from '@supabase/supabase-js'
+'use client'
 
-// Force this route to always execute fresh — without this, Next.js App Router
-// statically caches GET handlers that don't use dynamic APIs (cookies/headers/etc),
-// which was causing the rulebook list to serve stale data after uploads.
-export const dynamic = 'force-dynamic'
+import { useEffect, useState, useRef, Suspense } from 'react'
+import { useSession } from 'next-auth/react'
+import { useRouter, useParams } from 'next/navigation'
 
 const UPLOAD_ROLES = ['commissioner', 'co_owner', 'admin', 'head_steward']
 
-function getPitboss() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { db: { schema: 'pitboss' } }
-  )
+interface RuleBook {
+ id: string
+ title: string
+ document_code: string
+ version: string
+ status: string
+ authority_level: number
+ effective_date: string
+ tagline: string | null
+ document_url: string | null
+ document_filename: string | null
+ document_size_bytes: number | null
+ document_uploaded_at: string | null
 }
 
-function getStorage() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+function formatBytes(bytes: number) {
+ if (bytes < 1024) return `${bytes} B`
+ if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+ return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  const supabase = getPitboss()
-
-  const { data: documents, error } = await supabase
-    .from('rule_books')
-    .select(
-      'id, title, document_code, version, status, authority_level, effective_date, tagline, document_url, document_filename, document_size_bytes, document_uploaded_at'
-    )
-    .eq('league_id', params.id)
-    .order('authority_level', { ascending: true })
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-  return NextResponse.json({ documents: documents ?? [] })
+function formatDate(iso: string) {
+ return new Date(iso).toLocaleDateString('en-GB', {
+   day: 'numeric', month: 'short', year: 'numeric',
+ })
 }
 
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  const session = await getServerSession(authOptions)
-  if (!session?.user?.discordId) {
-    return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
-  }
+function RulesInner() {
+ const { data: session, status: authStatus } = useSession()
+ const router = useRouter()
+ const { id } = useParams<{ id: string }>()
 
-  const pitboss = getPitboss()
-  const publicClient = getStorage() // default schema = public
+ const [documents, setDocuments] = useState<RuleBook[]>([])
+ const [loading, setLoading] = useState(true)
+ const [canUpload, setCanUpload] = useState(false)
+ const [uploadingId, setUploadingId] = useState<string | null>(null)
+ const [uploadError, setUploadError] = useState<string | null>(null)
+ const [uploadSuccess, setUploadSuccess] = useState<string | null>(null)
+ const fileRef = useRef<HTMLInputElement>(null)
+ const pendingDocId = useRef<string | null>(null)
 
-  // Resolve pitboss driver for role check
-  const { data: driver } = await pitboss
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', session.user.discordId)
-    .single()
+ useEffect(() => {
+   if (authStatus === 'unauthenticated') router.push('/login')
+ }, [authStatus, router])
 
-  if (!driver) {
-    return NextResponse.json({ error: 'Driver not found' }, { status: 403 })
-  }
+ useEffect(() => {
+   if (authStatus !== 'authenticated') return
+   fetchDocuments()
+   checkUploadPermission()
+ }, [authStatus, id])
 
-  // Resolve public.users UUID for the FK
-  const { data: userRecord } = await publicClient
-    .from('users')
-    .select('id')
-    .eq('discord_id', session.user.discordId)
-    .single()
+ async function fetchDocuments(showSpinner = true) {
+   if (showSpinner) setLoading(true)
+   try {
+     const res = await fetch(`/api/league/${id}/rules`, { cache: 'no-store' })
+     const data = await res.json()
+     setDocuments(data.documents ?? [])
+   } catch {
+     setDocuments([])
+   } finally {
+     if (showSpinner) setLoading(false)
+   }
+ }
 
-  const { data: membership } = await pitboss
-    .from('driver_leagues')
-    .select('role')
-    .eq('driver_id', driver.id)
-    .eq('league_id', params.id)
-    .single()
+ async function checkUploadPermission() {
+   try {
+     const res = await fetch('/api/pitboss/me/leagues')
+     const data = await res.json()
+     const membership = (data.leagues ?? []).find((m: any) => m.league_id === id)
+     if (!membership) return
+     const roles = membership.role.split(',').map((r: string) => r.trim().toLowerCase())
+     setCanUpload(roles.some((r: string) => UPLOAD_ROLES.includes(r)))
+   } catch {
+     setCanUpload(false)
+   }
+ }
 
-  if (!membership) {
-    return NextResponse.json({ error: 'Not a member of this league' }, { status: 403 })
-  }
+ function triggerUpload(docId: string) {
+   pendingDocId.current = docId
+   setUploadError(null)
+   setUploadSuccess(null)
+   fileRef.current?.click()
+ }
 
-  const roles = membership.role.split(',').map((r: string) => r.trim().toLowerCase())
-  const hasAccess = roles.some((r: string) => UPLOAD_ROLES.includes(r))
-  if (!hasAccess) {
-    return NextResponse.json({ error: 'Insufficient permissions to upload documents' }, { status: 403 })
-  }
+ async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+   const file = e.target.files?.[0]
+   if (!file || !pendingDocId.current) return
 
-  const formData = await req.formData()
-  const file = formData.get('file') as File | null
-  const ruleBookId = formData.get('rule_book_id') as string | null
+   const docId = pendingDocId.current
+   setUploadingId(docId)
+   setUploadError(null)
+   setUploadSuccess(null)
 
-  if (!file || !ruleBookId) {
-    return NextResponse.json({ error: 'file and rule_book_id are required' }, { status: 400 })
-  }
+   try {
+     const formData = new FormData()
+     formData.append('file', file)
+     formData.append('rule_book_id', docId)
 
-  if (file.type !== 'application/pdf') {
-    return NextResponse.json({ error: 'Only PDF files are allowed' }, { status: 400 })
-  }
+     const res = await fetch(`/api/league/${id}/rules`, {
+       method: 'PUT',
+       body: formData,
+     })
 
-  if (file.size > 20 * 1024 * 1024) {
-    return NextResponse.json({ error: 'File must be under 20MB' }, { status: 400 })
-  }
+     const data = await res.json()
+     if (!res.ok) throw new Error(data.error ?? 'Upload failed')
 
-  const storage = getStorage()
-  const filename = `${params.id}/${ruleBookId}/${Date.now()}-${file.name.replace(/\s+/g, '-')}`
-  const buffer = await file.arrayBuffer()
+     setUploadSuccess(data.document.title)
+     await fetchDocuments(false)
+   } catch (err: any) {
+     setUploadError(err.message)
+   } finally {
+     setUploadingId(null)
+     pendingDocId.current = null
+     if (fileRef.current) fileRef.current.value = ''
+   }
+ }
 
-  const { error: uploadError } = await storage.storage
-    .from('rule-documents')
-    .upload(filename, buffer, {
-      contentType: 'application/pdf',
-      upsert: true,
-    })
+ if (authStatus === 'loading' || loading) {
+   return (
+     <main className="flex min-h-screen items-center justify-center bg-rise-black">
+       <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+     </main>
+   )
+ }
 
-  if (uploadError) {
-    return NextResponse.json({ error: uploadError.message }, { status: 500 })
-  }
+ return (
+   <main className="min-h-screen bg-rise-black px-4 py-8 pb-24">
+     <button
+       onClick={() => router.back()}
+       className="flex items-center gap-2 text-white/40 text-sm mb-6"
+     >
+       ← Back
+     </button>
 
-  const { data: signedData } = await storage.storage
-    .from('rule-documents')
-    .createSignedUrl(filename, 60 * 60 * 24 * 365 * 10)
+     <div className="mb-8">
+       <h1 className="text-2xl font-black text-white">Rulebook</h1>
+       <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
+         Official League Documents
+       </p>
+     </div>
 
-  const { data: updated, error: updateError } = await pitboss
-    .from('rule_books')
-    .update({
-      document_url:       signedData?.signedUrl ?? null,
-      document_path:      filename,
-      document_filename:  file.name,
-      document_size_bytes: file.size,
-      document_mime_type: file.type,
-      document_uploaded_at: new Date().toISOString(),
-      document_uploaded_by: userRecord?.id ?? null, // public.users UUID — matches FK
-    })
-    .eq('id', ruleBookId)
-    .eq('league_id', params.id)
-    .select()
-    .single()
+     <input
+       ref={fileRef}
+       type="file"
+       accept="application/pdf"
+       className="hidden"
+       onChange={handleFileChange}
+     />
 
-  if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 })
+     {uploadError && (
+       <div className="mb-4 rounded-xl border border-rise-red/40 bg-rise-red/10 px-4 py-3">
+         <p className="text-rise-red text-sm">{uploadError}</p>
+       </div>
+     )}
+     {uploadSuccess && (
+       <div className="mb-4 rounded-xl border border-green-500/40 bg-green-500/10 px-4 py-3">
+         <p className="text-green-400 text-sm">✓ "{uploadSuccess}" uploaded successfully</p>
+       </div>
+     )}
 
-  return NextResponse.json({ document: updated })
+     {documents.length === 0 ? (
+       <div className="flex flex-col items-center justify-center mt-20 gap-3">
+         <p className="text-4xl">📖</p>
+         <p className="text-white font-bold">No documents yet</p>
+         <p className="text-white/30 text-sm text-center">
+           No rulebooks have been uploaded for this league.
+         </p>
+       </div>
+     ) : (
+       <div className="flex flex-col gap-3">
+         {documents.map((doc) => {
+           const isUploading = uploadingId === doc.id
+           const hasFile = !!doc.document_url
+
+           return (
+             <div
+               key={doc.id}
+               className="rounded-2xl border border-white/10 bg-white/5 p-4"
+             >
+               <div className="flex items-start justify-between gap-3 mb-2">
+                 <div className="flex-1 min-w-0">
+                   <p className="text-white font-bold text-sm leading-tight">{doc.title}</p>
+                   <p className="text-white/30 text-[10px] uppercase tracking-widest mt-0.5">
+                     {doc.document_code} · {doc.version}
+                   </p>
+                 </div>
+                 <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full flex-shrink-0 ${
+                   hasFile
+                     ? 'bg-green-500/10 text-green-400'
+                     : 'bg-white/5 text-white/20'
+                 }`}>
+                   {hasFile ? '● Available' : '○ Pending'}
+                 </span>
+               </div>
+
+               {doc.tagline && (
+                 <p className="text-white/40 text-xs mb-3">{doc.tagline}</p>
+               )}
+
+               <div className="flex items-center gap-3 mb-3">
+                 <span className="text-white/20 text-[10px]">
+                   Effective {formatDate(doc.effective_date)}
+                 </span>
+                 {doc.document_size_bytes && (
+                   <span className="text-white/20 text-[10px]">
+                     {formatBytes(doc.document_size_bytes)}
+                   </span>
+                 )}
+                 {doc.document_uploaded_at && (
+                   <span className="text-white/20 text-[10px]">
+                     Uploaded {formatDate(doc.document_uploaded_at)}
+                   </span>
+                 )}
+               </div>
+
+               <div className="flex gap-2">
+                 {hasFile && (
+                   <a
+                     href={doc.document_url!}
+                     target="_blank"
+                     rel="noreferrer"
+                     className="flex-1 rounded-xl bg-rise-red/10 border border-rise-red/30 py-2.5 text-center text-xs font-bold text-rise-red"
+                   >
+                     📄 Open PDF
+                   </a>
+                 )}
+                 {canUpload && (
+                   <button
+                     onClick={() => triggerUpload(doc.id)}
+                     disabled={isUploading}
+                     className={`rounded-xl border border-white/10 py-2.5 text-xs font-bold text-white/40 disabled:opacity-40 transition-colors ${
+                       hasFile ? 'px-4' : 'flex-1'
+                     }`}
+                   >
+                     {isUploading ? 'Uploading…' : hasFile ? '↑ Replace' : '↑ Upload PDF'}
+                   </button>
+                 )}
+                 {!hasFile && !canUpload && (
+                   <div className="flex-1 rounded-xl border border-white/5 py-2.5 text-center text-xs text-white/20">
+                     Not yet available
+                   </div>
+                 )}
+               </div>
+             </div>
+           )
+         })}
+       </div>
+     )}
+   </main>
+ )
+}
+
+export default function RulesPage() {
+ return (
+   <Suspense fallback={
+     <main className="flex min-h-screen items-center justify-center bg-rise-black">
+       <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+     </main>
+   }>
+     <RulesInner />
+   </Suspense>
+ )
 }
