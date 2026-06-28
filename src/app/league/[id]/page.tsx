@@ -25,12 +25,13 @@ const SPORT_EMOJI: Record<string, string> = {
 };
 
 export default function LeagueDetailPage() {
-  const { status } = useSession();
+  const { data: session, status } = useSession();
   const router = useRouter();
   const { id } = useParams<{ id: string }>();
   const [league, setLeague] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [canSeeStewards, setCanSeeStewards] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -41,6 +42,10 @@ export default function LeagueDetailPage() {
     if (id) fetchLeague();
   }, [id]);
 
+  useEffect(() => {
+    if (id && session?.user) checkStewardAccess();
+  }, [id, session]);
+
   async function fetchLeague() {
     setLoading(true);
     try {
@@ -50,6 +55,18 @@ export default function LeagueDetailPage() {
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function checkStewardAccess() {
+    try {
+      const res = await fetch(`/api/leagues/${id}/steward-access`);
+      if (res.ok) {
+        const { hasAccess } = await res.json();
+        setCanSeeStewards(hasAccess);
+      }
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -166,6 +183,14 @@ export default function LeagueDetailPage() {
           sub="Regulations"
           onClick={() => router.push(`/league/${id}/rules`)}
         />
+        {canSeeStewards && (
+          <NavCard
+            icon="⚖️"
+            label="Stewards"
+            sub="Panel & penalties"
+            onClick={() => router.push(`/pitboss/steward?league_id=${id}`)}
+          />
+        )}
       </div>
 
       {/* Info rows */}
