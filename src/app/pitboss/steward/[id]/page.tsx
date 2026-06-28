@@ -30,12 +30,13 @@ interface Incident {
   ai_articles: string[] | null
   ai_model: string | null
   ai_analysed_at: string | null
+  accused_response: string | null
+  accused_response_at: string | null
+  accused_evidence_urls: string[] | null
   reporter?: { discord_username: string; display_name: string | null }
   accused?: { discord_username: string; display_name: string | null }
   league?: { name: string; slug: string }
 }
-
-// ─── Penalty types per league ─────────────────────────────────────────────────
 
 const TIME_PENALTIES = ['+3s', '+5s', '+10s', '+15s', 'Drive-Through', 'Pit Lane Start']
 const GRID_PENALTIES = ['3 places', '5 places', '10 places', 'Back of Grid']
@@ -52,8 +53,6 @@ const PENALTY_TYPE_LABELS: Record<PenaltyType, string> = {
   dsq:       'Disqualification',
   ban:       'Ban',
 }
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string | null) {
   if (!iso) return '—'
@@ -78,9 +77,7 @@ function verdictColor(v: string | null) {
 }
 
 function SectionHeader({ title }: { title: string }) {
-  return (
-    <p className="text-white/40 text-[10px] uppercase tracking-widest mb-3">{title}</p>
-  )
+  return <p className="text-white/40 text-[10px] uppercase tracking-widest mb-3">{title}</p>
 }
 
 function buildPenaltySummary(
@@ -101,33 +98,38 @@ function buildPenaltySummary(
   return parts.join(' + ') || 'No penalty'
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
-
 export default function IncidentDetailPage() {
-  const { id } = useParams<{ id: string }>()
-  const searchParams = useSearchParams()
-  const leagueId = searchParams.get('league_id')
-  const router = useRouter()
-  const { data: session } = useSession()
+  const { id }         = useParams<{ id: string }>()
+  const searchParams   = useSearchParams()
+  const router         = useRouter()
 
-  const [incident, setIncident] = useState<Incident | null>(null)
-  const [loading, setLoading]   = useState(true)
-  const [error, setError]       = useState('')
+  const [incident, setIncident]     = useState<Incident | null>(null)
+  const [isAccused, setIsAccused]   = useState(false)
+  const [isSteward, setIsSteward]   = useState(false)
+  const [loading, setLoading]       = useState(true)
+  const [error, setError]           = useState('')
 
-  const [analysing, setAnalysing]       = useState(false)
-  const [analyseError, setAnalyseError] = useState('')
+  const [analysing, setAnalysing]         = useState(false)
+  const [analyseError, setAnalyseError]   = useState('')
 
-  const [showResolve, setShowResolve]     = useState(false)
-  const [verdict, setVerdict]             = useState('')
-  const [penaltyType, setPenaltyType]     = useState<PenaltyType>('none')
-  const [timePenalty, setTimePenalty]     = useState('')
-  const [gridPenalty, setGridPenalty]     = useState('')
-  const [banPenalty, setBanPenalty]       = useState('')
-  const [penaltyPoints, setPenaltyPoints] = useState('0')
-  const [stewardNotes, setStewardNotes]   = useState('')
-  const [overrideReason, setOverrideReason] = useState('')
-  const [resolving, setResolving]         = useState(false)
-  const [resolveError, setResolveError]   = useState('')
+  const [showResolve, setShowResolve]         = useState(false)
+  const [verdict, setVerdict]                 = useState('')
+  const [penaltyType, setPenaltyType]         = useState<PenaltyType>('none')
+  const [timePenalty, setTimePenalty]         = useState('')
+  const [gridPenalty, setGridPenalty]         = useState('')
+  const [banPenalty, setBanPenalty]           = useState('')
+  const [penaltyPoints, setPenaltyPoints]     = useState('0')
+  const [stewardNotes, setStewardNotes]       = useState('')
+  const [overrideReason, setOverrideReason]   = useState('')
+  const [resolving, setResolving]             = useState(false)
+  const [resolveError, setResolveError]       = useState('')
+
+  // Defence state
+  const [showDefence, setShowDefence]       = useState(false)
+  const [defenceText, setDefenceText]       = useState('')
+  const [defenceUrls, setDefenceUrls]       = useState('')
+  const [submittingDefence, setSubmitting]  = useState(false)
+  const [defenceError, setDefenceError]     = useState('')
 
   useEffect(() => { loadIncident() }, [id])
 
@@ -139,8 +141,13 @@ export default function IncidentDetailPage() {
       if (!res.ok) throw new Error(data.error ?? 'Failed to load incident')
       const inc = data.incident
       setIncident(inc)
+      setIsAccused(data.isAccused ?? false)
+      setIsSteward(data.isSteward ?? false)
       if (inc.ai_verdict) setVerdict(inc.ai_verdict)
       if (inc.ai_points)  setPenaltyPoints(String(inc.ai_points))
+      // Pre-fill defence if editing
+      if (inc.accused_response) setDefenceText(inc.accused_response)
+      if (inc.accused_evidence_urls) setDefenceUrls((inc.accused_evidence_urls as string[]).join('\n'))
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -198,6 +205,35 @@ export default function IncidentDetailPage() {
     }
   }
 
+  async function handleSubmitDefence() {
+    if (!defenceText.trim()) return
+    setSubmitting(true)
+    setDefenceError('')
+    try {
+      const urls = defenceUrls
+        .split('\n')
+        .map((u) => u.trim())
+        .filter(Boolean)
+
+      const res  = await fetch(`/api/pitboss/incidents/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accused_response:      defenceText.trim(),
+          accused_evidence_urls: urls.length > 0 ? urls : null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to submit defence')
+      await loadIncident()
+      setShowDefence(false)
+    } catch (err: any) {
+      setDefenceError(err.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-rise-black">
@@ -215,8 +251,10 @@ export default function IncidentDetailPage() {
     )
   }
 
-  const isResolved = incident.status === 'resolved'
-  const hasAI      = !!incident.ai_analysed_at
+  const isResolved  = incident.status === 'resolved'
+  const hasAI       = !!incident.ai_analysed_at
+  const hasDefence  = !!incident.accused_response
+  const canDefend   = (isAccused || isSteward) && !isResolved
 
   return (
     <main className="min-h-screen bg-rise-black pb-28">
@@ -303,13 +341,8 @@ export default function IncidentDetailPage() {
             <SectionHeader title="Evidence" />
             <div className="space-y-2">
               {incident.evidence_urls.map((url, i) => (
-                <a
-                  key={i}
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3"
-                >
+                <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3">
                   <span className="text-rise-red text-sm">▶</span>
                   <span className="text-white/70 text-sm truncate">{url}</span>
                 </a>
@@ -318,29 +351,97 @@ export default function IncidentDetailPage() {
           </div>
         )}
 
+        {/* Accused Defence */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <SectionHeader title="Accused Driver Defence" />
+            {canDefend && (
+              <button
+                onClick={() => setShowDefence(!showDefence)}
+                className="text-xs font-bold text-blue-400"
+              >
+                {showDefence ? 'Cancel' : hasDefence ? '✏️ Edit Defence' : '✏️ Add Defence'}
+              </button>
+            )}
+          </div>
+
+          {showDefence ? (
+            <div className="space-y-3">
+              <textarea
+                value={defenceText}
+                onChange={(e) => setDefenceText(e.target.value)}
+                placeholder="Explain the accused driver's side of the incident…"
+                rows={5}
+                className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-blue-500/30 focus:border-blue-400/60 focus:outline-none placeholder-white/20 resize-none"
+              />
+              <div>
+                <p className="text-white/40 text-[10px] uppercase tracking-widest mb-2">
+                  Evidence Links (one per line)
+                </p>
+                <textarea
+                  value={defenceUrls}
+                  onChange={(e) => setDefenceUrls(e.target.value)}
+                  placeholder="https://youtube.com/..."
+                  rows={3}
+                  className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-blue-400/60 focus:outline-none placeholder-white/20 resize-none"
+                />
+              </div>
+              {defenceError && <p className="text-red-400 text-sm">{defenceError}</p>}
+              <button
+                onClick={handleSubmitDefence}
+                disabled={!defenceText.trim() || submittingDefence}
+                className="w-full bg-blue-600 disabled:bg-white/10 disabled:text-white/20 text-white font-black py-4 rounded-2xl text-sm uppercase tracking-widest"
+              >
+                {submittingDefence ? 'Submitting…' : 'Submit Defence'}
+              </button>
+            </div>
+          ) : hasDefence ? (
+            <div className="bg-blue-500/5 border border-blue-500/20 rounded-2xl px-4 py-4 space-y-3">
+              <p className="text-white/80 text-sm leading-relaxed">{incident.accused_response}</p>
+              {incident.accused_evidence_urls && incident.accused_evidence_urls.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-white/10">
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest">Defence Evidence</p>
+                  {incident.accused_evidence_urls.map((url, i) => (
+                    <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                      className="flex items-center gap-3 bg-white/5 rounded-xl px-3 py-2">
+                      <span className="text-blue-400 text-sm">▶</span>
+                      <span className="text-white/70 text-xs truncate">{url}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+              <p className="text-white/20 text-[10px]">
+                Submitted {formatDate(incident.accused_response_at)}
+              </p>
+            </div>
+          ) : (
+            <div className="bg-white/5 rounded-2xl px-4 py-6 text-center">
+              <p className="text-white/30 text-sm">No defence submitted yet.</p>
+              {canDefend && (
+                <p className="text-white/20 text-xs mt-1">Tap ✏️ Add Defence to submit a POV.</p>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* AI Analysis */}
         <div>
           <div className="flex items-center justify-between mb-3">
             <SectionHeader title="AI Steward Analysis" />
-            {!isResolved && (
-              <button
-                onClick={handleAnalyse}
-                disabled={analysing}
-                className="text-xs font-bold text-rise-red disabled:text-white/20"
-              >
+            {isSteward && !isResolved && (
+              <button onClick={handleAnalyse} disabled={analysing}
+                className="text-xs font-bold text-rise-red disabled:text-white/20">
                 {analysing ? 'Analysing…' : hasAI ? '↺ Re-analyse' : '⚡ Analyse'}
               </button>
             )}
           </div>
 
-          {analyseError && (
-            <p className="text-red-400 text-xs mb-3">{analyseError}</p>
-          )}
+          {analyseError && <p className="text-red-400 text-xs mb-3">{analyseError}</p>}
 
           {!hasAI ? (
             <div className="bg-white/5 rounded-2xl px-4 py-6 text-center">
               <p className="text-white/30 text-sm">No AI analysis yet.</p>
-              <p className="text-white/20 text-xs mt-1">Tap ⚡ Analyse to run the AI steward.</p>
+              {isSteward && <p className="text-white/20 text-xs mt-1">Tap ⚡ Analyse to run the AI steward.</p>}
             </div>
           ) : (
             <div className="bg-white/5 rounded-2xl px-4 py-4 space-y-4">
@@ -354,9 +455,7 @@ export default function IncidentDetailPage() {
                 <div className="text-right">
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Confidence</p>
                   <p className={`text-base font-black ${confidenceColor(incident.ai_confidence)}`}>
-                    {incident.ai_confidence
-                      ? `${Math.round(Number(incident.ai_confidence) * 100)}%`
-                      : '—'}
+                    {incident.ai_confidence ? `${Math.round(Number(incident.ai_confidence) * 100)}%` : '—'}
                   </p>
                 </div>
                 <div className="text-right">
@@ -364,45 +463,34 @@ export default function IncidentDetailPage() {
                   <p className="text-orange-400 font-black text-base">{incident.ai_points ?? 0} PP</p>
                 </div>
               </div>
-
               {incident.ai_penalty && (
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Suggested Penalty</p>
                   <p className="text-white text-sm">{incident.ai_penalty}</p>
                 </div>
               )}
-
               {incident.ai_reasoning && (
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Reasoning</p>
                   <p className="text-white/70 text-sm leading-relaxed">{incident.ai_reasoning}</p>
                 </div>
               )}
-
               {incident.ai_articles && incident.ai_articles.length > 0 && (
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Cited Articles</p>
                   <div className="flex flex-wrap gap-2">
                     {incident.ai_articles.map((a, i) => (
-                      <span
-                        key={i}
-                        className="text-xs bg-rise-red/10 text-rise-red border border-rise-red/20 px-2 py-0.5 rounded-full"
-                      >
-                        {a}
-                      </span>
+                      <span key={i} className="text-xs bg-rise-red/10 text-rise-red border border-rise-red/20 px-2 py-0.5 rounded-full">{a}</span>
                     ))}
                   </div>
                 </div>
               )}
-
-              <p className="text-white/20 text-[10px]">
-                {incident.ai_model} · {formatDate(incident.ai_analysed_at)}
-              </p>
+              <p className="text-white/20 text-[10px]">{incident.ai_model} · {formatDate(incident.ai_analysed_at)}</p>
             </div>
           )}
         </div>
 
-        {/* Final ruling (resolved) */}
+        {/* Final Ruling */}
         {isResolved && (
           <div>
             <SectionHeader title="Final Ruling" />
@@ -421,9 +509,7 @@ export default function IncidentDetailPage() {
               )}
               <div className="flex justify-between">
                 <span className="text-white/40 text-sm">Penalty Points</span>
-                <span className="text-orange-400 font-bold text-sm">
-                  {incident.penalty_points ?? 0} PP
-                </span>
+                <span className="text-orange-400 font-bold text-sm">{incident.penalty_points ?? 0} PP</span>
               </div>
               {incident.steward_notes && (
                 <div>
@@ -442,8 +528,8 @@ export default function IncidentDetailPage() {
           </div>
         )}
 
-        {/* Resolve Panel */}
-        {!isResolved && (
+        {/* Resolve Panel — stewards only */}
+        {isSteward && !isResolved && (
           <div>
             <button
               onClick={() => setShowResolve(!showResolve)}
@@ -460,15 +546,8 @@ export default function IncidentDetailPage() {
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Verdict</p>
                   <div className="grid grid-cols-3 gap-2">
                     {(['guilty', 'not_guilty', 'inconclusive'] as const).map((v) => (
-                      <button
-                        key={v}
-                        onClick={() => setVerdict(v)}
-                        className={`py-3 rounded-xl text-xs font-bold uppercase transition-colors ${
-                          verdict === v
-                            ? 'bg-rise-red text-white'
-                            : 'bg-white/5 text-white/50'
-                        }`}
-                      >
+                      <button key={v} onClick={() => setVerdict(v)}
+                        className={`py-3 rounded-xl text-xs font-bold uppercase transition-colors ${verdict === v ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'}`}>
                         {v.replace('_', ' ')}
                       </button>
                     ))}
@@ -480,36 +559,21 @@ export default function IncidentDetailPage() {
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Type</p>
                   <div className="grid grid-cols-2 gap-2">
                     {(Object.keys(PENALTY_TYPE_LABELS) as PenaltyType[]).map((t) => (
-                      <button
-                        key={t}
-                        onClick={() => setPenaltyType(t)}
-                        className={`py-3 rounded-xl text-xs font-bold transition-colors ${
-                          penaltyType === t
-                            ? 'bg-rise-red text-white'
-                            : 'bg-white/5 text-white/50'
-                        }`}
-                      >
+                      <button key={t} onClick={() => setPenaltyType(t)}
+                        className={`py-3 rounded-xl text-xs font-bold transition-colors ${penaltyType === t ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'}`}>
                         {PENALTY_TYPE_LABELS[t]}
                       </button>
                     ))}
                   </div>
                 </div>
 
-                {/* Time penalty selector */}
                 {penaltyType === 'time' && (
                   <div>
                     <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Time Penalty</p>
                     <div className="grid grid-cols-3 gap-2">
                       {TIME_PENALTIES.map((t) => (
-                        <button
-                          key={t}
-                          onClick={() => setTimePenalty(t)}
-                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${
-                            timePenalty === t
-                              ? 'bg-rise-red text-white'
-                              : 'bg-white/5 text-white/50'
-                          }`}
-                        >
+                        <button key={t} onClick={() => setTimePenalty(t)}
+                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${timePenalty === t ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'}`}>
                           {t}
                         </button>
                       ))}
@@ -517,21 +581,13 @@ export default function IncidentDetailPage() {
                   </div>
                 )}
 
-                {/* Grid penalty selector */}
                 {penaltyType === 'grid' && (
                   <div>
                     <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Grid Penalty</p>
                     <div className="grid grid-cols-2 gap-2">
                       {GRID_PENALTIES.map((g) => (
-                        <button
-                          key={g}
-                          onClick={() => setGridPenalty(g)}
-                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${
-                            gridPenalty === g
-                              ? 'bg-rise-red text-white'
-                              : 'bg-white/5 text-white/50'
-                          }`}
-                        >
+                        <button key={g} onClick={() => setGridPenalty(g)}
+                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${gridPenalty === g ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'}`}>
                           {g}
                         </button>
                       ))}
@@ -539,21 +595,13 @@ export default function IncidentDetailPage() {
                   </div>
                 )}
 
-                {/* Ban selector */}
                 {penaltyType === 'ban' && (
                   <div>
                     <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Ban Type</p>
                     <div className="grid grid-cols-1 gap-2">
                       {BAN_PENALTIES.map((b) => (
-                        <button
-                          key={b}
-                          onClick={() => setBanPenalty(b)}
-                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${
-                            banPenalty === b
-                              ? 'bg-rise-red text-white'
-                              : 'bg-white/5 text-white/50'
-                          }`}
-                        >
+                        <button key={b} onClick={() => setBanPenalty(b)}
+                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${banPenalty === b ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'}`}>
                           {b}
                         </button>
                       ))}
@@ -563,33 +611,18 @@ export default function IncidentDetailPage() {
 
                 {/* Penalty Points */}
                 <div>
-                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">
-                    Penalty Points (PP)
-                  </p>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Points (PP)</p>
                   <div className="grid grid-cols-6 gap-2 mb-2">
                     {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12].map((n) => (
-                      <button
-                        key={n}
-                        onClick={() => setPenaltyPoints(String(n))}
-                        className={`py-2.5 rounded-xl text-xs font-bold transition-colors ${
-                          penaltyPoints === String(n)
-                            ? 'bg-rise-red text-white'
-                            : 'bg-white/5 text-white/50'
-                        }`}
-                      >
+                      <button key={n} onClick={() => setPenaltyPoints(String(n))}
+                        className={`py-2.5 rounded-xl text-xs font-bold transition-colors ${penaltyPoints === String(n) ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'}`}>
                         {n}
                       </button>
                     ))}
                   </div>
-                  <input
-                    type="number"
-                    value={penaltyPoints}
-                    onChange={(e) => setPenaltyPoints(e.target.value)}
-                    placeholder="Custom PP amount"
-                    min="0"
-                    max="12"
-                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
-                  />
+                  <input type="number" value={penaltyPoints} onChange={(e) => setPenaltyPoints(e.target.value)}
+                    placeholder="Custom PP amount" min="0" max="12"
+                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20" />
                 </div>
 
                 {/* Penalty preview */}
@@ -605,13 +638,9 @@ export default function IncidentDetailPage() {
                 {/* Steward Notes */}
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Steward Notes</p>
-                  <textarea
-                    value={stewardNotes}
-                    onChange={(e) => setStewardNotes(e.target.value)}
-                    placeholder="Explain the ruling and reasoning…"
-                    rows={4}
-                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none"
-                  />
+                  <textarea value={stewardNotes} onChange={(e) => setStewardNotes(e.target.value)}
+                    placeholder="Explain the ruling and reasoning…" rows={4}
+                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none" />
                 </div>
 
                 {/* Override reason */}
@@ -620,25 +649,16 @@ export default function IncidentDetailPage() {
                     <p className="text-yellow-400 text-xs uppercase tracking-widest mb-2">
                       ⚠ Override Reason (differs from AI)
                     </p>
-                    <textarea
-                      value={overrideReason}
-                      onChange={(e) => setOverrideReason(e.target.value)}
-                      placeholder="Why are you overriding the AI suggestion?"
-                      rows={3}
-                      className="w-full bg-yellow-400/5 text-white text-sm px-4 py-3 rounded-xl border border-yellow-400/20 focus:border-yellow-400/50 focus:outline-none placeholder-white/20 resize-none"
-                    />
+                    <textarea value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)}
+                      placeholder="Why are you overriding the AI suggestion?" rows={3}
+                      className="w-full bg-yellow-400/5 text-white text-sm px-4 py-3 rounded-xl border border-yellow-400/20 focus:border-yellow-400/50 focus:outline-none placeholder-white/20 resize-none" />
                   </div>
                 )}
 
-                {resolveError && (
-                  <p className="text-red-400 text-sm">{resolveError}</p>
-                )}
+                {resolveError && <p className="text-red-400 text-sm">{resolveError}</p>}
 
-                <button
-                  onClick={handleResolve}
-                  disabled={!verdict || resolving}
-                  className="w-full bg-rise-red disabled:bg-white/10 disabled:text-white/20 text-white font-black py-4 rounded-2xl text-sm uppercase tracking-widest"
-                >
+                <button onClick={handleResolve} disabled={!verdict || resolving}
+                  className="w-full bg-rise-red disabled:bg-white/10 disabled:text-white/20 text-white font-black py-4 rounded-2xl text-sm uppercase tracking-widest">
                   {resolving ? 'Saving…' : 'Confirm Ruling'}
                 </button>
               </div>
