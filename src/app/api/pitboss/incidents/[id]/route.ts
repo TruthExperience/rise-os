@@ -2,6 +2,74 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
+if (action === 'analyse') {
+  const { data: articles } = await supabase
+    .schema('pitboss')
+    .from('rule_articles')
+    .select('article_number, title, body')
+    .eq('league_id', incident.league_id)
+    .eq('active', true)
+    .order('article_number', { ascending: true })
+
+  const rulebookText = articles && articles.length > 0
+    ? articles.map((a: any) => `Article ${a.article_number} — ${a.title}:\n${a.body}`).join('\n\n')
+    : 'No rulebook articles available for this league.'
+
+  try {
+    const llmRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/pitboss/llm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'steward',
+        league: incident.league_id,
+        fetch_regulations: false, // we already fetched above
+        incident: {
+          incident_type: incident.incident_type,
+          description:   incident.description,
+          season:        incident.season,
+          round:         incident.round,
+          lap:           incident.lap,
+          league_id:     incident.league_id,
+          rulebook:      rulebookText,
+        },
+      }),
+    })
+
+    if (!llmRes.ok) {
+      const err = await llmRes.text()
+      console.error('[incidents/id POST] llm route error', err)
+      return NextResponse.json({ error: 'AI analysis failed' }, { status: 502 })
+    }
+
+    const ai = await llmRes.json()
+    const suggestion = ai.suggestion ?? ai
+
+    const { error: aiUpdateError } = await supabase
+      .schema('pitboss')
+      .from('incidents')
+      .update({
+        ai_verdict:     suggestion.verdict     ?? null,
+        ai_penalty:     suggestion.penalty     ?? null,
+        ai_points:      suggestion.points      ?? 0,
+        ai_confidence:  suggestion.confidence  ?? null,
+        ai_reasoning:   suggestion.reasoning   ?? null,
+        ai_articles:    suggestion.articles    ?? [],
+        ai_model:       ai.model               ?? 'unknown',
+        ai_analysed_at: new Date().toISOString(),
+      })
+      .eq('id', params.id)
+
+    if (aiUpdateError) {
+      console.error('[incidents/id POST] ai update', aiUpdateError)
+      return NextResponse.json({ error: aiUpdateError.message }, { status: 500 })
+    }
+
+    return NextResponse.json({ success: true })
+  } catch (err: any) {
+    console.error('[incidents/id POST] ai analyse', err)
+    return NextResponse.json({ error: 'AI analysis failed' }, { status: 500 })
+  }
+}
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
 const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward']
