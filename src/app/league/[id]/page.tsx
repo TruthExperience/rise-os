@@ -195,10 +195,10 @@ function NavCard({
   sub,
   onClick,
 }: {
-  icon: string
-  label: string
-  sub: string
-  onClick: () => void
+  icon: string;
+  label: string;
+  sub: string;
+  onClick: () => void;
 }) {
   return (
     <button
@@ -217,4 +217,6 @@ function InfoRow({ label, value }: { label: string; value: string | number }) {
     <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 flex items-center justify-between">
       <span className="text-white/40 text-sm">{label}</span>
       <span className="text-white text-sm font-semibold">{String(value)}</span>
-    
+    </div>
+  );
+}
