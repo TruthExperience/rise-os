@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
@@ -57,7 +57,7 @@ function formatDate(iso: string | null) {
   return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-export default function StewardPenaltiesPage() {
+function StewardPenaltiesInner() {
   const { data: session, status } = useSession()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -98,7 +98,6 @@ export default function StewardPenaltiesPage() {
       setAllDrivers(drivers)
 
       const penalties: Penalty[] = penData.penalties ?? []
-
       const driverMap = new Map<string, DriverGroup>()
 
       for (const d of drivers) {
@@ -191,7 +190,6 @@ export default function StewardPenaltiesPage() {
 
   return (
     <div className="min-h-screen bg-[#1A1A1A] pb-24">
-
       <div className="px-4 pt-12 pb-4 border-b border-gray-800 flex items-center justify-between">
         <div>
           <button onClick={() => router.back()} className="text-white/50 text-sm mb-2 block">← Back</button>
@@ -206,7 +204,6 @@ export default function StewardPenaltiesPage() {
         </button>
       </div>
 
-      {/* Issue form modal */}
       {showIssueForm && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-end">
           <div className="bg-[#1A1A1A] border-t border-gray-800 w-full rounded-t-2xl p-5 space-y-4">
@@ -284,7 +281,6 @@ export default function StewardPenaltiesPage() {
         </div>
       )}
 
-      {/* Driver groups */}
       <div className="px-4 pt-4 space-y-3">
         {groups.map(({ driver, penalties, activePP }) => {
           const isExpanded = expandedDriver === driver.id
@@ -340,7 +336,6 @@ export default function StewardPenaltiesPage() {
                               {p.source === 'manual' ? 'Manual' : 'Incident'}
                             </span>
                           </div>
-
                           {p.source === 'manual' && p.is_active && !p.removed_at && (
                             <button
                               onClick={() => handleRemove(p.id)}
@@ -363,5 +358,17 @@ export default function StewardPenaltiesPage() {
         })}
       </div>
     </div>
+  )
+}
+
+export default function StewardPenaltiesPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#1A1A1A] flex items-center justify-center">
+        <p className="text-white animate-pulse">Loading ledger…</p>
+      </div>
+    }>
+      <StewardPenaltiesInner />
+    </Suspense>
   )
 }
