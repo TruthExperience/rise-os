@@ -6,7 +6,7 @@ import { pbSteward } from '@/lib/pitboss-llm'
 import type { RuleArticle } from '@/lib/pitboss-llm'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
-const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward']
+const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward', 'bsac_chief']
 
 async function getRequestingDriver(supabase: any, session: any) {
   const user = session.user as any
@@ -38,7 +38,12 @@ async function getRequestingDriver(supabase: any, session: any) {
   return driver
 }
 
-async function hasStewwardAccess(supabase: any, driverId: string, leagueId: string): Promise<boolean> {
+async function hasStewwardAccess(
+  supabase: any,
+  driverId: string,
+  leagueId: string
+): Promise<boolean> {
+  // Check active steward licence in this league
   const { data: licence } = await supabase
     .schema('pitboss')
     .from('licences')
@@ -51,16 +56,38 @@ async function hasStewwardAccess(supabase: any, driverId: string, leagueId: stri
 
   if (licence) return true
 
-  const { data: leagueRole } = await supabase
+  // Check active steward licence in ANY league (commissioner/admin override)
+  const { data: anyLicence } = await supabase
     .schema('pitboss')
-    .from('driver_leagues')
-    .select('role')
+    .from('licences')
+    .select('id')
     .eq('driver_id', driverId)
-    .eq('league_id', leagueId)
-    .in('role', STEWARD_LEAGUE_ROLES)
+    .eq('status', 'active')
+    .in('role_code', STEWARD_ROLES)
     .maybeSingle()
 
-  return !!leagueRole
+  if (anyLicence) return true
+
+  // Fetch all league memberships and parse comma-separated roles
+  // Roles in driver_leagues can be stored as "head_steward, bsac_chief, team_principal"
+  const { data: memberships } = await supabase
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('role, league_id')
+    .eq('driver_id', driverId)
+
+  if (!memberships) return false
+
+  for (const m of memberships) {
+    const roles = (m.role as string)
+      .split(',')
+      .map((r: string) => r.trim().toLowerCase())
+    if (roles.some((r: string) => STEWARD_LEAGUE_ROLES.includes(r))) {
+      return true
+    }
+  }
+
+  return false
 }
 
 export async function GET(
@@ -119,7 +146,7 @@ export async function GET(
     .maybeSingle()
 
   const { data: league } = await supabase
-    .schema('rise_os')
+    .schema('pitboss')
     .from('leagues')
     .select('id, name, slug')
     .eq('id', incident.league_id)
