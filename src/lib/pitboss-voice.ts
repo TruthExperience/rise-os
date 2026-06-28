@@ -20,7 +20,9 @@ export interface PitBossOmniSessionOptions {
 
 const TRANSCRIBE_ENDPOINT = '/api/pitboss/voice/transcribe';
 
-function getSpeechRecognitionCtor(): typeof window.SpeechRecognition | null {
+type SpeechRecognitionCtor = new () => SpeechRecognition;
+
+function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
   return (
     (window as any).SpeechRecognition ??
     (window as any).webkitSpeechRecognition ??
