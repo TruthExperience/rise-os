@@ -2,7 +2,7 @@
 
 import { useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
 
 const TYPE_LABELS: Record<string, string> = {
   collision:       '💥 Collision',
@@ -16,12 +16,12 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  open:     'text-rise-red',
+  open:      'text-rise-red',
   reviewing: 'text-yellow-400',
-  resolved: 'text-green-400',
+  resolved:  'text-green-400',
 };
 
-export default function StewardPage() {
+function StewardInner() {
   const { data: session, status } = useSession();
   const router       = useRouter();
   const searchParams = useSearchParams();
@@ -72,9 +72,7 @@ export default function StewardPage() {
             key={f}
             onClick={() => setFilter(f)}
             className={`px-4 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-colors ${
-              filter === f
-                ? 'bg-rise-red text-white'
-                : 'bg-white/5 text-white/40'
+              filter === f ? 'bg-rise-red text-white' : 'bg-white/5 text-white/40'
             }`}
           >
             {f}
@@ -83,9 +81,7 @@ export default function StewardPage() {
       </div>
 
       {incidents.length === 0 ? (
-        <p className="text-white/30 text-sm text-center mt-16">
-          No {filter} incidents.
-        </p>
+        <p className="text-white/30 text-sm text-center mt-16">No {filter} incidents.</p>
       ) : (
         <div className="flex flex-col gap-3">
           {incidents.map(inc => (
@@ -117,5 +113,17 @@ export default function StewardPage() {
         </div>
       )}
     </main>
+  );
+}
+
+export default function StewardPage() {
+  return (
+    <Suspense fallback={
+      <main className="flex min-h-screen items-center justify-center bg-rise-black">
+        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+      </main>
+    }>
+      <StewardInner />
+    </Suspense>
   );
 }
