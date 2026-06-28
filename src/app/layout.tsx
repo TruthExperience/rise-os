@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import SessionProvider from "@/components/providers/SessionProvider";
 import BottomNav from "@/components/ui/BottomNav";
+import { Analytics } from "@vercel/analytics/next";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -61,6 +62,7 @@ export default function RootLayout({
           </div>
           <BottomNav />
         </SessionProvider>
+        <Analytics />
       </body>
     </html>
   );
