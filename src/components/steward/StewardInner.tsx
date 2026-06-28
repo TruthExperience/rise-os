@@ -28,11 +28,12 @@ interface League {
   slug: string
 }
 
-const STATUS_FILTERS = ['all', 'pending', 'resolved']
+const STATUS_FILTERS = ['all', 'open', 'resolved']
 
 function statusColor(status: string) {
   if (status === 'resolved') return 'text-green-400 bg-green-500/20 border-green-500/30'
-  if (status === 'pending')  return 'text-rise-red bg-rise-red/10 border-rise-red/30'
+  if (status === 'open')     return 'text-rise-red bg-rise-red/10 border-rise-red/30'
+  if (status === 'pending')  return 'text-yellow-400 bg-yellow-500/20 border-yellow-500/30'
   return 'text-white/50 bg-white/10 border-white/10'
 }
 
@@ -51,7 +52,7 @@ export function StewardInner() {
   const [leagues, setLeagues]           = useState<League[]>([])
   const [selectedLeague, setSelected]   = useState<League | null>(null)
   const [incidents, setIncidents]       = useState<Incident[]>([])
-  const [filter, setFilter]             = useState('pending')
+  const [filter, setFilter]             = useState('open')
   const [loading, setLoading]           = useState(true)
   const [loadingInc, setLoadingInc]     = useState(false)
   const [error, setError]               = useState<string | null>(null)
@@ -60,7 +61,6 @@ export function StewardInner() {
     if (status === 'unauthenticated') router.push('/login')
   }, [status, router])
 
-  // Load leagues
   useEffect(() => {
     if (status !== 'authenticated') return
     fetch('/api/leagues')
@@ -69,11 +69,10 @@ export function StewardInner() {
         const all = (data.leagues ?? data) as League[]
         setLeagues(all)
 
-        // Auto-select from query param
         const paramId = searchParams.get('league_id')
         if (paramId) {
           const match = all.find((l) => l.id === paramId)
-          if (match) loadIncidents(match, filter)
+          if (match) loadIncidents(match, 'open')
         }
       })
       .catch(() => setError('Failed to load leagues'))
@@ -156,7 +155,6 @@ export function StewardInner() {
       {/* Incident list */}
       {selectedLeague && (
         <>
-          {/* Filter tabs */}
           <div className="flex gap-2 mb-5">
             {STATUS_FILTERS.map((f) => (
               <button
