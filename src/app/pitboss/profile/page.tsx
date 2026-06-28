@@ -6,6 +6,7 @@ import { useSession } from 'next-auth/react'
 
 interface Driver {
   id: string
+  discord_id: string
   discord_username: string
   discord_avatar: string | null
   display_name: string | null
@@ -123,7 +124,6 @@ export default function ProfilePage() {
 
   return (
     <main className="min-h-screen bg-rise-black px-4 py-8">
-      {/* Header */}
       <button
         onClick={() => router.back()}
         className="flex items-center gap-2 text-white/40 text-sm mb-6"
