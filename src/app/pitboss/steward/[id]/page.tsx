@@ -2,7 +2,7 @@
 
 import { useSession } from 'next-auth/react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
 
 const VERDICT_OPTIONS = ['Guilty', 'Not Guilty', 'Dismissed', 'Noted'];
 const PENALTY_OPTIONS = [
@@ -10,7 +10,7 @@ const PENALTY_OPTIONS = [
   'Stop-Go', 'DSQ', 'Warning', 'Points Only',
 ];
 
-export default function IncidentReviewPage() {
+function IncidentReviewInner() {
   const { data: session, status } = useSession();
   const router       = useRouter();
   const { id }       = useParams<{ id: string }>();
@@ -131,16 +131,12 @@ export default function IncidentReviewPage() {
         {incident.status === 'resolved' ? '✅ Resolved' : '🔴 Open'}
       </p>
 
-      {/* Incident details */}
       <section className="rounded-2xl border border-white/10 bg-white/5 p-4 mb-4">
         <p className="text-white/30 text-[10px] uppercase tracking-widest mb-3">Incident</p>
         <div className="flex flex-col gap-2">
           <Row label="Type" value={incident.incident_type} />
           {incident.round && (
-            <Row
-              label="Round"
-              value={`Round ${incident.round}${incident.lap ? ` · Lap ${incident.lap}` : ''}`}
-            />
+            <Row label="Round" value={`Round ${incident.round}${incident.lap ? ` · Lap ${incident.lap}` : ''}`} />
           )}
           {incident.season && <Row label="Season" value={incident.season} />}
         </div>
@@ -148,8 +144,7 @@ export default function IncidentReviewPage() {
         {Array.isArray(incident.evidence_urls) && incident.evidence_urls.length > 0 && (
           <div className="mt-3 flex flex-col gap-1">
             {incident.evidence_urls.map((url: string, i: number) => (
-              <a key={i} href={url} target="_blank" rel="noreferrer"
-                className="text-rise-red text-xs underline">
+              <a key={i} href={url} target="_blank" rel="noreferrer" className="text-rise-red text-xs underline">
                 Evidence {i + 1}
               </a>
             ))}
@@ -157,12 +152,9 @@ export default function IncidentReviewPage() {
         )}
       </section>
 
-      {/* AI Recommendation */}
       <section className="rounded-2xl border border-rise-red/30 bg-rise-red/5 p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
-          <p className="text-rise-red text-[10px] uppercase tracking-widest font-bold">
-            AI Recommendation
-          </p>
+          <p className="text-rise-red text-[10px] uppercase tracking-widest font-bold">AI Recommendation</p>
           {incident.ai_analysed_at && (
             <button onClick={() => setShowAI(v => !v)} className="text-white/30 text-[10px]">
               {showAI ? 'Hide' : 'Show'}
@@ -183,12 +175,8 @@ export default function IncidentReviewPage() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white font-bold text-sm">{incident.ai_verdict}</p>
-                {incident.ai_penalty && (
-                  <p className="text-white/50 text-xs">{incident.ai_penalty}</p>
-                )}
-                {incident.ai_points > 0 && (
-                  <p className="text-rise-red text-xs font-bold">{incident.ai_points} pts</p>
-                )}
+                {incident.ai_penalty && <p className="text-white/50 text-xs">{incident.ai_penalty}</p>}
+                {incident.ai_points > 0 && <p className="text-rise-red text-xs font-bold">{incident.ai_points} pts</p>}
               </div>
               {confidence !== null && (
                 <div className="flex flex-col items-center">
@@ -207,32 +195,21 @@ export default function IncidentReviewPage() {
             {Array.isArray(incident.ai_articles) && incident.ai_articles.length > 0 && (
               <div className="flex flex-wrap gap-1 border-t border-white/10 pt-3">
                 {incident.ai_articles.map((a: string, i: number) => (
-                  <span key={i} className="bg-white/10 text-white/60 text-[10px] px-2 py-1 rounded-full">
-                    {a}
-                  </span>
+                  <span key={i} className="bg-white/10 text-white/60 text-[10px] px-2 py-1 rounded-full">{a}</span>
                 ))}
               </div>
             )}
 
-            <button
-              onClick={acceptAI}
-              className="w-full py-2 rounded-xl border border-rise-red text-rise-red text-xs font-bold mt-1"
-            >
+            <button onClick={acceptAI} className="w-full py-2 rounded-xl border border-rise-red text-rise-red text-xs font-bold mt-1">
               Accept AI Recommendation
             </button>
-
-            <button
-              onClick={runAI}
-              disabled={analysing}
-              className="text-white/30 text-[10px] text-center"
-            >
+            <button onClick={runAI} disabled={analysing} className="text-white/30 text-[10px] text-center">
               {analysing ? 'Re-analysing...' : 'Re-run analysis'}
             </button>
           </div>
         )}
       </section>
 
-      {/* Steward decision */}
       {incident.status !== 'resolved' && (
         <section className="rounded-2xl border border-white/10 bg-white/5 p-4 mb-4">
           <p className="text-white/30 text-[10px] uppercase tracking-widest mb-4">Your Decision</p>
@@ -240,15 +217,10 @@ export default function IncidentReviewPage() {
           <p className="text-white/40 text-xs mb-2">Verdict</p>
           <div className="grid grid-cols-2 gap-2 mb-4">
             {VERDICT_OPTIONS.map(v => (
-              <button
-                key={v}
-                onClick={() => setVerdict(v)}
+              <button key={v} onClick={() => setVerdict(v)}
                 className={`py-2 rounded-xl text-xs font-bold transition-colors ${
-                  verdict === v
-                    ? 'bg-rise-red text-white'
-                    : 'bg-white/5 text-white/50 border border-white/10'
-                }`}
-              >
+                  verdict === v ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50 border border-white/10'
+                }`}>
                 {v}
               </button>
             ))}
@@ -257,15 +229,10 @@ export default function IncidentReviewPage() {
           <p className="text-white/40 text-xs mb-2">Penalty</p>
           <div className="flex flex-col gap-2 mb-4">
             {PENALTY_OPTIONS.map(p => (
-              <button
-                key={p}
-                onClick={() => setPenalty(penalty === p ? '' : p)}
+              <button key={p} onClick={() => setPenalty(penalty === p ? '' : p)}
                 className={`py-2 rounded-xl text-xs font-bold transition-colors ${
-                  penalty === p
-                    ? 'bg-white/20 text-white'
-                    : 'bg-white/5 text-white/50 border border-white/10'
-                }`}
-              >
+                  penalty === p ? 'bg-white/20 text-white' : 'bg-white/5 text-white/50 border border-white/10'
+                }`}>
                 {p}
               </button>
             ))}
@@ -274,52 +241,37 @@ export default function IncidentReviewPage() {
           <p className="text-white/40 text-xs mb-2">
             Penalty Points: <span className="text-rise-red font-bold">{points}</span>
           </p>
-          <input
-            type="range" min={0} max={12} step={1}
-            value={points}
+          <input type="range" min={0} max={12} step={1} value={points}
             onChange={e => setPoints(Number(e.target.value))}
-            className="w-full accent-rise-red mb-4"
-          />
+            className="w-full accent-rise-red mb-4" />
 
           {isOverride && (
             <div className="mb-4">
               <p className="text-yellow-400 text-xs mb-2">⚠️ Override reason (differs from AI)</p>
-              <textarea
-                value={overrideReason}
-                onChange={e => setOverrideReason(e.target.value)}
+              <textarea value={overrideReason} onChange={e => setOverrideReason(e.target.value)}
                 placeholder="Why are you overriding the AI recommendation?"
-                className="w-full bg-white/5 border border-yellow-400/30 rounded-xl p-3 text-white text-xs resize-none h-20 placeholder:text-white/20"
-              />
+                className="w-full bg-white/5 border border-yellow-400/30 rounded-xl p-3 text-white text-xs resize-none h-20 placeholder:text-white/20" />
             </div>
           )}
 
           <p className="text-white/40 text-xs mb-2">Steward Notes (optional)</p>
-          <textarea
-            value={notes}
-            onChange={e => setNotes(e.target.value)}
+          <textarea value={notes} onChange={e => setNotes(e.target.value)}
             placeholder="Additional notes for the record..."
-            className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-xs resize-none h-20 placeholder:text-white/20 mb-4"
-          />
+            className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-xs resize-none h-20 placeholder:text-white/20 mb-4" />
 
-          <button
-            onClick={resolve}
-            disabled={!verdict || submitting}
-            className="w-full py-4 rounded-2xl bg-rise-red text-white font-black text-sm disabled:opacity-40 active:opacity-80 transition-opacity"
-          >
+          <button onClick={resolve} disabled={!verdict || submitting}
+            className="w-full py-4 rounded-2xl bg-rise-red text-white font-black text-sm disabled:opacity-40 active:opacity-80 transition-opacity">
             {submitting ? 'Submitting...' : 'Submit Decision'}
           </button>
         </section>
       )}
 
-      {/* Resolved summary */}
       {incident.status === 'resolved' && (
         <section className="rounded-2xl border border-green-500/20 bg-green-500/5 p-4">
           <p className="text-green-400 text-[10px] uppercase tracking-widest mb-3 font-bold">Decision</p>
           <Row label="Verdict" value={incident.verdict} />
           {incident.penalty && <Row label="Penalty" value={incident.penalty} />}
-          {incident.penalty_points > 0 && (
-            <Row label="Points" value={`${incident.penalty_points} pts`} />
-          )}
+          {incident.penalty_points > 0 && <Row label="Points" value={`${incident.penalty_points} pts`} />}
           {incident.steward_notes && (
             <p className="text-white/40 text-xs mt-3 leading-relaxed">{incident.steward_notes}</p>
           )}
@@ -335,5 +287,17 @@ function Row({ label, value }: { label: string; value: string | number }) {
       <span className="text-white/40 text-xs">{label}</span>
       <span className="text-white text-xs font-semibold">{String(value)}</span>
     </div>
+  );
+}
+
+export default function IncidentReviewPage() {
+  return (
+    <Suspense fallback={
+      <main className="flex min-h-screen items-center justify-center bg-rise-black">
+        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+      </main>
+    }>
+      <IncidentReviewInner />
+    </Suspense>
   );
 }
