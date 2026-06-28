@@ -45,7 +45,6 @@ export async function GET(
     return NextResponse.json({ error: 'Incident not found' }, { status: 404 })
   }
 
-  // Stewards and commissioners can also view — check licence
   const { data: stewardLicence } = await supabase
     .schema('pitboss')
     .from('licences')
@@ -53,7 +52,7 @@ export async function GET(
     .eq('driver_id', requestingDriver.id)
     .eq('league_id', incident.league_id)
     .eq('status', 'active')
-    .in('role_code', ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER'])
+    .in('role_code', ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM'])
     .maybeSingle()
 
   const allowed =
@@ -127,7 +126,6 @@ export async function POST(
   const body = await req.json()
   const { action } = body
 
-  // ── Fetch incident ──────────────────────────────────────────────────────
   const { data: incident, error: incError } = await supabase
     .schema('pitboss')
     .from('incidents')
@@ -139,7 +137,6 @@ export async function POST(
     return NextResponse.json({ error: 'Incident not found' }, { status: 404 })
   }
 
-  // ── Steward access check ────────────────────────────────────────────────
   const { data: stewardLicence } = await supabase
     .schema('pitboss')
     .from('licences')
@@ -147,7 +144,7 @@ export async function POST(
     .eq('driver_id', requestingDriver.id)
     .eq('league_id', incident.league_id)
     .eq('status', 'active')
-    .in('role_code', ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER'])
+    .in('role_code', ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM'])
     .maybeSingle()
 
   if (!stewardLicence) {
@@ -158,9 +155,9 @@ export async function POST(
   if (action === 'resolve') {
     const {
       verdict,
-      penalty        = null,
-      penalty_points = 0,
-      steward_notes  = null,
+      penalty         = null,
+      penalty_points  = 0,
+      steward_notes   = null,
       override_reason = null,
     } = body
 
@@ -208,7 +205,6 @@ export async function POST(
 
       if (ledgerError) {
         console.error('[incidents/id] penalty ledger insert', ledgerError)
-        // Don't fail the whole request — ruling is saved, log the ledger error
       }
     }
 
@@ -217,7 +213,6 @@ export async function POST(
 
   // ── Action: analyse ─────────────────────────────────────────────────────
   if (action === 'analyse') {
-    // Fetch rule articles for this league
     const { data: articles } = await supabase
       .schema('pitboss')
       .from('rule_articles')
