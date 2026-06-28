@@ -30,7 +30,30 @@ interface Incident {
   ai_articles: string[] | null
   ai_model: string | null
   ai_analysed_at: string | null
+  reporter?: { discord_username: string; display_name: string | null }
+  accused?: { discord_username: string; display_name: string | null }
+  league?: { name: string; slug: string }
 }
+
+// ─── Penalty types per league ─────────────────────────────────────────────────
+
+const TIME_PENALTIES = ['+3s', '+5s', '+10s', '+15s', 'Drive-Through', 'Pit Lane Start']
+const GRID_PENALTIES = ['3 places', '5 places', '10 places', 'Back of Grid']
+const BAN_PENALTIES  = ['Race Ban', 'Season Ban', 'Permanent Ban']
+
+type PenaltyType = 'none' | 'time' | 'grid' | 'ban' | 'reprimand' | 'warning' | 'dsq'
+
+const PENALTY_TYPE_LABELS: Record<PenaltyType, string> = {
+  none:      'No Penalty',
+  warning:   'Warning',
+  reprimand: 'Reprimand',
+  time:      'Time Penalty',
+  grid:      'Grid Penalty',
+  dsq:       'Disqualification',
+  ban:       'Ban',
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string | null) {
   if (!iso) return '—'
@@ -60,6 +83,26 @@ function SectionHeader({ title }: { title: string }) {
   )
 }
 
+function buildPenaltySummary(
+  penaltyType: PenaltyType,
+  timePenalty: string,
+  gridPenalty: string,
+  banPenalty: string,
+  penaltyPoints: string
+): string {
+  const parts: string[] = []
+  if (penaltyType === 'time' && timePenalty)      parts.push(timePenalty + ' time penalty')
+  if (penaltyType === 'grid' && gridPenalty)      parts.push(gridPenalty + ' grid penalty')
+  if (penaltyType === 'ban'  && banPenalty)       parts.push(banPenalty)
+  if (penaltyType === 'dsq')                      parts.push('Disqualification')
+  if (penaltyType === 'reprimand')                parts.push('Reprimand')
+  if (penaltyType === 'warning')                  parts.push('Warning')
+  if (penaltyPoints && Number(penaltyPoints) > 0) parts.push(penaltyPoints + ' PP')
+  return parts.join(' + ') || 'No penalty'
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
 export default function IncidentDetailPage() {
   const { id } = useParams<{ id: string }>()
   const searchParams = useSearchParams()
@@ -74,14 +117,17 @@ export default function IncidentDetailPage() {
   const [analysing, setAnalysing]       = useState(false)
   const [analyseError, setAnalyseError] = useState('')
 
-  const [showResolve, setShowResolve]         = useState(false)
-  const [verdict, setVerdict]                 = useState('')
-  const [penalty, setPenalty]                 = useState('')
-  const [penaltyPoints, setPenaltyPoints]     = useState('')
-  const [stewardNotes, setStewardNotes]       = useState('')
-  const [overrideReason, setOverrideReason]   = useState('')
-  const [resolving, setResolving]             = useState(false)
-  const [resolveError, setResolveError]       = useState('')
+  const [showResolve, setShowResolve]     = useState(false)
+  const [verdict, setVerdict]             = useState('')
+  const [penaltyType, setPenaltyType]     = useState<PenaltyType>('none')
+  const [timePenalty, setTimePenalty]     = useState('')
+  const [gridPenalty, setGridPenalty]     = useState('')
+  const [banPenalty, setBanPenalty]       = useState('')
+  const [penaltyPoints, setPenaltyPoints] = useState('0')
+  const [stewardNotes, setStewardNotes]   = useState('')
+  const [overrideReason, setOverrideReason] = useState('')
+  const [resolving, setResolving]         = useState(false)
+  const [resolveError, setResolveError]   = useState('')
 
   useEffect(() => { loadIncident() }, [id])
 
@@ -91,12 +137,9 @@ export default function IncidentDetailPage() {
       const res  = await fetch(`/api/pitboss/incidents/${id}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed to load incident')
-
       const inc = data.incident
       setIncident(inc)
-
       if (inc.ai_verdict) setVerdict(inc.ai_verdict)
-      if (inc.ai_penalty) setPenalty(inc.ai_penalty)
       if (inc.ai_points)  setPenaltyPoints(String(inc.ai_points))
     } catch (err: any) {
       setError(err.message)
@@ -129,15 +172,18 @@ export default function IncidentDetailPage() {
     setResolving(true)
     setResolveError('')
     try {
+      const penaltySummary = buildPenaltySummary(
+        penaltyType, timePenalty, gridPenalty, banPenalty, penaltyPoints
+      )
       const res  = await fetch(`/api/pitboss/incidents/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action:          'resolve',
           verdict,
-          penalty:         penalty || null,
+          penalty:         penaltyType !== 'none' ? penaltySummary : null,
           penalty_points:  penaltyPoints ? Number(penaltyPoints) : 0,
-          steward_notes:   stewardNotes || null,
+          steward_notes:   stewardNotes  || null,
           override_reason: overrideReason || null,
         }),
       })
@@ -182,6 +228,9 @@ export default function IncidentDetailPage() {
           <div>
             <h1 className="text-white font-black text-xl leading-tight">{incident.incident_type}</h1>
             <p className="text-white/30 text-xs mt-0.5">{formatDate(incident.created_at)}</p>
+            {incident.league && (
+              <p className="text-white/20 text-xs mt-0.5 uppercase tracking-widest">{incident.league.name}</p>
+            )}
           </div>
           <span className={`text-xs font-bold uppercase px-3 py-1 rounded-full border ${
             isResolved
@@ -195,10 +244,35 @@ export default function IncidentDetailPage() {
 
       <div className="px-4 pt-5 space-y-6">
 
+        {/* Parties */}
+        {(incident.reporter || incident.accused) && (
+          <div>
+            <SectionHeader title="Parties" />
+            <div className="bg-white/5 rounded-2xl px-4 py-2">
+              {incident.reporter && (
+                <div className="flex justify-between py-2 border-b border-white/5">
+                  <span className="text-white/40 text-sm">Reporter</span>
+                  <span className="text-white text-sm">
+                    {incident.reporter.display_name ?? incident.reporter.discord_username}
+                  </span>
+                </div>
+              )}
+              {incident.accused && (
+                <div className="flex justify-between py-2">
+                  <span className="text-white/40 text-sm">Accused</span>
+                  <span className="text-white text-sm">
+                    {incident.accused.display_name ?? incident.accused.discord_username}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Context */}
         <div>
           <SectionHeader title="Incident Details" />
-          <div className="bg-white/5 rounded-2xl px-4 py-2 space-y-0">
+          <div className="bg-white/5 rounded-2xl px-4 py-2">
             {[
               { label: 'Season', value: incident.season },
               { label: 'Round',  value: incident.round ? `Round ${incident.round}` : null },
@@ -219,9 +293,7 @@ export default function IncidentDetailPage() {
         <div>
           <SectionHeader title="Description" />
           <div className="bg-white/5 rounded-2xl px-4 py-4">
-            <p className="text-white/80 text-sm leading-relaxed">
-              {incident.description || <span className="text-white/20">No description provided.</span>}
-            </p>
+            <p className="text-white/80 text-sm leading-relaxed">{incident.description}</p>
           </div>
         </div>
 
@@ -282,12 +354,14 @@ export default function IncidentDetailPage() {
                 <div className="text-right">
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Confidence</p>
                   <p className={`text-base font-black ${confidenceColor(incident.ai_confidence)}`}>
-                    {incident.ai_confidence ? `${Math.round(Number(incident.ai_confidence) * 100)}%` : '—'}
+                    {incident.ai_confidence
+                      ? `${Math.round(Number(incident.ai_confidence) * 100)}%`
+                      : '—'}
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">PP</p>
-                  <p className="text-white font-black text-base">{incident.ai_points ?? 0}</p>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Suggested PP</p>
+                  <p className="text-orange-400 font-black text-base">{incident.ai_points ?? 0} PP</p>
                 </div>
               </div>
 
@@ -310,7 +384,10 @@ export default function IncidentDetailPage() {
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Cited Articles</p>
                   <div className="flex flex-wrap gap-2">
                     {incident.ai_articles.map((a, i) => (
-                      <span key={i} className="text-xs bg-rise-red/10 text-rise-red border border-rise-red/20 px-2 py-0.5 rounded-full">
+                      <span
+                        key={i}
+                        className="text-xs bg-rise-red/10 text-rise-red border border-rise-red/20 px-2 py-0.5 rounded-full"
+                      >
                         {a}
                       </span>
                     ))}
@@ -325,7 +402,7 @@ export default function IncidentDetailPage() {
           )}
         </div>
 
-        {/* Final verdict (if resolved) */}
+        {/* Final ruling (resolved) */}
         {isResolved && (
           <div>
             <SectionHeader title="Final Ruling" />
@@ -339,12 +416,14 @@ export default function IncidentDetailPage() {
               {incident.penalty && (
                 <div className="flex justify-between">
                   <span className="text-white/40 text-sm">Penalty</span>
-                  <span className="text-white text-sm">{incident.penalty}</span>
+                  <span className="text-white text-sm font-semibold">{incident.penalty}</span>
                 </div>
               )}
               <div className="flex justify-between">
                 <span className="text-white/40 text-sm">Penalty Points</span>
-                <span className="text-orange-400 font-bold text-sm">{incident.penalty_points ?? 0} PP</span>
+                <span className="text-orange-400 font-bold text-sm">
+                  {incident.penalty_points ?? 0} PP
+                </span>
               </div>
               {incident.steward_notes && (
                 <div>
@@ -354,7 +433,7 @@ export default function IncidentDetailPage() {
               )}
               {incident.override_reason && (
                 <div>
-                  <p className="text-white/40 text-xs mb-1">Override Reason</p>
+                  <p className="text-yellow-400 text-xs mb-1">Override Reason</p>
                   <p className="text-yellow-400/80 text-sm leading-relaxed">{incident.override_reason}</p>
                 </div>
               )}
@@ -374,12 +453,13 @@ export default function IncidentDetailPage() {
             </button>
 
             {showResolve && (
-              <div className="mt-4 space-y-4">
+              <div className="mt-4 space-y-5">
 
+                {/* Verdict */}
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Verdict</p>
                   <div className="grid grid-cols-3 gap-2">
-                    {['guilty', 'not_guilty', 'inconclusive'].map((v) => (
+                    {(['guilty', 'not_guilty', 'inconclusive'] as const).map((v) => (
                       <button
                         key={v}
                         onClick={() => setVerdict(v)}
@@ -395,30 +475,134 @@ export default function IncidentDetailPage() {
                   </div>
                 </div>
 
+                {/* Penalty Type */}
                 <div>
-                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty</p>
-                  <input
-                    type="text"
-                    value={penalty}
-                    onChange={(e) => setPenalty(e.target.value)}
-                    placeholder="e.g. +5s time penalty, Grid penalty…"
-                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
-                  />
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Type</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(Object.keys(PENALTY_TYPE_LABELS) as PenaltyType[]).map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => setPenaltyType(t)}
+                        className={`py-3 rounded-xl text-xs font-bold transition-colors ${
+                          penaltyType === t
+                            ? 'bg-rise-red text-white'
+                            : 'bg-white/5 text-white/50'
+                        }`}
+                      >
+                        {PENALTY_TYPE_LABELS[t]}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
+                {/* Time penalty selector */}
+                {penaltyType === 'time' && (
+                  <div>
+                    <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Time Penalty</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {TIME_PENALTIES.map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => setTimePenalty(t)}
+                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${
+                            timePenalty === t
+                              ? 'bg-rise-red text-white'
+                              : 'bg-white/5 text-white/50'
+                          }`}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Grid penalty selector */}
+                {penaltyType === 'grid' && (
+                  <div>
+                    <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Grid Penalty</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {GRID_PENALTIES.map((g) => (
+                        <button
+                          key={g}
+                          onClick={() => setGridPenalty(g)}
+                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${
+                            gridPenalty === g
+                              ? 'bg-rise-red text-white'
+                              : 'bg-white/5 text-white/50'
+                          }`}
+                        >
+                          {g}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Ban selector */}
+                {penaltyType === 'ban' && (
+                  <div>
+                    <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Ban Type</p>
+                    <div className="grid grid-cols-1 gap-2">
+                      {BAN_PENALTIES.map((b) => (
+                        <button
+                          key={b}
+                          onClick={() => setBanPenalty(b)}
+                          className={`py-3 rounded-xl text-xs font-bold transition-colors ${
+                            banPenalty === b
+                              ? 'bg-rise-red text-white'
+                              : 'bg-white/5 text-white/50'
+                          }`}
+                        >
+                          {b}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Penalty Points */}
                 <div>
-                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Points</p>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">
+                    Penalty Points (PP)
+                  </p>
+                  <div className="grid grid-cols-6 gap-2 mb-2">
+                    {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12].map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => setPenaltyPoints(String(n))}
+                        className={`py-2.5 rounded-xl text-xs font-bold transition-colors ${
+                          penaltyPoints === String(n)
+                            ? 'bg-rise-red text-white'
+                            : 'bg-white/5 text-white/50'
+                        }`}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
                   <input
                     type="number"
                     value={penaltyPoints}
                     onChange={(e) => setPenaltyPoints(e.target.value)}
-                    placeholder="0"
+                    placeholder="Custom PP amount"
                     min="0"
                     max="12"
                     className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                   />
                 </div>
 
+                {/* Penalty preview */}
+                {(penaltyType !== 'none' || Number(penaltyPoints) > 0) && (
+                  <div className="bg-rise-red/5 border border-rise-red/20 rounded-xl px-4 py-3">
+                    <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Ruling Preview</p>
+                    <p className="text-white font-semibold text-sm">
+                      {buildPenaltySummary(penaltyType, timePenalty, gridPenalty, banPenalty, penaltyPoints)}
+                    </p>
+                  </div>
+                )}
+
+                {/* Steward Notes */}
                 <div>
                   <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Steward Notes</p>
                   <textarea
@@ -430,6 +614,7 @@ export default function IncidentDetailPage() {
                   />
                 </div>
 
+                {/* Override reason */}
                 {hasAI && verdict !== incident.ai_verdict && verdict !== '' && (
                   <div>
                     <p className="text-yellow-400 text-xs uppercase tracking-widest mb-2">
