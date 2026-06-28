@@ -238,9 +238,9 @@ export async function POST(
       article_number: a.article_number,
       title:          a.title,
       body:           a.body,
-      category:       a.category       ?? '',
-      league_id:      a.league_id      ?? incident.league_id,
-      rule_book_id:   a.rule_book_id   ?? '',
+      category:       a.category     ?? '',
+      league_id:      a.league_id    ?? incident.league_id,
+      rule_book_id:   a.rule_book_id ?? '',
     }))
 
     try {
@@ -264,17 +264,21 @@ export async function POST(
 
       const suggestion = ai.suggestion
 
+      const confidenceMap: Record<string, number> = {
+        high: 0.9, medium: 0.6, low: 0.3,
+      }
+
       const { error: aiUpdateError } = await supabase
         .schema('pitboss')
         .from('incidents')
         .update({
-          ai_verdict:     suggestion.verdict                ?? null,
-          ai_penalty:     suggestion.steward_notes          ?? null,
-          ai_points:      suggestion.pp_recommendation?.min ?? 0,
-          ai_confidence:  suggestion.confidence             ?? null,
-          ai_reasoning:   suggestion.reasoning              ?? null,
-          ai_articles:    suggestion.cited_articles         ?? [],
-          ai_model:       ai.model                          ?? 'unknown',
+          ai_verdict:     suggestion.verdict                   ?? null,
+          ai_penalty:     suggestion.steward_notes             ?? null,
+          ai_points:      suggestion.pp_recommendation?.min    ?? 0,
+          ai_confidence:  confidenceMap[suggestion.confidence] ?? 0.5,
+          ai_reasoning:   suggestion.reasoning                 ?? null,
+          ai_articles:    suggestion.cited_articles            ?? [],
+          ai_model:       ai.model                             ?? 'unknown',
           ai_analysed_at: new Date().toISOString(),
         })
         .eq('id', params.id)
