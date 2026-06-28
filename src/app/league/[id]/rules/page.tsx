@@ -116,17 +116,18 @@ function RulesInner() {
 
      setUploadSuccess(data.document.title)
 
-     // Patch local state from PUT response
+     // Patch local state from PUT response.
+     // document_url is the single source of truth for "file is available" —
+     // status is a separate lifecycle field and should not be used to infer upload state.
      setDocuments(prev =>
        prev.map(doc =>
          doc.id === docId
            ? {
                ...doc,
-               status: data.document.status ?? doc.status,
-               document_url: data.document.document_url,
-               document_filename: data.document.document_filename,
-               document_size_bytes: data.document.document_size_bytes,
-               document_uploaded_at: data.document.document_uploaded_at,
+               document_url: data.document.document_url ?? doc.document_url,
+               document_filename: data.document.document_filename ?? doc.document_filename,
+               document_size_bytes: data.document.document_size_bytes ?? doc.document_size_bytes,
+               document_uploaded_at: data.document.document_uploaded_at ?? doc.document_uploaded_at,
              }
            : doc
        )
@@ -195,7 +196,10 @@ function RulesInner() {
        <div className="flex flex-col gap-3">
          {documents.map((doc) => {
            const isUploading = uploadingId === doc.id
-           const hasFile = !!doc.document_url || doc.status === 'active'
+           // "Available" means a file has actually been uploaded.
+           // document_url is the only reliable signal for that — `status`
+           // tracks the rule's lifecycle (active/draft/archived), not upload state.
+           const hasFile = !!doc.document_url
 
            return (
              <div
@@ -286,3 +290,4 @@ export default function RulesPage() {
    </Suspense>
  )
 }
+l
