@@ -83,12 +83,14 @@ function normalizeVerdict(
   }
 
   const s = result.suggestion;
-  const verdict = (VALID_VERDICTS as readonly string[]).includes(s.verdict)
+
+  const verdict = ((VALID_VERDICTS as readonly string[]).includes(s.verdict)
     ? s.verdict
-    : 'inconclusive';
-  const confidence = (VALID_CONFIDENCE as readonly string[]).includes(s.confidence)
+    : 'inconclusive') as StewardVerdict['verdict'];
+
+  const confidence = ((VALID_CONFIDENCE as readonly string[]).includes(s.confidence)
     ? s.confidence
-    : 'low';
+    : 'low') as StewardVerdict['confidence'];
 
   return {
     verdict,
