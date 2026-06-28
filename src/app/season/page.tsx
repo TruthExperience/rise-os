@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 
 interface CalendarRound {
@@ -30,13 +30,14 @@ const LEAGUE_SLUGS = ['trl', 'wsc']
 
 export default function SeasonPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { status } = useSession()
-  const [leagues, setLeagues]           = useState<League[]>([])
-  const [selectedLeague, setSelected]   = useState<League | null>(null)
-  const [rounds, setRounds]             = useState<CalendarRound[]>([])
-  const [loading, setLoading]           = useState(true)
+  const [leagues, setLeagues]             = useState<League[]>([])
+  const [selectedLeague, setSelected]     = useState<League | null>(null)
+  const [rounds, setRounds]               = useState<CalendarRound[]>([])
+  const [loading, setLoading]             = useState(true)
   const [loadingRounds, setLoadingRounds] = useState(false)
-  const [error, setError]               = useState<string | null>(null)
+  const [error, setError]                 = useState<string | null>(null)
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -48,7 +49,15 @@ export default function SeasonPage() {
       .then((r) => r.json())
       .then((data) => {
         const all = (data.leagues ?? data) as League[]
-        setLeagues(all.filter((l) => LEAGUE_SLUGS.includes(l.slug)))
+        const filtered = all.filter((l) => LEAGUE_SLUGS.includes(l.slug))
+        setLeagues(filtered)
+
+        // Auto-select if league_id param present
+        const paramId = searchParams.get('league_id')
+        if (paramId) {
+          const match = filtered.find((l) => l.id === paramId)
+          if (match) selectLeague(match)
+        }
       })
       .catch(() => setError('Failed to load leagues'))
       .finally(() => setLoading(false))
@@ -185,7 +194,6 @@ export default function SeasonPage() {
               )
             }
 
-            // Race round
             const rStatus = getRoundStatus(round)
             const isNext = rStatus === 'next'
             const isPast = rStatus === 'past'
@@ -201,7 +209,6 @@ export default function SeasonPage() {
                     : 'border-white/10 bg-white/5'
                 }`}
               >
-                {/* Round number */}
                 <div className={`shrink-0 w-10 h-10 rounded-lg flex flex-col items-center justify-center ${isNext ? 'bg-rise-red' : 'bg-white/10'}`}>
                   <span className="text-[8px] font-bold uppercase text-white/60 leading-none">RND</span>
                   <span className="text-sm font-black text-white leading-tight">
@@ -209,7 +216,6 @@ export default function SeasonPage() {
                   </span>
                 </div>
 
-                {/* Flag + info */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-lg">{round.flag_emoji}</span>
@@ -220,7 +226,6 @@ export default function SeasonPage() {
                   )}
                 </div>
 
-                {/* Date + badge */}
                 <div className="shrink-0 text-right">
                   {round.race_date && (
                     <p className="text-white/60 text-xs">
