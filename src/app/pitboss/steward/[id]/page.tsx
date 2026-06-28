@@ -1,303 +1,481 @@
-'use client';
+'use client'
 
-import { useSession } from 'next-auth/react';
-import { useRouter, useParams, useSearchParams } from 'next/navigation';
-import { useEffect, useState, Suspense } from 'react';
+// src/app/pitboss/steward/[id]/page.tsx
+// Full incident detail view for stewards.
+// Shows incident info, evidence, AI analysis, and the resolve panel.
 
-const VERDICT_OPTIONS = ['Guilty', 'Not Guilty', 'Dismissed', 'Noted'];
-const PENALTY_OPTIONS = [
-  'Time Penalty', 'Grid Penalty', 'Drive-Through',
-  'Stop-Go', 'DSQ', 'Warning', 'Points Only',
-];
+import { useEffect, useState } from 'react'
+import { useParams, useSearchParams, useRouter } from 'next/navigation'
+import { useSession } from 'next-auth/react'
 
-function IncidentReviewInner() {
-  const { data: session, status } = useSession();
-  const router       = useRouter();
-  const { id }       = useParams<{ id: string }>();
-  const searchParams = useSearchParams();
-  const league_id    = searchParams.get('league_id');
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-  const [incident, setIncident]       = useState<any>(null);
-  const [loading, setLoading]         = useState(true);
-  const [analysing, setAnalysing]     = useState(false);
-  const [submitting, setSubmitting]   = useState(false);
-  const [showAI, setShowAI]           = useState(true);
+interface Incident {
+  id: string
+  incident_type: string
+  description: string
+  status: string
+  verdict: string | null
+  penalty: string | null
+  penalty_points: number | null
+  steward_notes: string | null
+  override_reason: string | null
+  season: string | null
+  round: number | null
+  lap: number | null
+  evidence_urls: string[] | null
+  reported_by: string
+  accused_driver_id: string | null
+  created_at: string
+  resolved_at: string | null
+  ai_verdict: string | null
+  ai_penalty: string | null
+  ai_points: number | null
+  ai_reasoning: string | null
+  ai_confidence: number | null
+  ai_articles: string[] | null
+  ai_model: string | null
+  ai_analysed_at: string | null
+}
 
-  const [verdict, setVerdict]               = useState('');
-  const [penalty, setPenalty]               = useState('');
-  const [points, setPoints]                 = useState(0);
-  const [notes, setNotes]                   = useState('');
-  const [overrideReason, setOverrideReason] = useState('');
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    if (status === 'unauthenticated') router.push('/login');
-  }, [status]);
+function formatDate(iso: string | null) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+}
 
-  useEffect(() => {
-    if (id) fetchIncident();
-  }, [id]);
+function confidenceColor(val: number | null) {
+  if (!val) return 'text-gray-500'
+  if (val >= 0.75) return 'text-green-400'
+  if (val >= 0.5)  return 'text-yellow-400'
+  return 'text-red-400'
+}
 
-  async function fetchIncident() {
-    setLoading(true);
+function verdictColor(v: string | null) {
+  if (!v) return 'text-gray-500'
+  if (v === 'guilty')     return 'text-red-400'
+  if (v === 'not_guilty') return 'text-green-400'
+  return 'text-yellow-400'
+}
+
+function SectionHeader({ title }: { title: string }) {
+  return (
+    <p className="text-white/40 text-[10px] uppercase tracking-widest mb-3">{title}</p>
+  )
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+export default function IncidentDetailPage() {
+  const { id } = useParams<{ id: string }>()
+  const searchParams = useSearchParams()
+  const leagueId = searchParams.get('league_id')
+  const router = useRouter()
+  const { data: session } = useSession()
+
+  const [incident, setIncident] = useState<Incident | null>(null)
+  const [loading, setLoading]   = useState(true)
+  const [error, setError]       = useState('')
+
+  // AI analysis state
+  const [analysing, setAnalysing] = useState(false)
+  const [analyseError, setAnalyseError] = useState('')
+
+  // Resolve form state
+  const [showResolve, setShowResolve] = useState(false)
+  const [verdict, setVerdict]         = useState('')
+  const [penalty, setPenalty]         = useState('')
+  const [penaltyPoints, setPenaltyPoints] = useState('')
+  const [stewardNotes, setStewardNotes]   = useState('')
+  const [overrideReason, setOverrideReason] = useState('')
+  const [resolving, setResolving]     = useState(false)
+  const [resolveError, setResolveError] = useState('')
+
+  useEffect(() => { loadIncident() }, [id])
+
+  async function loadIncident() {
+    setLoading(true)
     try {
-      const res = await fetch(`/api/pitboss/steward/${id}`);
-      if (res.ok) {
-        const data = await res.json();
-        setIncident(data);
-        if (data.ai_verdict) {
-          setVerdict(data.ai_verdict);
-          setPenalty(data.ai_penalty ?? '');
-          setPoints(data.ai_points   ?? 0);
-        }
-      }
+      const res = await fetch(`/api/pitboss/incidents/${id}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to load incident')
+      setIncident(data)
+
+      // Pre-fill resolve form from AI suggestion if available
+      if (data.ai_verdict)  setVerdict(data.ai_verdict)
+      if (data.ai_penalty)  setPenalty(data.ai_penalty)
+      if (data.ai_points)   setPenaltyPoints(String(data.ai_points))
+    } catch (err: any) {
+      setError(err.message)
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
   }
 
-  async function runAI() {
-    setAnalysing(true);
+  async function handleAnalyse() {
+    setAnalysing(true)
+    setAnalyseError('')
     try {
-      const res = await fetch(`/api/pitboss/steward/${id}`, {
+      const res = await fetch(`/api/pitboss/incidents/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'analyse' }),
-      });
-      if (res.ok) await fetchIncident();
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'AI analysis failed')
+      await loadIncident()
+    } catch (err: any) {
+      setAnalyseError(err.message)
     } finally {
-      setAnalysing(false);
+      setAnalysing(false)
     }
   }
 
-  async function resolve() {
-    if (!verdict) return;
-    setSubmitting(true);
+  async function handleResolve() {
+    if (!verdict) return
+    setResolving(true)
+    setResolveError('')
     try {
-      const isOverride = incident.ai_verdict && verdict !== incident.ai_verdict;
-      await fetch(`/api/pitboss/steward/${id}`, {
+      const res = await fetch(`/api/pitboss/incidents/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action:          'resolve',
+          action: 'resolve',
           verdict,
-          penalty,
-          penalty_points:  points,
-          steward_notes:   notes,
-          override_reason: isOverride ? overrideReason : null,
-          resolved_by:     (session?.user as any)?.id,
+          penalty:        penalty || null,
+          penalty_points: penaltyPoints ? Number(penaltyPoints) : 0,
+          steward_notes:  stewardNotes || null,
+          override_reason: overrideReason || null,
+          resolved_by:    session?.user?.id ?? null,
         }),
-      });
-      router.push(`/pitboss/steward?league_id=${league_id}`);
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to resolve incident')
+      await loadIncident()
+      setShowResolve(false)
+    } catch (err: any) {
+      setResolveError(err.message)
     } finally {
-      setSubmitting(false);
+      setResolving(false)
     }
   }
 
-  function acceptAI() {
-    if (!incident) return;
-    setVerdict(incident.ai_verdict ?? '');
-    setPenalty(incident.ai_penalty ?? '');
-    setPoints(incident.ai_points   ?? 0);
-    setOverrideReason('');
-  }
-
-  if (status === 'loading' || loading) {
+  // ── Loading / error ──────────────────────────────────────────────────────
+  if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-rise-black">
         <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
       </main>
-    );
+    )
   }
 
-  if (!incident) {
+  if (error || !incident) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-rise-black">
-        <p className="text-white/40">Incident not found.</p>
+      <main className="flex min-h-screen flex-col items-center justify-center gap-4 bg-rise-black px-6">
+        <p className="text-rise-red text-center">{error || 'Incident not found'}</p>
+        <button onClick={() => router.back()} className="text-white/40 underline text-sm">Go back</button>
       </main>
-    );
+    )
   }
 
-  const isOverride = incident.ai_verdict && verdict !== incident.ai_verdict;
-  const confidence = incident.ai_confidence ? Math.round(incident.ai_confidence * 100) : null;
+  const isResolved = incident.status === 'resolved'
+  const hasAI = !!incident.ai_analysed_at
 
+  // ── Render ───────────────────────────────────────────────────────────────
   return (
-    <main className="min-h-screen bg-rise-black px-4 py-8 pb-24">
-      <button onClick={() => router.back()} className="text-white/40 text-sm mb-6 flex items-center gap-2">
-        ← Back
-      </button>
+    <main className="min-h-screen bg-rise-black pb-28">
 
-      <h1 className="text-xl font-black text-white mb-1">Incident Review</h1>
-      <p className="text-white/30 text-[10px] uppercase tracking-widest mb-6">
-        {incident.status === 'resolved' ? '✅ Resolved' : '🔴 Open'}
-      </p>
-
-      <section className="rounded-2xl border border-white/10 bg-white/5 p-4 mb-4">
-        <p className="text-white/30 text-[10px] uppercase tracking-widest mb-3">Incident</p>
-        <div className="flex flex-col gap-2">
-          <Row label="Type" value={incident.incident_type} />
-          {incident.round && (
-            <Row label="Round" value={`Round ${incident.round}${incident.lap ? ` · Lap ${incident.lap}` : ''}`} />
-          )}
-          {incident.season && <Row label="Season" value={incident.season} />}
+      {/* Header */}
+      <div className="px-4 pt-12 pb-4 border-b border-white/10">
+        <button onClick={() => router.back()} className="text-white/40 text-sm mb-3 block">← Back</button>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-white font-black text-xl leading-tight">{incident.incident_type}</h1>
+            <p className="text-white/30 text-xs mt-0.5">{formatDate(incident.created_at)}</p>
+          </div>
+          <span className={`text-xs font-bold uppercase px-3 py-1 rounded-full border ${
+            isResolved
+              ? 'border-green-400/30 text-green-400 bg-green-400/10'
+              : 'border-rise-red/30 text-rise-red bg-rise-red/10'
+          }`}>
+            {incident.status}
+          </span>
         </div>
-        <p className="text-white/60 text-sm mt-3 leading-relaxed">{incident.description}</p>
-        {Array.isArray(incident.evidence_urls) && incident.evidence_urls.length > 0 && (
-          <div className="mt-3 flex flex-col gap-1">
-            {incident.evidence_urls.map((url: string, i: number) => (
-              <a key={i} href={url} target="_blank" rel="noreferrer" className="text-rise-red text-xs underline">
-                Evidence {i + 1}
-              </a>
+      </div>
+
+      <div className="px-4 pt-5 space-y-6">
+
+        {/* Context */}
+        <div>
+          <SectionHeader title="Incident Details" />
+          <div className="bg-white/5 rounded-2xl px-4 py-2 space-y-0">
+            {[
+              { label: 'Season', value: incident.season },
+              { label: 'Round',  value: incident.round ? `Round ${incident.round}` : null },
+              { label: 'Lap',    value: incident.lap   ? `Lap ${incident.lap}`    : null },
+            ].filter(r => r.value).map(r => (
+              <div key={r.label} className="flex justify-between py-2 border-b border-white/5 last:border-0">
+                <span className="text-white/40 text-sm">{r.label}</span>
+                <span className="text-white text-sm">{r.value}</span>
+              </div>
             ))}
           </div>
-        )}
-      </section>
-
-      <section className="rounded-2xl border border-rise-red/30 bg-rise-red/5 p-4 mb-4">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-rise-red text-[10px] uppercase tracking-widest font-bold">AI Recommendation</p>
-          {incident.ai_analysed_at && (
-            <button onClick={() => setShowAI(v => !v)} className="text-white/30 text-[10px]">
-              {showAI ? 'Hide' : 'Show'}
-            </button>
-          )}
         </div>
 
-        {!incident.ai_analysed_at ? (
-          <button
-            onClick={runAI}
-            disabled={analysing}
-            className="w-full py-3 rounded-xl bg-rise-red text-white text-sm font-bold active:opacity-80 transition-opacity disabled:opacity-50"
-          >
-            {analysing ? 'Analysing...' : '✨ Get AI Recommendation'}
-          </button>
-        ) : showAI && (
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white font-bold text-sm">{incident.ai_verdict}</p>
-                {incident.ai_penalty && <p className="text-white/50 text-xs">{incident.ai_penalty}</p>}
-                {incident.ai_points > 0 && <p className="text-rise-red text-xs font-bold">{incident.ai_points} pts</p>}
+        {/* Description */}
+        <div>
+          <SectionHeader title="Description" />
+          <div className="bg-white/5 rounded-2xl px-4 py-4">
+            <p className="text-white/80 text-sm leading-relaxed">{incident.description}</p>
+          </div>
+        </div>
+
+        {/* Evidence */}
+        {incident.evidence_urls && incident.evidence_urls.length > 0 && (
+          <div>
+            <SectionHeader title="Evidence" />
+            <div className="space-y-2">
+              {incident.evidence_urls.map((url, i) => (
+                <a
+                  key={i}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3"
+                >
+                  <span className="text-rise-red text-sm">▶</span>
+                  <span className="text-white/70 text-sm truncate">{url}</span>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* AI Analysis */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <SectionHeader title="AI Steward Analysis" />
+            {!isResolved && (
+              <button
+                onClick={handleAnalyse}
+                disabled={analysing}
+                className="text-xs font-bold text-rise-red disabled:text-white/20"
+              >
+                {analysing ? 'Analysing…' : hasAI ? '↺ Re-analyse' : '⚡ Analyse'}
+              </button>
+            )}
+          </div>
+
+          {analyseError && (
+            <p className="text-red-400 text-xs mb-3">{analyseError}</p>
+          )}
+
+          {!hasAI ? (
+            <div className="bg-white/5 rounded-2xl px-4 py-6 text-center">
+              <p className="text-white/30 text-sm">No AI analysis yet.</p>
+              <p className="text-white/20 text-xs mt-1">Tap ⚡ Analyse to run the AI steward.</p>
+            </div>
+          ) : (
+            <div className="bg-white/5 rounded-2xl px-4 py-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Verdict</p>
+                  <p className={`text-base font-black uppercase ${verdictColor(incident.ai_verdict)}`}>
+                    {incident.ai_verdict?.replace('_', ' ') ?? '—'}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Confidence</p>
+                  <p className={`text-base font-black ${confidenceColor(incident.ai_confidence)}`}>
+                    {incident.ai_confidence ? `${Math.round(Number(incident.ai_confidence) * 100)}%` : '—'}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">PP</p>
+                  <p className="text-white font-black text-base">{incident.ai_points ?? 0}</p>
+                </div>
               </div>
-              {confidence !== null && (
-                <div className="flex flex-col items-center">
-                  <span className="text-2xl font-black text-white">{confidence}%</span>
-                  <span className="text-white/30 text-[10px]">confidence</span>
+
+              {incident.ai_penalty && (
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Suggested Penalty</p>
+                  <p className="text-white text-sm">{incident.ai_penalty}</p>
                 </div>
               )}
-            </div>
 
-            {incident.ai_reasoning && (
-              <p className="text-white/50 text-xs leading-relaxed border-t border-white/10 pt-3">
-                {incident.ai_reasoning}
+              {incident.ai_reasoning && (
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Reasoning</p>
+                  <p className="text-white/70 text-sm leading-relaxed">{incident.ai_reasoning}</p>
+                </div>
+              )}
+
+              {incident.ai_articles && incident.ai_articles.length > 0 && (
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Cited Articles</p>
+                  <div className="flex flex-wrap gap-2">
+                    {incident.ai_articles.map((a, i) => (
+                      <span key={i} className="text-xs bg-rise-red/10 text-rise-red border border-rise-red/20 px-2 py-0.5 rounded-full">
+                        {a}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <p className="text-white/20 text-[10px]">
+                {incident.ai_model} · {formatDate(incident.ai_analysed_at)}
               </p>
-            )}
+            </div>
+          )}
+        </div>
 
-            {Array.isArray(incident.ai_articles) && incident.ai_articles.length > 0 && (
-              <div className="flex flex-wrap gap-1 border-t border-white/10 pt-3">
-                {incident.ai_articles.map((a: string, i: number) => (
-                  <span key={i} className="bg-white/10 text-white/60 text-[10px] px-2 py-1 rounded-full">{a}</span>
-                ))}
+        {/* Final verdict (if resolved) */}
+        {isResolved && (
+          <div>
+            <SectionHeader title="Final Ruling" />
+            <div className="bg-white/5 rounded-2xl px-4 py-4 space-y-3">
+              <div className="flex justify-between">
+                <span className="text-white/40 text-sm">Verdict</span>
+                <span className={`text-sm font-bold uppercase ${verdictColor(incident.verdict)}`}>
+                  {incident.verdict?.replace('_', ' ') ?? '—'}
+                </span>
               </div>
-            )}
-
-            <button onClick={acceptAI} className="w-full py-2 rounded-xl border border-rise-red text-rise-red text-xs font-bold mt-1">
-              Accept AI Recommendation
-            </button>
-            <button onClick={runAI} disabled={analysing} className="text-white/30 text-[10px] text-center">
-              {analysing ? 'Re-analysing...' : 'Re-run analysis'}
-            </button>
+              {incident.penalty && (
+                <div className="flex justify-between">
+                  <span className="text-white/40 text-sm">Penalty</span>
+                  <span className="text-white text-sm">{incident.penalty}</span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span className="text-white/40 text-sm">Penalty Points</span>
+                <span className="text-orange-400 font-bold text-sm">{incident.penalty_points ?? 0} PP</span>
+              </div>
+              {incident.steward_notes && (
+                <div>
+                  <p className="text-white/40 text-xs mb-1">Steward Notes</p>
+                  <p className="text-white/70 text-sm leading-relaxed">{incident.steward_notes}</p>
+                </div>
+              )}
+              {incident.override_reason && (
+                <div>
+                  <p className="text-white/40 text-xs mb-1">Override Reason</p>
+                  <p className="text-yellow-400/80 text-sm leading-relaxed">{incident.override_reason}</p>
+                </div>
+              )}
+              <p className="text-white/20 text-xs">Resolved {formatDate(incident.resolved_at)}</p>
+            </div>
           </div>
         )}
-      </section>
 
-      {incident.status !== 'resolved' && (
-        <section className="rounded-2xl border border-white/10 bg-white/5 p-4 mb-4">
-          <p className="text-white/30 text-[10px] uppercase tracking-widest mb-4">Your Decision</p>
+        {/* Resolve Panel */}
+        {!isResolved && (
+          <div>
+            <button
+              onClick={() => setShowResolve(!showResolve)}
+              className="w-full bg-rise-red text-white font-black py-4 rounded-2xl text-sm uppercase tracking-widest"
+            >
+              {showResolve ? 'Cancel' : 'Issue Ruling'}
+            </button>
 
-          <p className="text-white/40 text-xs mb-2">Verdict</p>
-          <div className="grid grid-cols-2 gap-2 mb-4">
-            {VERDICT_OPTIONS.map(v => (
-              <button key={v} onClick={() => setVerdict(v)}
-                className={`py-2 rounded-xl text-xs font-bold transition-colors ${
-                  verdict === v ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50 border border-white/10'
-                }`}>
-                {v}
-              </button>
-            ))}
+            {showResolve && (
+              <div className="mt-4 space-y-4">
+
+                {/* Verdict */}
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Verdict</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {['guilty', 'not_guilty', 'inconclusive'].map((v) => (
+                      <button
+                        key={v}
+                        onClick={() => setVerdict(v)}
+                        className={`py-3 rounded-xl text-xs font-bold uppercase transition-colors ${
+                          verdict === v
+                            ? 'bg-rise-red text-white'
+                            : 'bg-white/5 text-white/50'
+                        }`}
+                      >
+                        {v.replace('_', ' ')}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Penalty */}
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty</p>
+                  <input
+                    type="text"
+                    value={penalty}
+                    onChange={(e) => setPenalty(e.target.value)}
+                    placeholder="e.g. +5s time penalty, Grid penalty…"
+                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
+                  />
+                </div>
+
+                {/* PP */}
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Points</p>
+                  <input
+                    type="number"
+                    value={penaltyPoints}
+                    onChange={(e) => setPenaltyPoints(e.target.value)}
+                    placeholder="0"
+                    min="0"
+                    max="12"
+                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
+                  />
+                </div>
+
+                {/* Steward Notes */}
+                <div>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Steward Notes</p>
+                  <textarea
+                    value={stewardNotes}
+                    onChange={(e) => setStewardNotes(e.target.value)}
+                    placeholder="Explain the ruling and reasoning…"
+                    rows={4}
+                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none"
+                  />
+                </div>
+
+                {/* Override reason (if diverging from AI) */}
+                {hasAI && verdict !== incident.ai_verdict && (
+                  <div>
+                    <p className="text-yellow-400 text-xs uppercase tracking-widest mb-2">
+                      ⚠ Override Reason (differs from AI)
+                    </p>
+                    <textarea
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      placeholder="Why are you overriding the AI suggestion?"
+                      rows={3}
+                      className="w-full bg-yellow-400/5 text-white text-sm px-4 py-3 rounded-xl border border-yellow-400/20 focus:border-yellow-400/50 focus:outline-none placeholder-white/20 resize-none"
+                    />
+                  </div>
+                )}
+
+                {resolveError && (
+                  <p className="text-red-400 text-sm">{resolveError}</p>
+                )}
+
+                <button
+                  onClick={handleResolve}
+                  disabled={!verdict || resolving}
+                  className="w-full bg-rise-red disabled:bg-white/10 disabled:text-white/20 text-white font-black py-4 rounded-2xl text-sm uppercase tracking-widest"
+                >
+                  {resolving ? 'Saving…' : 'Confirm Ruling'}
+                </button>
+              </div>
+            )}
           </div>
+        )}
 
-          <p className="text-white/40 text-xs mb-2">Penalty</p>
-          <div className="flex flex-col gap-2 mb-4">
-            {PENALTY_OPTIONS.map(p => (
-              <button key={p} onClick={() => setPenalty(penalty === p ? '' : p)}
-                className={`py-2 rounded-xl text-xs font-bold transition-colors ${
-                  penalty === p ? 'bg-white/20 text-white' : 'bg-white/5 text-white/50 border border-white/10'
-                }`}>
-                {p}
-              </button>
-            ))}
-          </div>
-
-          <p className="text-white/40 text-xs mb-2">
-            Penalty Points: <span className="text-rise-red font-bold">{points}</span>
-          </p>
-          <input type="range" min={0} max={12} step={1} value={points}
-            onChange={e => setPoints(Number(e.target.value))}
-            className="w-full accent-rise-red mb-4" />
-
-          {isOverride && (
-            <div className="mb-4">
-              <p className="text-yellow-400 text-xs mb-2">⚠️ Override reason (differs from AI)</p>
-              <textarea value={overrideReason} onChange={e => setOverrideReason(e.target.value)}
-                placeholder="Why are you overriding the AI recommendation?"
-                className="w-full bg-white/5 border border-yellow-400/30 rounded-xl p-3 text-white text-xs resize-none h-20 placeholder:text-white/20" />
-            </div>
-          )}
-
-          <p className="text-white/40 text-xs mb-2">Steward Notes (optional)</p>
-          <textarea value={notes} onChange={e => setNotes(e.target.value)}
-            placeholder="Additional notes for the record..."
-            className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-xs resize-none h-20 placeholder:text-white/20 mb-4" />
-
-          <button onClick={resolve} disabled={!verdict || submitting}
-            className="w-full py-4 rounded-2xl bg-rise-red text-white font-black text-sm disabled:opacity-40 active:opacity-80 transition-opacity">
-            {submitting ? 'Submitting...' : 'Submit Decision'}
-          </button>
-        </section>
-      )}
-
-      {incident.status === 'resolved' && (
-        <section className="rounded-2xl border border-green-500/20 bg-green-500/5 p-4">
-          <p className="text-green-400 text-[10px] uppercase tracking-widest mb-3 font-bold">Decision</p>
-          <Row label="Verdict" value={incident.verdict} />
-          {incident.penalty && <Row label="Penalty" value={incident.penalty} />}
-          {incident.penalty_points > 0 && <Row label="Points" value={`${incident.penalty_points} pts`} />}
-          {incident.steward_notes && (
-            <p className="text-white/40 text-xs mt-3 leading-relaxed">{incident.steward_notes}</p>
-          )}
-        </section>
-      )}
+      </div>
     </main>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
-      <span className="text-white/40 text-xs">{label}</span>
-      <span className="text-white text-xs font-semibold">{String(value)}</span>
-    </div>
-  );
-}
-
-export default function IncidentReviewPage() {
-  return (
-    <Suspense fallback={
-      <main className="flex min-h-screen items-center justify-center bg-rise-black">
-        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
-      </main>
-    }>
-      <IncidentReviewInner />
-    </Suspense>
-  );
+  )
 }
