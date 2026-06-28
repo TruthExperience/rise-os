@@ -132,4 +132,20 @@ export async function PUT(
  const { data: updated, error: updateError } = await pitboss
    .from('rule_books')
    .update({
-     document_url:         
+     document_url:         signedData?.signedUrl ?? null,
+     document_path:        filename,
+     document_filename:    file.name,
+     document_size_bytes:  file.size,
+     document_mime_type:   file.type,
+     document_uploaded_at: new Date().toISOString(),
+     document_uploaded_by: userRecord?.id ?? null,
+   })
+   .eq('id', ruleBookId)
+   .eq('league_id', params.id)
+   .select()
+   .single()
+
+ if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 })
+
+ return NextResponse.json({ document: updated })
+}
