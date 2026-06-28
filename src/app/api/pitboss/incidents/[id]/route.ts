@@ -2,74 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
-if (action === 'analyse') {
-  const { data: articles } = await supabase
-    .schema('pitboss')
-    .from('rule_articles')
-    .select('article_number, title, body')
-    .eq('league_id', incident.league_id)
-    .eq('active', true)
-    .order('article_number', { ascending: true })
-
-  const rulebookText = articles && articles.length > 0
-    ? articles.map((a: any) => `Article ${a.article_number} — ${a.title}:\n${a.body}`).join('\n\n')
-    : 'No rulebook articles available for this league.'
-
-  try {
-    const llmRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/pitboss/llm`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'steward',
-        league: incident.league_id,
-        fetch_regulations: false, // we already fetched above
-        incident: {
-          incident_type: incident.incident_type,
-          description:   incident.description,
-          season:        incident.season,
-          round:         incident.round,
-          lap:           incident.lap,
-          league_id:     incident.league_id,
-          rulebook:      rulebookText,
-        },
-      }),
-    })
-
-    if (!llmRes.ok) {
-      const err = await llmRes.text()
-      console.error('[incidents/id POST] llm route error', err)
-      return NextResponse.json({ error: 'AI analysis failed' }, { status: 502 })
-    }
-
-    const ai = await llmRes.json()
-    const suggestion = ai.suggestion ?? ai
-
-    const { error: aiUpdateError } = await supabase
-      .schema('pitboss')
-      .from('incidents')
-      .update({
-        ai_verdict:     suggestion.verdict     ?? null,
-        ai_penalty:     suggestion.penalty     ?? null,
-        ai_points:      suggestion.points      ?? 0,
-        ai_confidence:  suggestion.confidence  ?? null,
-        ai_reasoning:   suggestion.reasoning   ?? null,
-        ai_articles:    suggestion.articles    ?? [],
-        ai_model:       ai.model               ?? 'unknown',
-        ai_analysed_at: new Date().toISOString(),
-      })
-      .eq('id', params.id)
-
-    if (aiUpdateError) {
-      console.error('[incidents/id POST] ai update', aiUpdateError)
-      return NextResponse.json({ error: aiUpdateError.message }, { status: 500 })
-    }
-
-    return NextResponse.json({ success: true })
-  } catch (err: any) {
-    console.error('[incidents/id POST] ai analyse', err)
-    return NextResponse.json({ error: 'AI analysis failed' }, { status: 500 })
-  }
-}
+import { pbSteward } from '@/lib/pitboss-llm'
+import type { RuleArticle } from '@/lib/pitboss-llm'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
 const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward']
@@ -105,7 +39,6 @@ async function getRequestingDriver(supabase: any, session: any) {
 }
 
 async function hasStewwardAccess(supabase: any, driverId: string, leagueId: string): Promise<boolean> {
-  // Check active steward licence
   const { data: licence } = await supabase
     .schema('pitboss')
     .from('licences')
@@ -118,7 +51,6 @@ async function hasStewwardAccess(supabase: any, driverId: string, leagueId: stri
 
   if (licence) return true
 
-  // Fallback: check driver_leagues role (co_owner / commissioner)
   const { data: leagueRole } = await supabase
     .schema('pitboss')
     .from('driver_leagues')
@@ -297,67 +229,52 @@ export async function POST(
     const { data: articles } = await supabase
       .schema('pitboss')
       .from('rule_articles')
-      .select('article_number, title, body')  // ← was 'content', correct column is 'body'
+      .select('article_number, title, body, category, league_id, rule_book_id')
       .eq('league_id', incident.league_id)
       .eq('active', true)
       .order('article_number', { ascending: true })
 
-    const rulebookText = articles && articles.length > 0
-      ? articles.map((a: any) => `Article ${a.article_number} — ${a.title}:\n${a.body}`).join('\n\n')
-      : 'No rulebook articles available for this league.'
-
-    const prompt = `You are an AI steward for a sim racing league. Analyse this incident and provide a verdict.
-
-INCIDENT TYPE: ${incident.incident_type}
-DESCRIPTION: ${incident.description}
-SEASON: ${incident.season ?? 'Unknown'}
-ROUND: ${incident.round ?? 'Unknown'}
-LAP: ${incident.lap ?? 'Unknown'}
-
-RULEBOOK:
-${rulebookText}
-
-Respond with ONLY a JSON object in this exact format:
-{
-  "verdict": "guilty" | "not_guilty" | "inconclusive",
-  "penalty": "string describing penalty or null",
-  "points": number (0-12),
-  "confidence": number (0.0-1.0),
-  "reasoning": "string explaining the decision",
-  "articles": ["Article X", "Article Y"]
-}`
+    const regulations: RuleArticle[] = (articles ?? []).map((a: any) => ({
+      article_number: a.article_number,
+      title:          a.title,
+      body:           a.body,
+      category:       a.category       ?? '',
+      league_id:      a.league_id      ?? incident.league_id,
+      rule_book_id:   a.rule_book_id   ?? '',
+    }))
 
     try {
-      const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type':      'application/json',
-          'x-api-key':         process.env.ANTHROPIC_API_KEY!,
-          'anthropic-version': '2023-06-01',
+      const ai = await pbSteward(
+        {
+          incident_type: incident.incident_type,
+          description:   incident.description,
+          season:        incident.season,
+          round:         incident.round,
+          lap:           incident.lap,
+          league_id:     incident.league_id,
         },
-        body: JSON.stringify({
-          model:      'claude-sonnet-4-6',
-          max_tokens: 1024,
-          messages:   [{ role: 'user', content: prompt }],
-        }),
-      })
+        regulations,
+        incident.league_id
+      )
 
-      const aiData = await aiRes.json()
-      const raw    = aiData.content?.[0]?.text ?? ''
-      const clean  = raw.replace(/```json|```/g, '').trim()
-      const parsed = JSON.parse(clean)
+      if ('error' in ai) {
+        console.error('[incidents/id POST] pbSteward error', ai)
+        return NextResponse.json({ error: ai.error }, { status: 502 })
+      }
+
+      const suggestion = ai.suggestion
 
       const { error: aiUpdateError } = await supabase
         .schema('pitboss')
         .from('incidents')
         .update({
-          ai_verdict:     parsed.verdict,
-          ai_penalty:     parsed.penalty ?? null,
-          ai_points:      parsed.points ?? 0,
-          ai_confidence:  parsed.confidence ?? null,
-          ai_reasoning:   parsed.reasoning ?? null,
-          ai_articles:    parsed.articles ?? [],
-          ai_model:       'claude-sonnet-4-6',
+          ai_verdict:     suggestion.verdict                ?? null,
+          ai_penalty:     suggestion.steward_notes          ?? null,
+          ai_points:      suggestion.pp_recommendation?.min ?? 0,
+          ai_confidence:  suggestion.confidence             ?? null,
+          ai_reasoning:   suggestion.reasoning              ?? null,
+          ai_articles:    suggestion.cited_articles         ?? [],
+          ai_model:       ai.model                          ?? 'unknown',
           ai_analysed_at: new Date().toISOString(),
         })
         .eq('id', params.id)
