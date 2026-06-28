@@ -3,6 +3,66 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
 
+const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
+const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward']
+
+async function getRequestingDriver(supabase: any, session: any) {
+  const user = session.user as any
+  const discordId: string | undefined = user.discordId ?? user.discord_id ?? user.id
+  const email: string | undefined = user.email ?? undefined
+
+  let driver = null
+
+  if (discordId) {
+    const { data } = await supabase
+      .schema('pitboss')
+      .from('drivers')
+      .select('id')
+      .eq('discord_id', discordId)
+      .maybeSingle()
+    driver = data
+  }
+
+  if (!driver && email) {
+    const { data } = await supabase
+      .schema('pitboss')
+      .from('drivers')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle()
+    driver = data
+  }
+
+  return driver
+}
+
+async function hasStewwardAccess(supabase: any, driverId: string, leagueId: string): Promise<boolean> {
+  // Check active steward licence
+  const { data: licence } = await supabase
+    .schema('pitboss')
+    .from('licences')
+    .select('id')
+    .eq('driver_id', driverId)
+    .eq('league_id', leagueId)
+    .eq('status', 'active')
+    .in('role_code', STEWARD_ROLES)
+    .maybeSingle()
+
+  if (licence) return true
+
+  // Fallback: check driver_leagues role (co_owner / commissioner)
+  const { data: leagueRole } = await supabase
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('role')
+    .eq('driver_id', driverId)
+    .eq('league_id', leagueId)
+    .in('role', STEWARD_LEAGUE_ROLES)
+    .maybeSingle()
+
+  return !!leagueRole
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -12,19 +72,8 @@ export async function GET(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const discordId = (session.user as any).discordId as string
-  if (!discordId) {
-    return NextResponse.json({ error: 'Discord ID missing from session' }, { status: 401 })
-  }
-
   const supabase = createAdminClient()
-
-  const { data: requestingDriver } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .maybeSingle()
+  const requestingDriver = await getRequestingDriver(supabase, session)
 
   if (!requestingDriver) {
     return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
@@ -38,30 +87,20 @@ export async function GET(
     .maybeSingle()
 
   if (error) {
-    console.error('[incidents/id] fetch', error)
+    console.error('[incidents/id GET] fetch', error)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
   if (!incident) {
     return NextResponse.json({ error: 'Incident not found' }, { status: 404 })
   }
 
-  const { data: stewardLicence } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id')
-    .eq('driver_id', requestingDriver.id)
-    .eq('league_id', incident.league_id)
-    .eq('status', 'active')
-    .in('role_code', ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM'])
-    .maybeSingle()
-
-  const allowed =
-    !!stewardLicence ||
+  const isSteward = await hasStewwardAccess(supabase, requestingDriver.id, incident.league_id)
+  const isParty =
     incident.reported_by === requestingDriver.id ||
     incident.accused_driver_id === requestingDriver.id ||
     incident.resolved_by === requestingDriver.id
 
-  if (!allowed) {
+  if (!isSteward && !isParty) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
@@ -87,12 +126,7 @@ export async function GET(
     .maybeSingle()
 
   return NextResponse.json({
-    incident: {
-      ...incident,
-      reporter,
-      accused,
-      league,
-    },
+    incident: { ...incident, reporter, accused, league },
   })
 }
 
@@ -105,19 +139,8 @@ export async function POST(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const discordId = (session.user as any).discordId as string
-  if (!discordId) {
-    return NextResponse.json({ error: 'Discord ID missing from session' }, { status: 401 })
-  }
-
   const supabase = createAdminClient()
-
-  const { data: requestingDriver } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .maybeSingle()
+  const requestingDriver = await getRequestingDriver(supabase, session)
 
   if (!requestingDriver) {
     return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
@@ -137,21 +160,12 @@ export async function POST(
     return NextResponse.json({ error: 'Incident not found' }, { status: 404 })
   }
 
-  const { data: stewardLicence } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id')
-    .eq('driver_id', requestingDriver.id)
-    .eq('league_id', incident.league_id)
-    .eq('status', 'active')
-    .in('role_code', ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM'])
-    .maybeSingle()
-
-  if (!stewardLicence) {
+  const isSteward = await hasStewwardAccess(supabase, requestingDriver.id, incident.league_id)
+  if (!isSteward) {
     return NextResponse.json({ error: 'Forbidden — steward access required' }, { status: 403 })
   }
 
-  // ── Action: resolve ─────────────────────────────────────────────────────
+  // ── Action: resolve ──────────────────────────────────────────────────────
   if (action === 'resolve') {
     const {
       verdict,
@@ -183,11 +197,10 @@ export async function POST(
       .eq('id', params.id)
 
     if (updateError) {
-      console.error('[incidents/id] resolve update', updateError)
+      console.error('[incidents/id POST] resolve update', updateError)
       return NextResponse.json({ error: updateError.message }, { status: 500 })
     }
 
-    // Write to penalty ledger if guilty and points > 0
     if (verdict === 'guilty' && penalty_points > 0 && incident.accused_driver_id) {
       const { error: ledgerError } = await supabase
         .schema('pitboss')
@@ -204,25 +217,25 @@ export async function POST(
         })
 
       if (ledgerError) {
-        console.error('[incidents/id] penalty ledger insert', ledgerError)
+        console.error('[incidents/id POST] penalty ledger insert', ledgerError)
       }
     }
 
     return NextResponse.json({ success: true })
   }
 
-  // ── Action: analyse ─────────────────────────────────────────────────────
+  // ── Action: analyse ──────────────────────────────────────────────────────
   if (action === 'analyse') {
     const { data: articles } = await supabase
       .schema('pitboss')
       .from('rule_articles')
-      .select('article_number, title, content')
+      .select('article_number, title, body')  // ← was 'content', correct column is 'body'
       .eq('league_id', incident.league_id)
       .eq('active', true)
       .order('article_number', { ascending: true })
 
     const rulebookText = articles && articles.length > 0
-      ? articles.map((a: any) => `Article ${a.article_number} — ${a.title}:\n${a.content}`).join('\n\n')
+      ? articles.map((a: any) => `Article ${a.article_number} — ${a.title}:\n${a.body}`).join('\n\n')
       : 'No rulebook articles available for this league.'
 
     const prompt = `You are an AI steward for a sim racing league. Analyse this incident and provide a verdict.
@@ -282,13 +295,13 @@ Respond with ONLY a JSON object in this exact format:
         .eq('id', params.id)
 
       if (aiUpdateError) {
-        console.error('[incidents/id] ai update', aiUpdateError)
+        console.error('[incidents/id POST] ai update', aiUpdateError)
         return NextResponse.json({ error: aiUpdateError.message }, { status: 500 })
       }
 
       return NextResponse.json({ success: true })
     } catch (err: any) {
-      console.error('[incidents/id] ai analyse', err)
+      console.error('[incidents/id POST] ai analyse', err)
       return NextResponse.json({ error: 'AI analysis failed' }, { status: 500 })
     }
   }
