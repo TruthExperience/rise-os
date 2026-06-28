@@ -14,15 +14,26 @@ export async function GET(
 
   const supabase = await createClient();
 
+  // Get the user's discord_id from public.users
+  const { data: user } = await supabase
+    .from("users")
+    .select("discord_id")
+    .eq("id", session.user.id)
+    .single();
+
+  if (!user?.discord_id) return NextResponse.json({ hasAccess: false });
+
+  // Find the driver by discord_id
   const { data: driver } = await supabase
     .schema("pitboss")
     .from("drivers")
     .select("id")
-    .eq("discord_id", session.user.id)
+    .eq("discord_id", user.discord_id)
     .single();
 
   if (!driver) return NextResponse.json({ hasAccess: false });
 
+  // Check for active steward licence in this league
   const { data: licence } = await supabase
     .schema("pitboss")
     .from("licences")
