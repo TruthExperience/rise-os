@@ -3,6 +3,7 @@
 import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
+import Link from "next/link";
 
 export default function DashboardPage() {
   const { data: session, status } = useSession();
@@ -49,29 +50,30 @@ export default function DashboardPage() {
         </button>
       </div>
 
-      {/* User Card */}
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-6 mb-6">
-        <div className="flex items-center gap-4">
-          {user?.image && (
-            <img
-              src={user.image}
-              alt="avatar"
-              className="h-14 w-14 rounded-full border-2 border-rise-red"
-            />
-          )}
-          <div>
-            <p className="text-white font-bold text-lg">
-              {user?.username || user?.name}
-            </p>
-            <p className="text-white/40 text-sm">
-              {user?.email}
-            </p>
-            <p className="text-rise-red text-xs mt-1 font-medium uppercase tracking-wide">
-              Commissioner
-            </p>
+      {/* User Card — tappable */}
+      <Link href="/pitboss/profile">
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-6 mb-6 active:scale-[0.98] transition-transform">
+          <div className="flex items-center gap-4">
+            {user?.image && (
+              <img
+                src={user.image}
+                alt="avatar"
+                className="h-14 w-14 rounded-full border-2 border-rise-red"
+              />
+            )}
+            <div className="flex-1">
+              <p className="text-white font-bold text-lg">
+                {user?.username || user?.name}
+              </p>
+              <p className="text-white/40 text-sm">{user?.email}</p>
+              <p className="text-rise-red text-xs mt-1 font-medium uppercase tracking-wide">
+                Commissioner
+              </p>
+            </div>
+            <span className="text-white/20 text-lg">›</span>
           </div>
         </div>
-      </div>
+      </Link>
 
       {/* Module Grid */}
       <p className="text-white/30 text-xs uppercase tracking-widest mb-3">
