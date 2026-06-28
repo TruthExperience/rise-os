@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/server";
 
-const STEWARD_ROLES = ["STW", "HEAD_STW", "BSAC_CHIEF"];
+const STEWARD_ROLES = ["STW", "HEAD_STW", "BSAC_CHIEF", "COMMISSIONER"];
 
 export async function GET(
   req: NextRequest,
@@ -12,24 +12,18 @@ export async function GET(
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ hasAccess: false });
 
-  const supabase = await createClient();
+  const discordId = (session.user as any).discordId as string;
+  if (!discordId) return NextResponse.json({ hasAccess: false });
 
-  // Get the user's discord_id from public.users
-  const { data: user } = await supabase
-    .from("users")
-    .select("discord_id")
-    .eq("id", session.user.id)
-    .single();
+  const supabase = createAdminClient();
 
-  if (!user?.discord_id) return NextResponse.json({ hasAccess: false });
-
-  // Find the driver by discord_id
+  // Find driver by discord_id directly
   const { data: driver } = await supabase
     .schema("pitboss")
     .from("drivers")
     .select("id")
-    .eq("discord_id", user.discord_id)
-    .single();
+    .eq("discord_id", discordId)
+    .maybeSingle();
 
   if (!driver) return NextResponse.json({ hasAccess: false });
 
@@ -43,7 +37,7 @@ export async function GET(
     .eq("status", "active")
     .in("role_code", STEWARD_ROLES)
     .limit(1)
-    .single();
+    .maybeSingle();
 
   return NextResponse.json({ hasAccess: !!licence });
 }
