@@ -49,7 +49,9 @@ export async function PUT(
   }
 
   const pitboss = getPitboss()
+  const publicClient = getStorage() // default schema = public
 
+  // Resolve pitboss driver for role check
   const { data: driver } = await pitboss
     .from('drivers')
     .select('id')
@@ -59,6 +61,13 @@ export async function PUT(
   if (!driver) {
     return NextResponse.json({ error: 'Driver not found' }, { status: 403 })
   }
+
+  // Resolve public.users UUID for the FK
+  const { data: userRecord } = await publicClient
+    .from('users')
+    .select('id')
+    .eq('discord_id', session.user.discordId)
+    .single()
 
   const { data: membership } = await pitboss
     .from('driver_leagues')
@@ -115,13 +124,13 @@ export async function PUT(
   const { data: updated, error: updateError } = await pitboss
     .from('rule_books')
     .update({
-      document_url: signedData?.signedUrl ?? null,
-      document_path: filename,
-      document_filename: file.name,
+      document_url:       signedData?.signedUrl ?? null,
+      document_path:      filename,
+      document_filename:  file.name,
       document_size_bytes: file.size,
       document_mime_type: file.type,
       document_uploaded_at: new Date().toISOString(),
-      document_uploaded_by: driver.id,
+      document_uploaded_by: userRecord?.id ?? null, // public.users UUID — matches FK
     })
     .eq('id', ruleBookId)
     .eq('league_id', params.id)
