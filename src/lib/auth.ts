@@ -17,9 +17,10 @@ export const authOptions: NextAuthOptions = {
     async jwt({ token, account, profile }) {
       if (account && profile) {
         const p = profile as any
+
         token.discordId     = p.id
         token.username      = p.username
-        token.avatar        = p.avatar
+        token.avatar        = p.avatar ?? null
         token.discriminator = p.discriminator
 
         const supabaseAdmin = createClient(
@@ -41,10 +42,11 @@ export const authOptions: NextAuthOptions = {
     },
     async session({ session, token }) {
       if (session.user) {
-        (session.user as any).discordId     = token.discordId
-        ;(session.user as any).username     = token.username
-        ;(session.user as any).avatar       = token.avatar
-        ;(session.user as any).discriminator = token.discriminator
+        session.user.id            = token.sub!
+        session.user.discordId     = token.discordId
+        session.user.username      = token.username
+        session.user.avatar        = token.avatar
+        session.user.discriminator = token.discriminator
       }
       return session
     },
