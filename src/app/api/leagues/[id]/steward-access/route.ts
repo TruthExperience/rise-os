@@ -12,7 +12,7 @@ export async function GET(
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ hasAccess: false });
 
-  const supabase = createClient();
+  const supabase = await createClient();
 
   const { data: driver } = await supabase
     .schema("pitboss")
