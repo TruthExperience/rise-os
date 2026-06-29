@@ -3,8 +3,6 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createClient } from '@supabase/supabase-js'
 
-export const dynamic = 'force-dynamic'
-
 const UPLOAD_ROLES = ['commissioner', 'co_owner', 'admin', 'head_steward']
 
 function getPitboss() {
@@ -30,35 +28,15 @@ export async function GET(
 
   const { data: documents, error } = await supabase
     .from('rule_books')
-    .select('id, title, document_code, version, status, authority_level, effective_date, tagline, document_url, document_filename, document_size_bytes, document_uploaded_at')
+    .select(
+      'id, title, document_code, version, status, authority_level, effective_date, tagline, document_url, document_filename, document_size_bytes, document_uploaded_at'
+    )
     .eq('league_id', params.id)
     .order('authority_level', { ascending: true })
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  if (!documents || documents.length === 0) {
-    return NextResponse.json({ documents: [] }, {
-      headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' },
-    })
-  }
 
-  // Supabase schema cache bug: list queries return null for document_url
-  // even when the value exists. Patch each row with a direct single-row fetch.
-  const patched = await Promise.all(
-    documents.map(async (doc) => {
-      if (doc.document_url) return doc // already correct, skip
-      const { data: fresh } = await supabase
-        .from('rule_books')
-        .select('id, document_url, document_filename, document_size_bytes, document_uploaded_at')
-        .eq('id', doc.id)
-        .single()
-      return fresh ? { ...doc, ...fresh } : doc
-    })
-  )
-
-  return NextResponse.json(
-    { documents: patched },
-    { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache' } }
-  )
+  return NextResponse.json({ documents: documents ?? [] })
 }
 
 export async function PUT(
@@ -71,8 +49,9 @@ export async function PUT(
   }
 
   const pitboss = getPitboss()
-  const publicClient = getStorage()
+  const publicClient = getStorage() // default schema = public
 
+  // Resolve pitboss driver for role check
   const { data: driver } = await pitboss
     .from('drivers')
     .select('id')
@@ -83,6 +62,7 @@ export async function PUT(
     return NextResponse.json({ error: 'Driver not found' }, { status: 403 })
   }
 
+  // Resolve public.users UUID for the FK
   const { data: userRecord } = await publicClient
     .from('users')
     .select('id')
@@ -144,17 +124,17 @@ export async function PUT(
   const { data: updated, error: updateError } = await pitboss
     .from('rule_books')
     .update({
-      document_url:         signedData?.signedUrl ?? null,
-      document_path:        filename,
-      document_filename:    file.name,
-      document_size_bytes:  file.size,
-      document_mime_type:   file.type,
+      document_url:       signedData?.signedUrl ?? null,
+      document_path:      filename,
+      document_filename:  file.name,
+      document_size_bytes: file.size,
+      document_mime_type: file.type,
       document_uploaded_at: new Date().toISOString(),
-      document_uploaded_by: userRecord?.id ?? null,
+      document_uploaded_by: userRecord?.id ?? null, // public.users UUID — matches FK
     })
     .eq('id', ruleBookId)
     .eq('league_id', params.id)
-    .select('id, title, document_url, document_filename, document_size_bytes, document_uploaded_at, status')
+    .select()
     .single()
 
   if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 })
