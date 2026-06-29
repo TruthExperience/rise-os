@@ -290,4 +290,4 @@ export default function RulesPage() {
    </Suspense>
  )
 }
-l
+
