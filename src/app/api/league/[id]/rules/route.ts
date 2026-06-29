@@ -27,11 +27,6 @@ export async function GET(
  { params }: { params: { id: string } }
 ) {
  // --- TEMPORARY DIAGNOSTIC LOGGING ---
- // Logs the exact env values (lengths/prefixes only, never full secrets),
- // the raw Supabase response, and a direct re-fetch of one row by id,
- // so we can see in Vercel's runtime logs exactly what this request
- // receives at query time. Remove this block once the document_url
- // mismatch is found.
  console.log('[rules:GET] league_id =', params.id)
  console.log('[rules:GET] SUPABASE_URL =', process.env.NEXT_PUBLIC_SUPABASE_URL)
  console.log(
@@ -54,6 +49,34 @@ export async function GET(
  console.log('[rules:GET] supabase status =', status, statusText)
  console.log('[rules:GET] supabase error =', JSON.stringify(error))
  console.log('[rules:GET] raw documents =', JSON.stringify(documents))
+
+ // Isolation test A: same filter, same columns, NO order()
+ const { data: noOrder, error: noOrderError } = await supabase
+   .from('rule_books')
+   .select(
+     'id, title, document_code, version, status, authority_level, effective_date, tagline, document_url, document_filename, document_size_bytes, document_uploaded_at'
+   )
+   .eq('league_id', params.id)
+ console.log('[rules:GET] TEST-A (no order) documents =', JSON.stringify(noOrder))
+ console.log('[rules:GET] TEST-A error =', JSON.stringify(noOrderError))
+
+ // Isolation test B: same filter + order, but ONLY select id + document_url
+ const { data: minimalCols, error: minimalColsError } = await supabase
+   .from('rule_books')
+   .select('id, document_url')
+   .eq('league_id', params.id)
+   .order('authority_level', { ascending: true })
+ console.log('[rules:GET] TEST-B (minimal columns + order) =', JSON.stringify(minimalCols))
+ console.log('[rules:GET] TEST-B error =', JSON.stringify(minimalColsError))
+
+ // Isolation test C: select(*) with order, to see if explicit column list itself is the issue
+ const { data: starSelect, error: starSelectError } = await supabase
+   .from('rule_books')
+   .select('*')
+   .eq('league_id', params.id)
+   .order('authority_level', { ascending: true })
+ console.log('[rules:GET] TEST-C (select star + order) document_url =', starSelect?.[0]?.document_url)
+ console.log('[rules:GET] TEST-C error =', JSON.stringify(starSelectError))
 
  // Direct re-fetch of the known row by id, bypassing the league filter,
  // to compare against the list query above.
