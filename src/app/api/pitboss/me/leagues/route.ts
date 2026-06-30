@@ -19,6 +19,13 @@ function getRiseOs() {
   )
 }
 
+function getPublic() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
+
 export async function GET() {
   const session = await getServerSession(authOptions)
   if (!session?.user?.discordId) {
@@ -27,9 +34,16 @@ export async function GET() {
 
   const pitboss = getPitboss()
   const riseOs = getRiseOs()
+  const publicClient = getPublic()
 
-  // Pull sim racing roles where available (pitboss schema)
+  const { data: userRecord } = await publicClient
+    .from('users')
+    .select('id')
+    .eq('discord_id', session.user.discordId)
+    .single()
+
   let roleMap: Record<string, string> = {}
+
   const { data: driver } = await pitboss
     .from('drivers')
     .select('id')
@@ -47,7 +61,17 @@ export async function GET() {
     }
   }
 
-  // Fetch all leagues with display info
+  if (userRecord) {
+    const { data: leagueAdmins } = await riseOs
+      .from('league_admins')
+      .select('league_id, role')
+      .eq('user_id', userRecord.id)
+
+    for (const la of leagueAdmins ?? []) {
+      roleMap[la.league_id] = la.role
+    }
+  }
+
   const { data: leagues, error } = await riseOs
     .from('leagues')
     .select('id, name, sport, logo_url, is_public, commissioner_id')
