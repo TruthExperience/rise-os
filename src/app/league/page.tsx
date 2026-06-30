@@ -1,7 +1,7 @@
 "use client";
 
 import { useSession } from "next-auth/react";
-import { useRouter, useParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 const SPORT_LABELS: Record<string, string> = {
@@ -27,7 +27,7 @@ const SPORT_EMOJI: Record<string, string> = {
 export default function LeagueDetailPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
-  const { id } = useParams<{ id: string }>();
+  const [id, setId] = useState<string | null>(null);
   const [league, setLeague] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -39,12 +39,33 @@ export default function LeagueDetailPage() {
   }, [status, router]);
 
   useEffect(() => {
+    if (status === "authenticated") resolveLeagueId();
+  }, [status]);
+
+  useEffect(() => {
     if (id) fetchLeague();
   }, [id]);
 
   useEffect(() => {
     if (id && session?.user) checkStewardAccess();
   }, [id, session]);
+
+  async function resolveLeagueId() {
+    try {
+      const res = await fetch("/api/pitboss/me/leagues");
+      if (res.ok) {
+        const data = await res.json();
+        const first = (data.leagues ?? [])[0];
+        if (first?.league_id) {
+          setId(first.league_id);
+          return;
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setLoading(false);
+  }
 
   async function fetchLeague() {
     setLoading(true);
@@ -117,7 +138,6 @@ export default function LeagueDetailPage() {
         ← Back
       </button>
 
-      {/* League header */}
       <div className="flex flex-col items-center mb-8">
         <button
           onClick={() => fileRef.current?.click()}
@@ -156,7 +176,6 @@ export default function LeagueDetailPage() {
         </p>
       </div>
 
-      {/* Quick actions */}
       <p className="text-white/30 text-xs uppercase tracking-widest mb-3">League</p>
       <div className="grid grid-cols-2 gap-3 mb-6">
         <NavCard
@@ -193,7 +212,6 @@ export default function LeagueDetailPage() {
         )}
       </div>
 
-      {/* Info rows */}
       <p className="text-white/30 text-xs uppercase tracking-widest mb-3">Info</p>
       <div className="flex flex-col gap-3">
         <InfoRow label="Visibility" value={league.is_public ? "Public" : "Private"} />
