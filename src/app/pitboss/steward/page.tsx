@@ -1,8 +1,7 @@
-// src/app/pitboss/steward/page.tsx
 import { Suspense } from 'react'
-import { StewardInner } from '@/components/steward/StewardInner'
+import { StewardPenaltiesInner } from '@/components/steward/StewardPenaltiesInner'
 
-export default function StewardPage() {
+export default function StewardPenaltiesPage() {
   return (
     <Suspense
       fallback={
@@ -11,7 +10,7 @@ export default function StewardPage() {
         </main>
       }
     >
-      <StewardInner />
+      <StewardPenaltiesInner />
     </Suspense>
   )
 }
