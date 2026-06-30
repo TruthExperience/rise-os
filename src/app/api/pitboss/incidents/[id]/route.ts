@@ -327,7 +327,18 @@ export async function POST(
     const { data: articles } = await supabase
       .schema('pitboss')
       .from('rule_articles')
-      .select('article_number, title, body, category, league_id, rule_book_id')
+      .select(`
+        article_number, title, body, category, league_id, rule_book_id,
+        rule_references (
+          penalty_min_pp,
+          penalty_max_pp,
+          penalty_options,
+          incident_types,
+          enforcement_body,
+          fine_min_trl,
+          fine_max_trl
+        )
+      `)
       .eq('league_id', incident.league_id)
       .eq('active', true)
       .order('article_number', { ascending: true })
@@ -341,6 +352,25 @@ export async function POST(
       rule_book_id:   a.rule_book_id ?? '',
     }))
 
+    // Build a penalty-range map keyed by incident_type for the worker to
+    // constrain its pp_recommendation against. rule_references rows carry
+    // incident_types[] arrays, so one article can apply to multiple types.
+    const penaltyRanges: Record<string, { min: number; max: number; options: string[] }> = {}
+    for (const a of articles ?? []) {
+      for (const ref of a.rule_references ?? []) {
+        if (!ref.incident_types) continue
+        for (const incType of ref.incident_types) {
+          if (!penaltyRanges[incType] || ref.penalty_min_pp != null) {
+            penaltyRanges[incType] = {
+              min:     ref.penalty_min_pp ?? 0,
+              max:     ref.penalty_max_pp ?? ref.penalty_min_pp ?? 0,
+              options: ref.penalty_options ?? [],
+            }
+          }
+        }
+      }
+    }
+
     try {
       const ai = await pbSteward(
         {
@@ -351,6 +381,10 @@ export async function POST(
           lap:              incident.lap,
           league_id:        incident.league_id,
           accused_response: incident.accused_response ?? undefined,
+          // Full map plus the specific range for this incident's type, so the
+          // worker's /steward prompt can constrain pp_recommendation to it.
+          penalty_ranges:   penaltyRanges,
+          applicable_range: penaltyRanges[incident.incident_type] ?? null,
         },
         regulations,
         incident.league_id
