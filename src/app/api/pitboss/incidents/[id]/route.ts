@@ -293,6 +293,9 @@ export async function POST(
     }
 
     if (verdict === 'guilty' && penalty_points > 0 && incident.accused_driver_id) {
+      // pp_total is NOT written here — pitboss.fn_recalc_driver_pp_total()
+      // recomputes drivers.pp_total automatically via trg_penalty_ledger_pp_total
+      // the moment this insert lands. Do not add a manual pp_total update.
       const { error: ledgerError } = await supabase
         .schema('pitboss')
         .from('penalty_ledger')
@@ -304,11 +307,15 @@ export async function POST(
           reason:      penalty ?? `Incident: ${incident.incident_type}`,
           issued_at:   now,
           issued_by:   requestingDriver.id,
-          source:      'steward_ruling',
+          source:      'incident',
         })
 
       if (ledgerError) {
         console.error('[incidents/id POST] penalty ledger insert', ledgerError)
+        return NextResponse.json(
+          { error: 'Incident was resolved, but penalty ledger entry failed: ' + ledgerError.message },
+          { status: 500 }
+        )
       }
     }
 
