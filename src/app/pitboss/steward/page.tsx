@@ -1,7 +1,7 @@
 import { Suspense } from 'react'
-import { StewardPenaltiesInner } from '@/components/steward/StewardPenaltiesInner'
+import { StewardInner } from './StewardInner'
 
-export default function StewardPenaltiesPage() {
+export default function StewardPage() {
   return (
     <Suspense
       fallback={
@@ -10,7 +10,7 @@ export default function StewardPenaltiesPage() {
         </main>
       }
     >
-      <StewardPenaltiesInner />
+      <StewardInner />
     </Suspense>
   )
 }
