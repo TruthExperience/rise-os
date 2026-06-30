@@ -5,14 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useState } from 'react'
 
 const TYPE_LABELS: Record<string, string> = {
-  collision:       '💥 Collision',
-  unsafe_release:  '🚦 Unsafe Release',
-  track_limits:    '🟡 Track Limits',
-  blocking:        '🚧 Blocking',
-  false_start:     '🏁 False Start',
-  disconnect:      '📡 Disconnect',
-  unsportsmanlike: '😤 Unsportsmanlike',
-  other:           '📋 Other',
+  'Collision / Contact':      '💥 Collision / Contact',
+  'Divebomb':                 '🚀 Divebomb',
+  'Unsportsmanlike Conduct':  '😤 Unsportsmanlike Conduct',
+  'Other':                    '📋 Other',
 }
 
 const STATUS_COLORS: Record<string, string> = {
