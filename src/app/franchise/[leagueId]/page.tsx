@@ -5,6 +5,11 @@ import { useRouter, useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { findCfbTeam, CfbTeam } from "@/lib/matchCfbTeam";
 
+function getAvatarUrl(discordId: string | null, avatar: string | null) {
+  if (!discordId || !avatar) return null;
+  return `https://cdn.discordapp.com/avatars/${discordId}/${avatar}.png?size=128`;
+}
+
 export default function FranchiseListPage() {
   const { status } = useSession();
   const router = useRouter();
@@ -159,6 +164,7 @@ export default function FranchiseListPage() {
         <div className="flex flex-col gap-3">
           {franchises.map((f) => {
             const cfbTeam = findCfbTeam(f.name, cfbTeams);
+            const gmAvatarUrl = f.gm ? getAvatarUrl(f.gm.discord_id, f.gm.avatar) : null;
             return (
               <div key={f.id}
                 onClick={() => router.push(`/franchise/${leagueId}/${f.id}`)}
@@ -185,6 +191,27 @@ export default function FranchiseListPage() {
                     </div>
                   )}
                 </div>
+
+                {f.gm && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      router.push(`/rise/gm/${f.gm.id}`);
+                    }}
+                    className="mt-3 pt-3 border-t border-white/5 w-full flex items-center gap-2 text-left"
+                  >
+                    {gmAvatarUrl ? (
+                      <img src={gmAvatarUrl} alt={f.gm.username}
+                        className="w-6 h-6 rounded-lg object-cover border border-white/10 flex-shrink-0" />
+                    ) : (
+                      <div className="w-6 h-6 rounded-lg bg-white/10 flex items-center justify-center flex-shrink-0">
+                        <span className="text-white/50 text-[10px] font-black">{f.gm.username[0]?.toUpperCase()}</span>
+                      </div>
+                    )}
+                    <span className="text-white/30 text-xs">GM</span>
+                    <span className="text-white/70 text-xs font-semibold truncate">{f.gm.username}</span>
+                  </button>
+                )}
               </div>
             );
           })}
