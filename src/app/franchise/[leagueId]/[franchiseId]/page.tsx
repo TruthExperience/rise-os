@@ -120,6 +120,22 @@ export default function FranchiseDetailPage() {
 
   const cfbTeam = findCfbTeam(franchise.name, cfbTeams);
 
+  const hasLifetimeRecord =
+    franchise.irl_lifetime_wins !== null && franchise.irl_lifetime_wins !== undefined &&
+    franchise.irl_lifetime_losses !== null && franchise.irl_lifetime_losses !== undefined;
+
+  const lifetimeTies = franchise.irl_lifetime_ties ?? 0;
+  const lifetimeRecordText = hasLifetimeRecord
+    ? lifetimeTies > 0
+      ? `${franchise.irl_lifetime_wins}-${franchise.irl_lifetime_losses}-${lifetimeTies}`
+      : `${franchise.irl_lifetime_wins}-${franchise.irl_lifetime_losses}`
+    : null;
+
+  const lifetimeWinPct =
+    franchise.irl_win_pct !== null && franchise.irl_win_pct !== undefined
+      ? `${(franchise.irl_win_pct * 100).toFixed(1)}%`
+      : null;
+
   return (
     <main className="min-h-screen bg-rise-black px-4 py-8">
       <button onClick={() => router.back()} className="flex items-center gap-2 text-white/40 text-sm mb-6">
@@ -190,6 +206,25 @@ export default function FranchiseDetailPage() {
             <p className="text-white/30 text-xs uppercase tracking-wide mt-1">Titles</p>
           </div>
         </div>
+
+        {hasLifetimeRecord && (
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+            <p className="text-white/30 text-xs uppercase tracking-widest mb-4 text-center">
+              Lifetime Record
+            </p>
+            <div className="flex items-baseline justify-center gap-3">
+              <span className="text-2xl font-black text-white">{lifetimeRecordText}</span>
+              {lifetimeWinPct && (
+                <span className="text-white/40 text-xs">{lifetimeWinPct} win pct</span>
+              )}
+            </div>
+            {franchise.irl_record_source && (
+              <p className="text-white/20 text-[10px] text-center mt-2 uppercase tracking-widest">
+                Source: {franchise.irl_record_source}
+              </p>
+            )}
+          </div>
+        )}
 
         {cfbTeam && (
           <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
