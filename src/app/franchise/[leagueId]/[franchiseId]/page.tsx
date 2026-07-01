@@ -5,12 +5,26 @@ import { useRouter, useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { findCfbTeam, CfbTeam } from "@/lib/matchCfbTeam";
 
+type Player = {
+  id: string;
+  name: string;
+  position: string | null;
+  status: string | null;
+  ovr: number | null;
+  jersey_number: number | null;
+  class_year: string | null;
+  dev_trait: string | null;
+  seasons_played: number | null;
+};
+
 export default function FranchiseDetailPage() {
   const { status } = useSession();
   const router = useRouter();
   const { leagueId, franchiseId } = useParams<{ leagueId: string; franchiseId: string }>();
   const [franchise, setFranchise] = useState<any>(null);
   const [cfbTeams, setCfbTeams] = useState<CfbTeam[]>([]);
+  const [roster, setRoster] = useState<Player[]>([]);
+  const [rosterLoading, setRosterLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -21,7 +35,10 @@ export default function FranchiseDetailPage() {
   }, [status, router]);
 
   useEffect(() => {
-    if (franchiseId) fetchFranchise();
+    if (franchiseId) {
+      fetchFranchise();
+      fetchRoster();
+    }
     fetchCfbTeams();
   }, [franchiseId]);
 
@@ -34,6 +51,18 @@ export default function FranchiseDetailPage() {
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchRoster() {
+    setRosterLoading(true);
+    try {
+      const res = await fetch(`/api/franchises/${leagueId}/${franchiseId}/roster`);
+      if (res.ok) setRoster(await res.json());
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRosterLoading(false);
     }
   }
 
@@ -183,6 +212,43 @@ export default function FranchiseDetailPage() {
             </div>
           </div>
         )}
+
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <p className="text-white/30 text-xs uppercase tracking-widest mb-4">
+            Roster {roster.length > 0 && `(${roster.length})`}
+          </p>
+
+          {rosterLoading ? (
+            <div className="flex justify-center py-6">
+              <div className="h-6 w-6 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+            </div>
+          ) : roster.length === 0 ? (
+            <p className="text-white/30 text-sm text-center py-6">No players on this roster yet.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {roster.map((p) => (
+                <div key={p.id} className="flex items-center justify-between border-b border-white/5 pb-2 last:border-b-0 last:pb-0">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-white/30 text-xs font-mono w-6 text-right flex-shrink-0">
+                      {p.jersey_number ?? "—"}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-white text-sm font-semibold truncate">{p.name}</p>
+                      <p className="text-white/30 text-xs">
+                        {p.position ?? "—"}
+                        {p.class_year ? ` · ${p.class_year}` : ""}
+                        {p.status && p.status !== "active" ? ` · ${p.status}` : ""}
+                      </p>
+                    </div>
+                  </div>
+                  {p.ovr != null && (
+                    <span className="text-white font-black text-sm flex-shrink-0 ml-2">{p.ovr}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </main>
   );
