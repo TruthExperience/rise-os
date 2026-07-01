@@ -3,12 +3,14 @@
 import { useSession } from "next-auth/react";
 import { useRouter, useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { findCfbTeam, CfbTeam } from "@/lib/matchCfbTeam";
 
 export default function FranchiseDetailPage() {
   const { status } = useSession();
   const router = useRouter();
   const { leagueId, franchiseId } = useParams<{ leagueId: string; franchiseId: string }>();
   const [franchise, setFranchise] = useState<any>(null);
+  const [cfbTeams, setCfbTeams] = useState<CfbTeam[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -20,6 +22,7 @@ export default function FranchiseDetailPage() {
 
   useEffect(() => {
     if (franchiseId) fetchFranchise();
+    fetchCfbTeams();
   }, [franchiseId]);
 
   async function fetchFranchise() {
@@ -31,6 +34,15 @@ export default function FranchiseDetailPage() {
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchCfbTeams() {
+    try {
+      const res = await fetch("/api/cfb-teams");
+      if (res.ok) setCfbTeams(await res.json());
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -77,6 +89,8 @@ export default function FranchiseDetailPage() {
     );
   }
 
+  const cfbTeam = findCfbTeam(franchise.name, cfbTeams);
+
   return (
     <main className="min-h-screen bg-rise-black px-4 py-8">
       <button onClick={() => router.back()} className="flex items-center gap-2 text-white/40 text-sm mb-6">
@@ -112,6 +126,9 @@ export default function FranchiseDetailPage() {
         {franchise.abbreviation && (
           <p className="text-white/30 text-xs uppercase tracking-widest mt-1">{franchise.abbreviation}</p>
         )}
+        {cfbTeam?.conference && (
+          <p className="text-white/30 text-xs mt-1">{cfbTeam.conference}</p>
+        )}
       </div>
 
       <div className="flex gap-3 mb-6 justify-center">
@@ -144,6 +161,28 @@ export default function FranchiseDetailPage() {
             <p className="text-white/30 text-xs uppercase tracking-wide mt-1">Titles</p>
           </div>
         </div>
+
+        {cfbTeam && (
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+            <p className="text-white/30 text-xs uppercase tracking-widest mb-4 text-center">
+              CFB27 Team Rating
+            </p>
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div>
+                <p className="text-2xl font-black text-white">{cfbTeam.ovr ?? "—"}</p>
+                <p className="text-white/30 text-xs uppercase tracking-wide mt-1">OVR</p>
+              </div>
+              <div>
+                <p className="text-2xl font-black text-white">{cfbTeam.offense_ovr ?? "—"}</p>
+                <p className="text-white/30 text-xs uppercase tracking-wide mt-1">Offense</p>
+              </div>
+              <div>
+                <p className="text-2xl font-black text-white">{cfbTeam.defense_ovr ?? "—"}</p>
+                <p className="text-white/30 text-xs uppercase tracking-wide mt-1">Defense</p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );
