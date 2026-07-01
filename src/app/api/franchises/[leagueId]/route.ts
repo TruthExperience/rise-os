@@ -7,6 +7,11 @@ const supabaseAdmin = createClient(
   { db: { schema: "rise_os" } }
 );
 
+const publicAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+
 export async function GET(_req: Request, { params }: { params: { leagueId: string } }) {
   const { data, error } = await supabaseAdmin
     .from("franchises")
@@ -15,7 +20,23 @@ export async function GET(_req: Request, { params }: { params: { leagueId: strin
     .order("name");
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
+
+  const gmIds = [...new Set((data ?? []).map((f: any) => f.gm_id).filter(Boolean))];
+  let gmMap: Record<string, any> = {};
+  if (gmIds.length > 0) {
+    const { data: gms } = await publicAdmin
+      .from("users")
+      .select("id, username, discord_id, avatar")
+      .in("id", gmIds);
+    gmMap = Object.fromEntries((gms ?? []).map((g: any) => [g.id, g]));
+  }
+
+  const enriched = (data ?? []).map((f: any) => ({
+    ...f,
+    gm: f.gm_id ? gmMap[f.gm_id] ?? null : null,
+  }));
+
+  return NextResponse.json(enriched);
 }
 
 export async function POST(req: Request, { params }: { params: { leagueId: string } }) {
