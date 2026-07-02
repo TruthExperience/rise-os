@@ -19,16 +19,27 @@
 //     },
 //     "crons": [{ "path": "/api/cron/ea-ratings-all", "schedule": "0 6 * * *" }]
 //   }
+//
+// AUTH: this route is guarded by CRON_SECRET. Vercel Cron automatically
+// sends this as a Bearer token when it triggers the job. Set CRON_SECRET
+// in your Vercel project env vars (any random string works) so no one
+// else can trigger a full 140-team sync on demand.
 
 import { getSupabaseClient, syncTeam, sleep, TeamSyncResult } from "@/lib/ea-ratings";
 
 export const dynamic = "force-dynamic";
 
 const DELAY_BETWEEN_TEAMS_MS = 750;
+const GAME_VERSION = "CFB27";
 
 export async function GET(request: Request) {
+  const authHeader = request.headers.get("authorization");
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
-  // Optional: ?conference=Mountain%20West to sync just one conference at a time,
+  // Optional: ?conference=American to sync just one conference at a time,
   // useful for staying under maxDuration on smaller Vercel plans.
   const conferenceFilter = searchParams.get("conference");
 
@@ -37,6 +48,7 @@ export async function GET(request: Request) {
   let query = supabase
     .from("cfb_teams")
     .select("team_name, ea_team_id, ea_team_slug, conference")
+    .eq("game_version", GAME_VERSION)
     .not("ea_team_slug", "is", null)
     .not("ea_team_id", "is", null);
 
