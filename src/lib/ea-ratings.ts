@@ -7,7 +7,7 @@
 //   app/api/cron/ea-ratings/route.ts       (single team, on demand)
 //   app/api/cron/ea-ratings-all/route.ts   (loops every team in cfb_teams)
 
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 
 const BASE_URL =
   "https://www.ea.com/games/ea-sports-college-football/ratings/teams-ratings";
@@ -113,7 +113,7 @@ export interface TeamSyncResult {
 }
 
 /** Create a Supabase client scoped to the rise_os schema, using the service role key. */
-export function getSupabaseClient(): SupabaseClient {
+export function getSupabaseClient() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -125,6 +125,11 @@ export function getSupabaseClient(): SupabaseClient {
 
   return createClient(url, key, { db: { schema: "rise_os" } });
 }
+
+// Derived from the actual call above, so it's correctly typed for the
+// "rise_os" schema instead of defaulting to the plain "public" schema
+// that the bare SupabaseClient type assumes.
+export type RiseOsClient = ReturnType<typeof getSupabaseClient>;
 
 /** Fetch one team's ratings page and pull the ratingsEntries payload out of __NEXT_DATA__. */
 export async function fetchTeamRatings(
@@ -203,7 +208,7 @@ function toDbRows(p: EaPlayer, teamEaId: number) {
 
 /** Fetch one team's ratings and upsert into Supabase. Returns a summary, never throws. */
 export async function syncTeam(
-  supabase: SupabaseClient,
+  supabase: RiseOsClient,
   teamSlug: string,
   teamEaId: number,
   page = 1
