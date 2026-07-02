@@ -79,6 +79,21 @@ interface EaStat {
   diff: number;
 }
 
+// EA returns position as a nested object, not a plain string. `shortLabel`
+// is the scheme-role code (MIKE/WILL/SAM/LEDG/REDG) that matches the
+// convention already used elsewhere in rise_os (e.g. rise_os.players).
+// `id` is the raw alignment code (MLB/ROLB/LOLB/LE/RE) and is kept only
+// as a fallback.
+interface EaPosition {
+  id: string;
+  shortLabel: string;
+  label: string;
+  positionType: {
+    id: string;
+    name: string;
+  };
+}
+
 interface EaPlayer {
   id: number;
   avatarUrl: string;
@@ -94,7 +109,7 @@ interface EaPlayer {
   schoolYear: string;
   conference: string;
   team: string;
-  position: string;
+  position: EaPosition | string;
   stats: Record<string, EaStat>;
 }
 
@@ -137,6 +152,18 @@ export function getSupabaseClient() {
 // "rise_os" schema instead of defaulting to the plain "public" schema
 // that the bare SupabaseClient type assumes.
 export type RiseOsClient = ReturnType<typeof getSupabaseClient>;
+
+/**
+ * Extract the position code from EA's payload, tolerating both the nested
+ * object shape ({ id, shortLabel, ... }) and a plain string, in case EA
+ * changes the shape again. Prefers shortLabel (scheme role, e.g. "SAM")
+ * to match the convention already used in rise_os.
+ */
+function extractPositionCode(position: EaPosition | string | null | undefined): string | null {
+  if (!position) return null;
+  if (typeof position === "string") return position;
+  return position.shortLabel ?? position.id ?? null;
+}
 
 /**
  * Fetch one team's ratings page and pull the ratingsEntries payload out of __NEXT_DATA__.
@@ -189,7 +216,7 @@ function toDbRows(p: EaPlayer, teamEaId: number) {
     ea_player_id: p.id,
     ea_slug: `${p.firstName}-${p.lastName}`.toLowerCase().replace(/\s+/g, "-"),
     name: `${p.firstName} ${p.lastName}`,
-    position: p.position,
+    position: extractPositionCode(p.position),
     team: p.team,
     team_ea_id: teamEaId,
     conference: p.conference,
