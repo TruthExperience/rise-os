@@ -56,7 +56,7 @@ export default function RootLayout({
       </head>
       <body className={inter.className}>
         <SessionProvider>
-          <div className="pb-16">
+          <div className="pb-[calc(4rem+env(safe-area-inset-bottom))]">
             {children}
           </div>
           <BottomNav />
