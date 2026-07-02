@@ -94,6 +94,21 @@ interface EaPosition {
   };
 }
 
+// EA returns team as a nested object too, not a plain string — same
+// situation as position. Exact key isn't confirmed from EA's docs, so
+// extractTeamName below tries the likely display-name fields in priority
+// order rather than assuming one. Remove the debug console.log in
+// syncTeam once the real key is confirmed from a live run.
+interface EaTeam {
+  id?: number;
+  name?: string;
+  displayName?: string;
+  shortName?: string;
+  teamName?: string;
+  school?: string;
+  label?: string;
+}
+
 interface EaPlayer {
   id: number;
   avatarUrl: string;
@@ -108,7 +123,7 @@ interface EaPlayer {
   jerseyNum: number;
   schoolYear: string;
   conference: string;
-  team: string;
+  team: EaTeam | string;
   position: EaPosition | string;
   stats: Record<string, EaStat>;
 }
@@ -166,6 +181,26 @@ function extractPositionCode(position: EaPosition | string | null | undefined): 
 }
 
 /**
+ * Extract the team display name from EA's payload, tolerating both the
+ * nested object shape and a plain string. Tries the likely display-name
+ * fields in priority order since the exact key hasn't been confirmed
+ * against a live payload yet.
+ */
+function extractTeamName(team: EaTeam | string | null | undefined): string | null {
+  if (!team) return null;
+  if (typeof team === "string") return team;
+  return (
+    team.name ??
+    team.displayName ??
+    team.school ??
+    team.teamName ??
+    team.shortName ??
+    team.label ??
+    null
+  );
+}
+
+/**
  * Fetch one team's ratings page and pull the ratingsEntries payload out of __NEXT_DATA__.
  *
  * IMPORTANT: the final URL segment is EA's own numeric team ID (e.g. Alabama = 3,
@@ -217,7 +252,7 @@ function toDbRows(p: EaPlayer, teamEaId: number) {
     ea_slug: `${p.firstName}-${p.lastName}`.toLowerCase().replace(/\s+/g, "-"),
     name: `${p.firstName} ${p.lastName}`,
     position: extractPositionCode(p.position),
-    team: p.team,
+    team: extractTeamName(p.team),
     team_ea_id: teamEaId,
     conference: p.conference,
     height: p.height ? String(p.height) : null,
@@ -258,6 +293,11 @@ export async function syncTeam(
     // team ID, not a pagination cursor. `page` is retained only because
     // TeamSyncResult reports it; it has no effect on the fetched URL.
     const { players, totalItems } = await fetchTeamRatings(teamSlug, teamEaId);
+
+    // TEMP DEBUG — remove once the real `team` key is confirmed from logs.
+    if (players[0]) {
+      console.log("raw team shape:", JSON.stringify(players[0].team));
+    }
 
     const playerRows = [];
     const ratingRows = [];
