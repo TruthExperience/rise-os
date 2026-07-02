@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "src/app/api/cron/ea-ratings/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/cron/ea-ratings-all/route.ts": {
+      "maxDuration": 300
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/ea-ratings-all",
+      "schedule": "0 6 * * *"
+    }
+  ]
+}
