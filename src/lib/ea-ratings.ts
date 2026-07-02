@@ -152,7 +152,7 @@ export async function fetchTeamRatings(
 
   const html = await res.text();
   const match = html.match(
-    /<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s
+    /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
   );
 
   if (!match) {
