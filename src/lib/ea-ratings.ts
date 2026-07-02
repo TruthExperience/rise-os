@@ -112,9 +112,16 @@ export interface TeamSyncResult {
   error?: string;
 }
 
-/** Create a Supabase client scoped to the rise_os schema, using the service role key. */
+/**
+ * Create a Supabase client scoped to the rise_os schema, using the service role key.
+ *
+ * Reads SUPABASE_URL first (a dedicated server-only var), falling back to
+ * NEXT_PUBLIC_SUPABASE_URL (the var the Vercel<->Supabase integration injects
+ * automatically). The service role key must never be exposed via a
+ * NEXT_PUBLIC_ var, so it's only read from SUPABASE_SERVICE_ROLE_KEY.
+ */
 export function getSupabaseClient() {
-  const url = process.env.SUPABASE_URL;
+  const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!url || !key) {
