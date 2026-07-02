@@ -94,19 +94,14 @@ interface EaPosition {
   };
 }
 
-// EA returns team as a nested object too, not a plain string — same
-// situation as position. Exact key isn't confirmed from EA's docs, so
-// extractTeamName below tries the likely display-name fields in priority
-// order rather than assuming one. Remove the debug console.log in
-// syncTeam once the real key is confirmed from a live run.
+// EA returns team as a nested object too, not a plain string. Confirmed
+// shape via a live run against fau/28 on 2026-07-02:
+// {"id":28,"label":"FAU","imageUrl":"...","isPopular":false}
 interface EaTeam {
-  id?: number;
-  name?: string;
-  displayName?: string;
-  shortName?: string;
-  teamName?: string;
-  school?: string;
-  label?: string;
+  id: number;
+  label: string;
+  imageUrl?: string;
+  isPopular?: boolean;
 }
 
 interface EaPlayer {
@@ -182,22 +177,12 @@ function extractPositionCode(position: EaPosition | string | null | undefined): 
 
 /**
  * Extract the team display name from EA's payload, tolerating both the
- * nested object shape and a plain string. Tries the likely display-name
- * fields in priority order since the exact key hasn't been confirmed
- * against a live payload yet.
+ * nested object shape ({ id, label, ... }) and a plain string.
  */
 function extractTeamName(team: EaTeam | string | null | undefined): string | null {
   if (!team) return null;
   if (typeof team === "string") return team;
-  return (
-    team.name ??
-    team.displayName ??
-    team.school ??
-    team.teamName ??
-    team.shortName ??
-    team.label ??
-    null
-  );
+  return team.label ?? null;
 }
 
 /**
@@ -293,11 +278,6 @@ export async function syncTeam(
     // team ID, not a pagination cursor. `page` is retained only because
     // TeamSyncResult reports it; it has no effect on the fetched URL.
     const { players, totalItems } = await fetchTeamRatings(teamSlug, teamEaId);
-
-    // TEMP DEBUG — remove once the real `team` key is confirmed from logs.
-    if (players[0]) {
-      console.log("raw team shape:", JSON.stringify(players[0].team));
-    }
 
     const playerRows = [];
     const ratingRows = [];
