@@ -1,13 +1,24 @@
 // src/app/api/pitboss/steward/route.ts
 // GET — returns incidents for a league, filtered by status.
-// Only accessible to users with a steward-level licence in that league.
+// Only accessible to users with a steward-level role in that league
+// (checked via pitboss.driver_leagues.role, the same table the rest
+// of the app uses — NOT pitboss.licences, which is unused/legacy).
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
 
-const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
+// role is stored as free text, sometimes a comma-separated list
+// (e.g. "head_steward, bsac_chief, team_principal"), so we match
+// on substring rather than exact equality.
+const STEWARD_ROLE_TOKENS = ['steward', 'bsac_chief', 'commissioner']
+
+function hasStewardRole(role: string | null | undefined): boolean {
+  if (!role) return false
+  const normalized = role.toLowerCase()
+  return STEWARD_ROLE_TOKENS.some(token => normalized.includes(token))
+}
 
 export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions)
@@ -36,19 +47,17 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Driver record not found' }, { status: 403 })
   }
 
-  // Check steward licence in this league
-  const { data: licence } = await supabase
+  // Check steward-level role in this league via driver_leagues
+  // (same table the rest of the app uses for role checks)
+  const { data: driverLeague } = await supabase
     .schema('pitboss')
-    .from('licences')
-    .select('id')
+    .from('driver_leagues')
+    .select('role')
     .eq('driver_id', driver.id)
     .eq('league_id', leagueId)
-    .eq('status', 'active')
-    .in('role_code', STEWARD_ROLES)
-    .limit(1)
     .single()
 
-  if (!licence) {
+  if (!hasStewardRole(driverLeague?.role)) {
     return NextResponse.json({ error: 'Steward access required' }, { status: 403 })
   }
 
