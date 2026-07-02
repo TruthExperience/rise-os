@@ -138,12 +138,18 @@ export function getSupabaseClient() {
 // that the bare SupabaseClient type assumes.
 export type RiseOsClient = ReturnType<typeof getSupabaseClient>;
 
-/** Fetch one team's ratings page and pull the ratingsEntries payload out of __NEXT_DATA__. */
+/**
+ * Fetch one team's ratings page and pull the ratingsEntries payload out of __NEXT_DATA__.
+ *
+ * IMPORTANT: the final URL segment is EA's own numeric team ID (e.g. Alabama = 3,
+ * Akron = 2, Air Force = 1) — NOT a pagination page number, despite the param
+ * name below existing historically. Always pass the team's real ea_team_id here.
+ */
 export async function fetchTeamRatings(
   teamSlug: string,
-  page = 1
+  teamEaId = 1
 ): Promise<TeamRatingsResult> {
-  const url = `${BASE_URL}/${teamSlug}/${page}`;
+  const url = `${BASE_URL}/${teamSlug}/${teamEaId}`;
 
   const res = await fetch(url, {
     headers: {
@@ -221,7 +227,10 @@ export async function syncTeam(
   page = 1
 ): Promise<TeamSyncResult> {
   try {
-    const { players, totalItems } = await fetchTeamRatings(teamSlug, page);
+    // Pass teamEaId, not `page` — the URL's final segment is EA's numeric
+    // team ID, not a pagination cursor. `page` is retained only because
+    // TeamSyncResult reports it; it has no effect on the fetched URL.
+    const { players, totalItems } = await fetchTeamRatings(teamSlug, teamEaId);
 
     const playerRows = [];
     const ratingRows = [];
