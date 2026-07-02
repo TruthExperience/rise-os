@@ -24,6 +24,10 @@ const SPORT_EMOJI: Record<string, string> = {
   other: "🏆",
 };
 
+// Pitboss (Certification, Incidents, Stewards) is a sim-racing-specific
+// module — only show those tiles for leagues in that sport.
+const PITBOSS_SPORTS = new Set(["sim_racing"]);
+
 export default function LeagueDetailPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -108,6 +112,8 @@ export default function LeagueDetailPage() {
     );
   }
 
+  const showPitboss = PITBOSS_SPORTS.has(league.sport);
+
   return (
     <main className="min-h-screen bg-rise-black px-4 py-8">
       <button
@@ -165,25 +171,29 @@ export default function LeagueDetailPage() {
           sub="Season schedule"
           onClick={() => router.push(`/season?league_id=${id}`)}
         />
-        <NavCard
-          icon="🎓"
-          label="Certification"
-          sub="Pitboss exams"
-          onClick={() => router.push(`/pitboss/cert`)}
-        />
-        <NavCard
-          icon="⚠️"
-          label="Incidents"
-          sub="File a report"
-          onClick={() => router.push(`/pitboss/incidents`)}
-        />
+        {showPitboss && (
+          <NavCard
+            icon="🎓"
+            label="Certification"
+            sub="Pitboss exams"
+            onClick={() => router.push(`/pitboss/cert`)}
+          />
+        )}
+        {showPitboss && (
+          <NavCard
+            icon="⚠️"
+            label="Incidents"
+            sub="File a report"
+            onClick={() => router.push(`/pitboss/incidents`)}
+          />
+        )}
         <NavCard
           icon="📖"
           label="Rulebook"
           sub="Regulations"
           onClick={() => router.push(`/league/${id}/rules`)}
         />
-        {canSeeStewards && (
+        {showPitboss && canSeeStewards && (
           <NavCard
             icon="⚖️"
             label="Stewards"
