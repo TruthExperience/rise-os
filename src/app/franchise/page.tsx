@@ -14,6 +14,7 @@ export default function FranchiseIndexPage() {
   const router = useRouter();
   const [leagues, setLeagues] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -25,12 +26,21 @@ export default function FranchiseIndexPage() {
 
   async function fetchLeagues() {
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch("/api/leagues");
       const data = await res.json();
-      setLeagues(Array.isArray(data) ? data : []);
-    } catch (e) {
+
+      if (!res.ok) {
+        throw new Error(data?.error ?? `Request failed (${res.status})`);
+      }
+
+      // /api/leagues returns { leagues: [...] }, not a bare array.
+      setLeagues(Array.isArray(data.leagues) ? data.leagues : []);
+    } catch (e: any) {
       console.error(e);
+      setError(e?.message ?? "Couldn't load leagues. Please try again.");
+      setLeagues([]);
     } finally {
       setLoading(false);
     }
@@ -46,6 +56,21 @@ export default function FranchiseIndexPage() {
       {loading ? (
         <div className="flex justify-center mt-20">
           <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+        </div>
+      ) : error ? (
+        <div className="mt-20 flex flex-col items-center gap-4 text-center">
+          <p className="text-white/50 text-sm">{error}</p>
+          <button
+            onClick={fetchLeagues}
+            className="rounded-full border border-white/10 bg-white/5 px-5 py-2 text-sm font-medium text-white transition active:scale-95"
+          >
+            Try again
+          </button>
+        </div>
+      ) : leagues.length === 0 ? (
+        <div className="mt-20 flex flex-col items-center gap-1 text-center">
+          <p className="text-white/50 text-sm">No leagues available yet.</p>
+          <p className="text-white/30 text-xs">Check back once a commissioner opens one up.</p>
         </div>
       ) : (
         <div className="flex flex-col gap-3">
