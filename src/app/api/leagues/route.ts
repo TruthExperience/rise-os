@@ -1,38 +1,38 @@
-import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
-
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { supabaseServer } from "@/lib/supabaseServer";
+import { getSupabaseUserId } from "@/lib/getSupabaseUserId";
 
 export async function GET() {
-  const { data, error } = await supabaseAdmin
-    .schema('rise_os')
+  const session = await getServerSession(authOptions);
+
+  const { data: leagues, error } = await supabaseServer
+    .schema("rise_os")
     .from("leagues")
-    .select("*")
-    .order("created_at", { ascending: false });
+    .select("id, name, slug, sport, logo_url, season_count, pitboss_status")
+    .eq("is_public", true)
+    .order("name");
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
-}
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 
-export async function POST(req: Request) {
-  const body = await req.json();
-  const { name, sport, is_public } = body;
+  let memberships: string[] = [];
+  const userId = await getSupabaseUserId(session);
+  if (userId) {
+    const { data: rows } = await supabaseServer
+      .schema("rise_os")
+      .from("league_members")
+      .select("league_id")
+      .eq("user_id", userId);
+    memberships = (rows ?? []).map((r) => r.league_id);
+  }
 
-  const slug = name
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "");
-
-  const { data, error } = await supabaseAdmin
-    .schema('rise_os')
-    .from("leagues")
-    .insert({ name, sport, slug, is_public })
-    .select()
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
+  return NextResponse.json({
+    leagues: (leagues ?? []).map((l) => ({
+      ...l,
+      isMember: memberships.includes(l.id),
+    })),
+  });
 }
