@@ -2,6 +2,7 @@
 
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 const SPORT_LABELS: Record<string, string> = {
@@ -71,21 +72,35 @@ export default function LeaguePickerPage() {
 
   if (leagues.length === 0) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-rise-black px-4">
+      <main className="flex min-h-screen flex-col items-center justify-center bg-rise-black px-4 gap-4">
         <p className="text-white/40 text-center">
           You're not a member of any leagues yet.
         </p>
+        <Link
+          href="/leagues/join"
+          className="rounded-full bg-rise-red px-5 py-2 text-sm font-semibold text-white transition active:scale-95"
+        >
+          + Join a League
+        </Link>
       </main>
     );
   }
 
   return (
     <main className="min-h-screen bg-rise-black px-4 py-8 pb-24">
-      <div className="mb-8">
-        <h1 className="text-2xl font-black text-white">Leagues</h1>
-        <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
-          Select a league
-        </p>
+      <div className="mb-8 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-black text-white">Leagues</h1>
+          <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
+            Select a league
+          </p>
+        </div>
+        <Link
+          href="/leagues/join"
+          className="flex-shrink-0 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-white transition active:scale-95"
+        >
+          + Join
+        </Link>
       </div>
 
       <div className="flex flex-col gap-3">
