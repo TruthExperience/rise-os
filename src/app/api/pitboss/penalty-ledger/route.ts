@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { hasLeagueRole, getDriverId } from '@/lib/pitbossAuth'
 
 function getSupabase() {
   return createClient(
@@ -10,6 +13,9 @@ function getSupabase() {
 }
 
 // ── GET ───────────────────────────────────────────────────────────────────────
+// Read access: any authenticated league member can view penalties (matches the
+// existing "penalty_ledger: members can view" RLS intent). Stewards/commissioners
+// implicitly qualify too since has_league_role('driver', ...) includes them.
 export async function GET(req: NextRequest) {
   const leagueId = req.nextUrl.searchParams.get('league_id')
   const driverId = req.nextUrl.searchParams.get('driver_id')
@@ -17,6 +23,12 @@ export async function GET(req: NextRequest) {
 
   if (!leagueId) {
     return NextResponse.json({ error: 'league_id required' }, { status: 400 })
+  }
+
+  const session = await getServerSession(authOptions)
+  const isMember = await hasLeagueRole(session, leagueId, 'driver')
+  if (!isMember) {
+    return NextResponse.json({ error: 'Not a member of this league' }, { status: 403 })
   }
 
   const supabase = getSupabase()
@@ -62,16 +74,30 @@ export async function GET(req: NextRequest) {
 }
 
 // ── POST ──────────────────────────────────────────────────────────────────────
+// Write access: steward or above only. issued_by is derived from the verified
+// session — never trusted from the request body — so a penalty can't be
+// attributed to someone other than whoever is actually signed in.
 export async function POST(req: NextRequest) {
   const body = await req.json()
-  const { driver_id, league_id, points, reason, issued_by, expires_at } = body
+  const { driver_id, league_id, points, reason, expires_at } = body
 
-  if (!driver_id || !league_id || !points || !reason || !issued_by) {
+  if (!driver_id || !league_id || !points || !reason) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
   if (typeof points !== 'number' || points < 1 || points > 25) {
     return NextResponse.json({ error: 'Points must be between 1 and 25' }, { status: 400 })
+  }
+
+  const session = await getServerSession(authOptions)
+  const isSteward = await hasLeagueRole(session, league_id, 'steward')
+  if (!isSteward) {
+    return NextResponse.json({ error: 'Forbidden — steward role required' }, { status: 403 })
+  }
+
+  const issuedBy = await getDriverId(session)
+  if (!issuedBy) {
+    return NextResponse.json({ error: 'No driver profile found for signed-in user' }, { status: 400 })
   }
 
   const supabase = getSupabase()
@@ -84,7 +110,7 @@ export async function POST(req: NextRequest) {
       points,
       reason,
       source: 'manual',
-      issued_by,
+      issued_by: issuedBy,
       issued_at: new Date().toISOString(),
       expires_at: expires_at ?? null,
     })
@@ -112,24 +138,37 @@ export async function POST(req: NextRequest) {
 }
 
 // ── DELETE ────────────────────────────────────────────────────────────────────
+// Write access: steward or above only, scoped to the penalty's own league —
+// removed_by is derived from the verified session, same as issued_by above.
 export async function DELETE(req: NextRequest) {
   const body = await req.json()
-  const { penalty_id, removed_by } = body
+  const { penalty_id } = body
 
-  if (!penalty_id || !removed_by) {
-    return NextResponse.json({ error: 'penalty_id and removed_by required' }, { status: 400 })
+  if (!penalty_id) {
+    return NextResponse.json({ error: 'penalty_id required' }, { status: 400 })
   }
 
   const supabase = getSupabase()
 
   const { data: penalty, error: fetchErr } = await supabase
     .from('penalty_ledger')
-    .select('id, source, points, driver_id, removed_at')
+    .select('id, source, points, driver_id, league_id, removed_at')
     .eq('id', penalty_id)
     .single()
 
   if (fetchErr || !penalty) {
     return NextResponse.json({ error: 'Penalty not found' }, { status: 404 })
+  }
+
+  const session = await getServerSession(authOptions)
+  const isSteward = await hasLeagueRole(session, penalty.league_id, 'steward')
+  if (!isSteward) {
+    return NextResponse.json({ error: 'Forbidden — steward role required' }, { status: 403 })
+  }
+
+  const removedBy = await getDriverId(session)
+  if (!removedBy) {
+    return NextResponse.json({ error: 'No driver profile found for signed-in user' }, { status: 400 })
   }
 
   if (penalty.source !== 'manual') {
@@ -144,7 +183,7 @@ export async function DELETE(req: NextRequest) {
 
   await supabase
     .from('penalty_ledger')
-    .update({ removed_at: now, removed_by })
+    .update({ removed_at: now, removed_by: removedBy })
     .eq('id', penalty_id)
 
   const { data: driver } = await supabase
