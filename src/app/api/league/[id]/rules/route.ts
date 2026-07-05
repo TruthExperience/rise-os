@@ -126,8 +126,18 @@ export async function PUT(
     return NextResponse.json({ error: 'File must be under 20MB' }, { status: 400 })
   }
 
+  // Supabase Storage keys only allow letters, numbers, and . - _ /
+  // Filenames with em dashes, smart quotes, etc. (common when copy-pasted
+  // from a formatted doc title) get rejected outright with "Invalid key".
+  const safeName = file.name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')   // strip accents
+    .replace(/[^a-zA-Z0-9._-]+/g, '-') // anything else -> hyphen
+    .replace(/-+/g, '-')               // collapse repeats
+    .replace(/^-|-$/g, '')             // trim leading/trailing hyphen
+
   const storage = getStorage()
-  const filename = `${params.id}/${ruleBookId}/${Date.now()}-${file.name.replace(/\s+/g, '-')}`
+  const filename = `${params.id}/${ruleBookId}/${Date.now()}-${safeName}`
   const buffer = await file.arrayBuffer()
 
   const { error: uploadError } = await storage.storage
