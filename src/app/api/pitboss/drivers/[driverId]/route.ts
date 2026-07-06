@@ -36,7 +36,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
     { data: licences },
     { data: certifications },
     { data: penalties },
-    { data: incidentsAs },      // incidents where driver is the subject
+    { data: incidentsAs },      // incidents where driver is the accused party
     { data: incidentsReported }, // incidents the driver filed
     { data: contracts },
     { data: results },
@@ -75,18 +75,22 @@ export async function GET(_req: NextRequest, { params }: Params) {
       .eq('driver_id', driverId)
       .order('issued_at', { ascending: false }),
 
+    // FIX: incidents has no `driver_id` column — the accused party is
+    // tracked in `accused_driver_id`.
     supabase
       .schema('pitboss')
       .from('incidents')
       .select('id, league_id, status, incident_type, description, created_at, resolved_at')
-      .eq('driver_id', driverId)
+      .eq('accused_driver_id', driverId)
       .order('created_at', { ascending: false }),
 
+    // FIX: incidents has no `reporting_driver_id` column — the reporter is
+    // tracked in `reported_by`.
     supabase
       .schema('pitboss')
       .from('incidents')
       .select('id, league_id, status, incident_type, description, created_at, resolved_at')
-      .eq('reporting_driver_id', driverId)
+      .eq('reported_by', driverId)
       .order('created_at', { ascending: false }),
 
     supabase
