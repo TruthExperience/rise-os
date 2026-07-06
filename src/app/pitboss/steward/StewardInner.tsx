@@ -2,7 +2,7 @@
 
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 
 const TYPE_LABELS: Record<string, string> = {
   'Collision / Contact':      '💥 Collision / Contact',
@@ -17,6 +17,284 @@ const STATUS_COLORS: Record<string, string> = {
   resolved:  'text-green-400',
 }
 
+interface DriverOption {
+  driver_id: string
+  discord_username: string
+  display_name: string | null
+  discord_avatar: string | null
+  team: string | null
+  car_number: string | null
+  role_primary: string | null
+}
+
+// ─── Driver Picker ────────────────────────────────────────────────────────────
+// Search-as-you-type selector backed by /api/pitboss/leagues/[id]/drivers,
+// which is sourced from the AWC credential registry. Used for both the
+// "Accused Driver" and "Reported By" fields on a new ticket.
+function DriverPicker({
+  leagueId,
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  leagueId: string
+  label: string
+  value: DriverOption | null
+  onChange: (driver: DriverOption | null) => void
+  placeholder: string
+}) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<DriverOption[]>([])
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => search(query), 250)
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
+  }, [query, open])
+
+  async function search(q: string) {
+    setLoading(true)
+    try {
+      const url = `/api/pitboss/leagues/${leagueId}/drivers${q ? `?search=${encodeURIComponent(q)}` : ''}`
+      const res = await fetch(url)
+      const data = await res.json()
+      setResults(data.drivers ?? [])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function select(driver: DriverOption) {
+    onChange(driver)
+    setOpen(false)
+    setQuery('')
+  }
+
+  return (
+    <div className="relative">
+      <p className="text-white/40 text-xs uppercase tracking-widest mb-2">{label}</p>
+
+      {value ? (
+        <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-xl px-4 py-3">
+          <div className="flex items-center gap-3">
+            {value.discord_avatar ? (
+              <img
+                src={`https://cdn.discordapp.com/avatars/${value.driver_id}/${value.discord_avatar}.png?size=32`}
+                alt=""
+                className="w-7 h-7 rounded-lg object-cover"
+              />
+            ) : (
+              <div className="w-7 h-7 rounded-lg bg-white/10 flex items-center justify-center text-white text-xs font-bold">
+                {(value.display_name ?? value.discord_username)[0]?.toUpperCase()}
+              </div>
+            )}
+            <div>
+              <p className="text-white text-sm font-semibold">
+                {value.display_name ?? value.discord_username}
+              </p>
+              {value.team && <p className="text-white/30 text-[10px]">{value.team}</p>}
+            </div>
+          </div>
+          <button onClick={() => onChange(null)} className="text-white/30 text-xs">✕</button>
+        </div>
+      ) : (
+        <>
+          <input
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
+            onFocus={() => { setOpen(true); search(query) }}
+            placeholder={placeholder}
+            className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
+          />
+          {open && (
+            <div className="absolute z-10 mt-2 w-full max-h-64 overflow-y-auto bg-[#1A1A1A] border border-white/10 rounded-xl shadow-xl">
+              {loading ? (
+                <p className="text-white/30 text-xs px-4 py-3">Searching…</p>
+              ) : results.length === 0 ? (
+                <p className="text-white/30 text-xs px-4 py-3">No drivers found.</p>
+              ) : (
+                results.map((d) => (
+                  <button
+                    key={d.driver_id}
+                    onClick={() => select(d)}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-white/5"
+                  >
+                    {d.discord_avatar ? (
+                      <img
+                        src={`https://cdn.discordapp.com/avatars/${d.driver_id}/${d.discord_avatar}.png?size=32`}
+                        alt=""
+                        className="w-7 h-7 rounded-lg object-cover"
+                      />
+                    ) : (
+                      <div className="w-7 h-7 rounded-lg bg-white/10 flex items-center justify-center text-white text-xs font-bold">
+                        {(d.display_name ?? d.discord_username)[0]?.toUpperCase()}
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-white text-sm">{d.display_name ?? d.discord_username}</p>
+                      {d.team && <p className="text-white/30 text-[10px]">{d.team}</p>}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── New Ticket Form ──────────────────────────────────────────────────────────
+function NewTicketForm({
+  leagueId,
+  onCreated,
+  onCancel,
+}: {
+  leagueId: string
+  onCreated: () => void
+  onCancel: () => void
+}) {
+  const [incidentType, setIncidentType] = useState('Collision / Contact')
+  const [description, setDescription] = useState('')
+  const [accused, setAccused] = useState<DriverOption | null>(null)
+  const [reporter, setReporter] = useState<DriverOption | null>(null)
+  const [season, setSeason] = useState('')
+  const [round, setRound] = useState('')
+  const [lap, setLap] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit() {
+    if (!description.trim()) {
+      setError('Description is required')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const res = await fetch('/api/pitboss/steward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          league_id: leagueId,
+          incident_type: incidentType,
+          description: description.trim(),
+          accused_driver_id: accused?.driver_id ?? null,
+          reported_by: reporter?.driver_id ?? null, // omit -> defaults to filing steward
+          season: season || null,
+          round: round ? Number(round) : null,
+          lap: lap ? Number(lap) : null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to open ticket')
+      onCreated()
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-4 mb-6">
+      <p className="text-white font-bold text-base">Open New Ticket</p>
+
+      <div>
+        <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Incident Type</p>
+        <div className="grid grid-cols-2 gap-2">
+          {Object.keys(TYPE_LABELS).map((t) => (
+            <button
+              key={t}
+              onClick={() => setIncidentType(t)}
+              className={`py-2.5 rounded-xl text-xs font-bold transition-colors ${
+                incidentType === t ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'
+              }`}
+            >
+              {TYPE_LABELS[t]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <DriverPicker
+        leagueId={leagueId}
+        label="Accused Driver"
+        value={accused}
+        onChange={setAccused}
+        placeholder="Search accused driver…"
+      />
+
+      <DriverPicker
+        leagueId={leagueId}
+        label="Reported By"
+        value={reporter}
+        onChange={setReporter}
+        placeholder="Search reporter (defaults to you if left blank)…"
+      />
+
+      <div>
+        <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Description</p>
+        <textarea
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Describe the incident…"
+          rows={4}
+          className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none"
+        />
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <input
+          value={season}
+          onChange={(e) => setSeason(e.target.value)}
+          placeholder="Season"
+          className="bg-white/5 text-white text-sm px-3 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
+        />
+        <input
+          value={round}
+          onChange={(e) => setRound(e.target.value)}
+          placeholder="Round"
+          type="number"
+          className="bg-white/5 text-white text-sm px-3 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
+        />
+        <input
+          value={lap}
+          onChange={(e) => setLap(e.target.value)}
+          placeholder="Lap"
+          type="number"
+          className="bg-white/5 text-white text-sm px-3 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
+        />
+      </div>
+
+      {error && <p className="text-red-400 text-sm">{error}</p>}
+
+      <div className="flex gap-2">
+        <button
+          onClick={onCancel}
+          className="flex-1 bg-white/5 text-white/50 font-semibold py-3 rounded-xl text-sm"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleSubmit}
+          disabled={submitting || !description.trim()}
+          className="flex-1 bg-rise-red disabled:bg-white/10 disabled:text-white/20 text-white font-bold py-3 rounded-xl text-sm"
+        >
+          {submitting ? 'Opening…' : 'Open Ticket'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Main Panel ───────────────────────────────────────────────────────────────
 export function StewardInner() {
   const { data: session, status } = useSession()
   const router       = useRouter()
@@ -26,6 +304,7 @@ export function StewardInner() {
   const [incidents, setIncidents] = useState<any[]>([])
   const [loading, setLoading]     = useState(true)
   const [filter, setFilter]       = useState<'open' | 'resolved'>('open')
+  const [showNewTicket, setShowNewTicket] = useState(false)
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -59,8 +338,32 @@ export function StewardInner() {
         ← Back
       </button>
 
-      <h1 className="text-2xl font-black text-white mb-1">Steward Panel</h1>
-      <p className="text-white/30 text-xs uppercase tracking-widest mb-6">Incident Review</p>
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-black text-white mb-1">Steward Panel</h1>
+          <p className="text-white/30 text-xs uppercase tracking-widest">Incident Review</p>
+        </div>
+        {league_id && !showNewTicket && (
+          <button
+            onClick={() => setShowNewTicket(true)}
+            className="bg-rise-red text-white text-xs font-bold uppercase tracking-widest px-4 py-2.5 rounded-full"
+          >
+            + New Ticket
+          </button>
+        )}
+      </div>
+
+      {league_id && showNewTicket && (
+        <NewTicketForm
+          leagueId={league_id}
+          onCancel={() => setShowNewTicket(false)}
+          onCreated={() => {
+            setShowNewTicket(false)
+            setFilter('open')
+            fetchIncidents()
+          }}
+        />
+      )}
 
       <div className="flex gap-2 mb-6">
         {(['open', 'resolved'] as const).map(f => (
