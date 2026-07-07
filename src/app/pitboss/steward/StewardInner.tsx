@@ -5,9 +5,16 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useState, useRef } from 'react'
 
 const TYPE_LABELS: Record<string, string> = {
-  'Collision / Contact':      '💥 Collision / Contact',
+  'Dangerous Driving':        '🚨 Dangerous Driving',
+  'Illegal Overtake':         '🔀 Illegal Overtake',
   'Divebomb':                 '🚀 Divebomb',
+  'Unsafe Rejoin':            '↩️ Unsafe Rejoin',
+  'Collision / Contact':      '💥 Collision / Contact',
+  'Blocking / Brake Test':    '🛑 Blocking / Brake Test',
+  'Track Limits':             '📏 Track Limits',
+  'Pit Lane Infringement':    '🅿️ Pit Lane Infringement',
   'Unsportsmanlike Conduct':  '😤 Unsportsmanlike Conduct',
+  'No-Show / Late Join':      '👻 No-Show / Late Join',
   'Other':                    '📋 Other',
 }
 
@@ -208,12 +215,12 @@ function NewTicketForm({
 
       <div>
         <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Incident Type</p>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 gap-2">
           {Object.keys(TYPE_LABELS).map((t) => (
             <button
               key={t}
               onClick={() => setIncidentType(t)}
-              className={`py-2.5 rounded-xl text-xs font-bold transition-colors ${
+              className={`py-3 px-4 rounded-xl text-sm font-bold text-left transition-colors ${
                 incidentType === t ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'
               }`}
             >
