@@ -13,6 +13,11 @@ function getSupabase() {
   );
 }
 
+// Uses req.url/searchParams, which opts this route out of static
+// optimization already — force-dynamic added anyway for clarity given
+// the earlier Data Cache bug on the CFB roster/rulebook routes.
+export const dynamic = "force-dynamic";
+
 type ResultRow = {
   id: string;
   league_id: string;
@@ -25,6 +30,8 @@ type ResultRow = {
   dnf: boolean | null;
   fastest_lap: boolean | null;
   points_earned: number | null;
+  round_id: string | null;
+  calendar_round: { is_sprint: boolean | null } | null;
 };
 
 type Franchise = {
@@ -41,15 +48,26 @@ type Franchise = {
   race_top10: number | null;
 };
 
+function isSprint(r: ResultRow) {
+  return r.calendar_round?.is_sprint === true;
+}
+
 function summarize(results: ResultRow[]) {
   const classified = results.filter((r) => !r.dnf && r.finish_position != null);
+  const feature = classified.filter((r) => !isSprint(r));
+  const sprint = classified.filter((r) => isSprint(r));
+  const featureQuali = results.filter((r) => !isSprint(r));
+  const sprintQuali = results.filter((r) => isSprint(r));
+
   return {
     starts: results.length,
-    wins: classified.filter((r) => r.finish_position === 1).length,
-    top3: classified.filter((r) => (r.finish_position as number) <= 3).length,
-    top5: classified.filter((r) => (r.finish_position as number) <= 5).length,
-    top10: classified.filter((r) => (r.finish_position as number) <= 10).length,
-    poles: results.filter((r) => r.qualifying_position === 1).length,
+    wins: feature.filter((r) => r.finish_position === 1).length,
+    top3: feature.filter((r) => (r.finish_position as number) <= 3).length,
+    top5: feature.filter((r) => (r.finish_position as number) <= 5).length,
+    top10: feature.filter((r) => (r.finish_position as number) <= 10).length,
+    poles: featureQuali.filter((r) => r.qualifying_position === 1).length,
+    sprintWins: sprint.filter((r) => r.finish_position === 1).length,
+    sprintPoles: sprintQuali.filter((r) => r.qualifying_position === 1).length,
     fastestLaps: results.filter((r) => r.fastest_lap).length,
     dnfs: results.filter((r) => r.dnf).length,
     points: results.reduce((sum, r) => sum + (r.points_earned ?? 0), 0),
@@ -69,7 +87,11 @@ export async function GET(
     .schema('pitboss')
     .from("results")
     .select(
-      "id, league_id, franchise_id, season, round, track, finish_position, qualifying_position, dnf, fastest_lap, points_earned"
+      `
+      id, league_id, franchise_id, season, round, track,
+      finish_position, qualifying_position, dnf, fastest_lap, points_earned,
+      round_id, calendar_round:round_id ( is_sprint )
+      `
     )
     .eq("driver_id", driverId)
     .order("season", { ascending: false })
@@ -82,6 +104,35 @@ export async function GET(
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+
+  // Driver identity + PP — needed for the profile header/stat grid.
+  const { data: driver, error: driverErr } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select(
+      "id, display_name, discord_username, discord_avatar, tier, super_licence_status, clean_race_streak, pp_total, created_at"
+    )
+    .eq("id", driverId)
+    .single();
+
+  if (driverErr || !driver) {
+    return NextResponse.json({ error: "Driver not found" }, { status: 404 });
+  }
+
+  // Current active contract, scoped to league_id if provided.
+  let currentTeamQuery = supabase
+    .schema("pitboss")
+    .from("driver_contracts")
+    .select("franchise:franchise_id ( id, name, abbreviation, logo_url )")
+    .eq("driver_id", driverId)
+    .eq("status", "active");
+
+  if (leagueId) currentTeamQuery = currentTeamQuery.eq("league_id", leagueId);
+
+  const { data: currentContract } = await currentTeamQuery
+    .order("season_start", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   const franchiseIds = Array.from(
     new Set((results ?? []).map((r) => r.franchise_id).filter(Boolean))
@@ -135,10 +186,15 @@ export async function GET(
     return bMax - aMax;
   });
 
-  return NextResponse.json({
-    driverId,
-    career,
-    teams,
-    recentResults: (results ?? []).slice(0, 10),
-  });
+  return NextResponse.json(
+    {
+      driverId,
+      driver,
+      currentTeam: currentContract?.franchise ?? null,
+      career: { ...career, ppTotal: driver.pp_total ?? 0 },
+      teams,
+      recentResults: (results ?? []).slice(0, 10),
+    },
+    { headers: { "Cache-Control": "no-store, must-revalidate" } }
+  );
 }
