@@ -27,6 +27,11 @@ type Franchise = {
   logo_url: string | null;
   primary_color: string | null;
   secondary_color: string | null;
+  race_starts: number | null;
+  race_wins: number | null;
+  race_top3: number | null;
+  race_top5: number | null;
+  race_top10: number | null;
 };
 
 function summarize(results: ResultRow[]) {
@@ -77,7 +82,9 @@ export async function GET(
   if (franchiseIds.length > 0) {
     const { data, error: fErr } = await supabase
       .from("franchises")
-      .select("id, name, abbreviation, logo_url, primary_color, secondary_color")
+      .select(
+        "id, name, abbreviation, logo_url, primary_color, secondary_color, race_starts, race_wins, race_top3, race_top5, race_top10"
+      )
       .in("id", franchiseIds);
 
     if (fErr) {
