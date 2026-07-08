@@ -10,6 +10,11 @@ type Franchise = {
   logo_url: string | null;
   primary_color: string | null;
   secondary_color: string | null;
+  race_starts: number | null;
+  race_wins: number | null;
+  race_top3: number | null;
+  race_top5: number | null;
+  race_top10: number | null;
 };
 
 type Stats = {
@@ -106,15 +111,32 @@ function TeamCard({ team }: { team: TeamBlock }) {
       </button>
 
       {open && (
-        <div className="px-4 pb-4 grid grid-cols-2 gap-y-2 text-sm text-gray-300">
-          <span>Poles</span>
-          <span className="text-right text-white">{team.stats.poles}</span>
-          <span>Fastest Laps</span>
-          <span className="text-right text-white">{team.stats.fastestLaps}</span>
-          <span>DNFs</span>
-          <span className="text-right text-white">{team.stats.dnfs}</span>
-          <span>Points</span>
-          <span className="text-right text-white">{team.stats.points}</span>
+        <div className="px-4 pb-4 space-y-4">
+          <div className="grid grid-cols-2 gap-y-2 text-sm text-gray-300">
+            <span>Poles</span>
+            <span className="text-right text-white">{team.stats.poles}</span>
+            <span>Fastest Laps</span>
+            <span className="text-right text-white">{team.stats.fastestLaps}</span>
+            <span>DNFs</span>
+            <span className="text-right text-white">{team.stats.dnfs}</span>
+            <span>Points</span>
+            <span className="text-right text-white">{team.stats.points}</span>
+          </div>
+
+          {team.franchise && team.franchise.race_starts != null && (
+            <div className="pt-3 border-t border-white/5">
+              <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">
+                {team.franchise.name} — All-Time Team Record
+              </p>
+              <div className="flex justify-between">
+                <StatPill label="Starts" value={team.franchise.race_starts ?? 0} />
+                <StatPill label="Wins" value={team.franchise.race_wins ?? 0} />
+                <StatPill label="Top 3" value={team.franchise.race_top3 ?? 0} />
+                <StatPill label="Top 5" value={team.franchise.race_top5 ?? 0} />
+                <StatPill label="Top 10" value={team.franchise.race_top10 ?? 0} />
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
