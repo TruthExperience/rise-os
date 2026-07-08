@@ -406,4 +406,18 @@ export function StewardInner() {
               </div>
               <p className="text-white/50 text-xs line-clamp-2 mb-3">{inc.description}</p>
               <div className="flex items-center justify-between">
-                
+                <span className="text-white/30 text-[10px]">
+                  {inc.round ? `Round ${inc.round}` : ''}
+                  {inc.lap ? ` · Lap ${inc.lap}` : ''}
+                </span>
+                {inc.ai_analysed_at && (
+                  <span className="text-rise-red text-[10px] font-bold">AI ✓</span>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </main>
+  )
+}
