@@ -1,10 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// FIX: was process.env.SUPABASE_URL, which isn't set anywhere in this
+// project's Vercel env vars (every other route uses NEXT_PUBLIC_SUPABASE_URL).
+// That made this client undefined at build time, which crashed
+// "Collecting page data" for this route and failed the production build
+// for every deploy since this file was added.
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
 
 type ResultRow = {
   id: string;
@@ -53,11 +60,13 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { driverId: string } }
 ) {
+  const supabase = getSupabase();
   const driverId = params.driverId;
   const { searchParams } = new URL(req.url);
   const leagueId = searchParams.get("league_id"); // optional filter
 
   let query = supabase
+    .schema('pitboss')
     .from("results")
     .select(
       "id, league_id, franchise_id, season, round, track, finish_position, qualifying_position, dnf, fastest_lap, points_earned"
@@ -81,6 +90,7 @@ export async function GET(
   let franchises: Franchise[] = [];
   if (franchiseIds.length > 0) {
     const { data, error: fErr } = await supabase
+      .schema('rise_os')
       .from("franchises")
       .select(
         "id, name, abbreviation, logo_url, primary_color, secondary_color, race_starts, race_wins, race_top3, race_top5, race_top10"
