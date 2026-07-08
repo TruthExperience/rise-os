@@ -25,7 +25,7 @@ const STATUS_COLORS: Record<string, string> = {
 }
 
 interface DriverOption {
-  driver_id: string
+  id: string
   discord_username: string
   display_name: string | null
   discord_avatar: string | null
@@ -91,7 +91,7 @@ function DriverPicker({
           <div className="flex items-center gap-3">
             {value.discord_avatar ? (
               <img
-                src={`https://cdn.discordapp.com/avatars/${value.driver_id}/${value.discord_avatar}.png?size=32`}
+                src={`https://cdn.discordapp.com/avatars/${value.id}/${value.discord_avatar}.png?size=32`}
                 alt=""
                 className="w-7 h-7 rounded-lg object-cover"
               />
@@ -127,13 +127,13 @@ function DriverPicker({
               ) : (
                 results.map((d) => (
                   <button
-                    key={d.driver_id}
+                    key={d.id}
                     onClick={() => select(d)}
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-white/5"
                   >
                     {d.discord_avatar ? (
                       <img
-                        src={`https://cdn.discordapp.com/avatars/${d.driver_id}/${d.discord_avatar}.png?size=32`}
+                        src={`https://cdn.discordapp.com/avatars/${d.id}/${d.discord_avatar}.png?size=32`}
                         alt=""
                         className="w-7 h-7 rounded-lg object-cover"
                       />
@@ -192,8 +192,8 @@ function NewTicketForm({
           league_id: leagueId,
           incident_type: incidentType,
           description: description.trim(),
-          accused_driver_id: accused?.driver_id ?? null,
-          reported_by: reporter?.driver_id ?? null, // omit -> defaults to filing steward
+          accused_driver_id: accused?.id ?? null,
+          reported_by: reporter?.id ?? null, // omit -> defaults to filing steward
           season: season || null,
           round: round ? Number(round) : null,
           lap: lap ? Number(lap) : null,
@@ -406,18 +406,4 @@ export function StewardInner() {
               </div>
               <p className="text-white/50 text-xs line-clamp-2 mb-3">{inc.description}</p>
               <div className="flex items-center justify-between">
-                <span className="text-white/30 text-[10px]">
-                  {inc.round ? `Round ${inc.round}` : ''}
-                  {inc.lap ? ` · Lap ${inc.lap}` : ''}
-                </span>
-                {inc.ai_analysed_at && (
-                  <span className="text-rise-red text-[10px] font-bold">AI ✓</span>
-                )}
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-    </main>
-  )
-}
+                
