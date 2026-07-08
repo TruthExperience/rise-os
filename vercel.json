@@ -5,12 +5,26 @@
     },
     "src/app/api/cron/ea-ratings-all/route.ts": {
       "maxDuration": 300
+    },
+    "src/app/api/cron/cfb-irl-records/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/cron/racing-team-records/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
     {
       "path": "/api/cron/ea-ratings-all",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/cfb-irl-records",
+      "schedule": "0 10 * * 1"
+    },
+    {
+      "path": "/api/cron/racing-team-records",
+      "schedule": "0 11 * * 1"
     }
   ]
 }
