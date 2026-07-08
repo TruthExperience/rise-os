@@ -28,6 +28,18 @@ const withPWA = require("@ducanh2912/next-pwa").default({
         urlPattern: /^https?:\/\/[^/]+\/league\/[^/]+\/rules.*/i,
         handler: "NetworkOnly",
       },
+      {
+        // Same issue as the rules pages above, now hitting the driver
+        // profile page: its tabs (Career, Stats, etc.) are populated by
+        // client-side data that changes frequently, but
+        // aggressiveFrontEndNavCaching was serving a stale page
+        // shell/RSC payload on in-app navigation to
+        // /pitboss/drivers/[id], so newly added tabs and content updates
+        // didn't show up even after a fresh deploy. Force NetworkOnly so
+        // every visit re-fetches the live page.
+        urlPattern: /^https?:\/\/[^/]+\/pitboss\/drivers\/.*/i,
+        handler: "NetworkOnly",
+      },
     ],
   },
 });
