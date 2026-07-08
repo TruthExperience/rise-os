@@ -100,9 +100,9 @@ function statusColor(status: string) {
     open: 'text-yellow-400',
     under_review: 'text-blue-400',
     resolved: 'text-green-400',
-    dismissed: 'text-gray-500',
+    dismissed: 'text-white/30',
   }
-  return map[status] ?? 'text-gray-400'
+  return map[status] ?? 'text-white/40'
 }
 
 function statusDot(status: string) {
@@ -110,9 +110,9 @@ function statusDot(status: string) {
     open: 'bg-yellow-400',
     under_review: 'bg-blue-400',
     resolved: 'bg-green-400',
-    dismissed: 'bg-gray-500',
+    dismissed: 'bg-white/30',
   }
-  return map[status] ?? 'bg-gray-400'
+  return map[status] ?? 'bg-white/40'
 }
 
 function formatDate(iso: string) {
@@ -130,7 +130,7 @@ function StepIndicator({ current, total }: { current: number; total: number }) {
         <div
           key={i}
           className={`h-1 flex-1 rounded-full transition-colors ${
-            i < current ? 'bg-[#E8284A]' : i === current ? 'bg-[#E8284A]/60' : 'bg-gray-800'
+            i < current ? 'bg-rise-red' : i === current ? 'bg-rise-red/60' : 'bg-white/10'
           }`}
         />
       ))}
@@ -140,14 +140,14 @@ function StepIndicator({ current, total }: { current: number; total: number }) {
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="text-gray-400 text-xs uppercase tracking-widest mb-2">{children}</p>
+    <p className="text-white/40 text-xs uppercase tracking-widest mb-2">{children}</p>
   )
 }
 
 function ReviewRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex justify-between gap-4 py-2 border-b border-gray-800 last:border-0">
-      <span className="text-gray-500 text-sm flex-shrink-0">{label}</span>
+    <div className="flex justify-between gap-4 py-2 border-b border-white/10 last:border-0">
+      <span className="text-white/40 text-sm flex-shrink-0">{label}</span>
       <span className="text-white text-sm text-right">{value || '—'}</span>
     </div>
   )
@@ -291,19 +291,19 @@ export default function IncidentsPage() {
   // ── Auth guard ─────────────────────────────────────────────────────────────
   if (authStatus === 'loading') {
     return (
-      <div className="min-h-screen bg-[#1A1A1A] flex items-center justify-center">
-        <p className="text-white animate-pulse">Loading…</p>
+      <div className="min-h-screen bg-rise-black flex items-center justify-center">
+        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
       </div>
     )
   }
 
   if (authStatus === 'unauthenticated') {
     return (
-      <div className="min-h-screen bg-[#1A1A1A] flex flex-col items-center justify-center gap-4 px-6">
-        <p className="text-gray-400 text-center">Sign in to submit incident reports.</p>
+      <div className="min-h-screen bg-rise-black flex flex-col items-center justify-center gap-4 px-6">
+        <p className="text-white/40 text-center">Sign in to submit incident reports.</p>
         <button
           onClick={() => router.push('/login')}
-          className="bg-[#E8284A] text-white font-bold px-6 py-3 rounded-xl text-sm"
+          className="bg-rise-red text-white font-bold px-6 py-3 rounded-xl text-sm"
         >
           Sign In
         </button>
@@ -317,20 +317,20 @@ export default function IncidentsPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#1A1A1A] pb-28">
+    <div className="min-h-screen bg-rise-black pb-28">
 
       {/* Header */}
-      <div className="px-4 pt-12 pb-4 border-b border-gray-800">
-        <button onClick={() => router.back()} className="text-gray-500 text-sm mb-3 block">← Back</button>
+      <div className="px-4 pt-12 pb-4 border-b border-white/10">
+        <button onClick={() => router.back()} className="text-white/40 text-sm mb-3 block">← Back</button>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-white font-bold text-xl tracking-tight">Incident Reports</h1>
-            <p className="text-gray-500 text-sm mt-0.5">File a protest or report a sporting violation</p>
+            <h1 className="text-white font-black text-xl tracking-tight">Incident Reports</h1>
+            <p className="text-white/30 text-sm mt-0.5">File a protest or report a sporting violation</p>
           </div>
           {selectedLeagueId && myIncidents.length > 0 && step !== 'submitted' && (
             <button
               onClick={() => setShowHistory(!showHistory)}
-              className="text-xs text-[#E8284A] border border-[#E8284A]/30 px-3 py-1.5 rounded-lg"
+              className="text-xs text-rise-red border border-rise-red/30 px-3 py-1.5 rounded-lg"
             >
               History ({myIncidents.length})
             </button>
@@ -343,13 +343,13 @@ export default function IncidentsPage() {
         {/* ── History Panel ─────────────────────────────────────────────── */}
         {showHistory && myIncidents.length > 0 && (
           <div className="mb-6 space-y-2">
-            <p className="text-gray-400 text-xs uppercase tracking-widest mb-3">Your Reports</p>
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-3">Your Reports</p>
             {myIncidents.map((inc) => (
-              <div key={inc.id} className="bg-gray-900 rounded-xl px-4 py-3">
+              <div key={inc.id} className="bg-white/5 rounded-xl px-4 py-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <p className="text-white text-sm font-semibold truncate">{inc.incident_type}</p>
-                    <p className="text-gray-500 text-xs mt-0.5">{formatDate(inc.created_at)}</p>
+                    <p className="text-white/30 text-xs mt-0.5">{formatDate(inc.created_at)}</p>
                   </div>
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     <span className={`w-1.5 h-1.5 rounded-full ${statusDot(inc.status)}`} />
@@ -359,7 +359,7 @@ export default function IncidentsPage() {
                   </div>
                 </div>
                 {inc.verdict && (
-                  <p className="text-gray-400 text-xs mt-1">
+                  <p className="text-white/40 text-xs mt-1">
                     Verdict: <span className="text-white capitalize">{inc.verdict.replace('_', ' ')}</span>
                     {inc.penalty_points ? ` · ${inc.penalty_points} PP` : ''}
                   </p>
@@ -376,14 +376,14 @@ export default function IncidentsPage() {
               <span className="text-3xl">✓</span>
             </div>
             <div className="text-center">
-              <h2 className="text-white font-bold text-lg">Report Submitted</h2>
-              <p className="text-gray-400 text-sm mt-1">
+              <h2 className="text-white font-black text-lg">Report Submitted</h2>
+              <p className="text-white/40 text-sm mt-1">
                 Your incident report has been filed and is pending steward review.
               </p>
             </div>
             <button
               onClick={resetForm}
-              className="bg-[#E8284A] text-white font-bold px-8 py-3 rounded-xl text-sm"
+              className="bg-rise-red text-white font-bold px-8 py-3 rounded-xl text-sm"
             >
               File Another Report
             </button>
@@ -394,19 +394,19 @@ export default function IncidentsPage() {
         {step === 'league' && (
           <div>
             {loadingLeagues ? (
-              <p className="text-gray-500 text-sm animate-pulse">Loading your leagues…</p>
+              <p className="text-white/30 text-sm animate-pulse">Loading your leagues…</p>
             ) : eligibleLeagues.length === 0 ? (
-              <div className="bg-gray-900 rounded-2xl px-5 py-8 text-center">
-                <p className="text-gray-400 text-sm">
+              <div className="bg-white/5 rounded-2xl px-5 py-8 text-center">
+                <p className="text-white/40 text-sm">
                   You don't have permission to file incident reports in any of your leagues.
                 </p>
-                <p className="text-gray-600 text-xs mt-2">
+                <p className="text-white/20 text-xs mt-2">
                   TRL requires Team Principal or Sporting Director role.
                 </p>
               </div>
             ) : (
               <div>
-                <p className="text-gray-400 text-xs uppercase tracking-widest mb-4">Select League</p>
+                <p className="text-white/40 text-xs uppercase tracking-widest mb-4">Select League</p>
                 <div className="space-y-3">
                   {eligibleLeagues.map((m) => {
                     const meta = LEAGUE_META[m.league_id]
@@ -417,10 +417,10 @@ export default function IncidentsPage() {
                           setSelectedLeagueId(m.league_id)
                           setStep('details')
                         }}
-                        className="w-full bg-gray-900 hover:bg-gray-800 rounded-2xl px-5 py-4 text-left transition-colors border border-transparent hover:border-[#E8284A]/30"
+                        className="w-full bg-white/5 hover:bg-white/10 rounded-2xl px-5 py-4 text-left transition-colors border border-transparent hover:border-rise-red/30"
                       >
                         <p className="text-white font-bold text-base">{meta?.name ?? m.league?.name}</p>
-                        <p className="text-gray-500 text-xs mt-0.5 capitalize">
+                        <p className="text-white/30 text-xs mt-0.5 capitalize">
                           {m.role.replace(/_/g, ' ')} ·{' '}
                           {meta?.openToAll ? 'Open submission' : 'Restricted submission'}
                         </p>
@@ -440,9 +440,9 @@ export default function IncidentsPage() {
 
             <div className="mb-5">
               <FieldLabel>League</FieldLabel>
-              <div className="bg-gray-900 rounded-xl px-4 py-3 flex items-center justify-between">
+              <div className="bg-white/5 rounded-xl px-4 py-3 flex items-center justify-between">
                 <p className="text-white text-sm font-semibold">{selectedMeta.name}</p>
-                <button onClick={resetForm} className="text-gray-500 text-xs underline">Change</button>
+                <button onClick={resetForm} className="text-white/40 text-xs underline">Change</button>
               </div>
             </div>
 
@@ -453,10 +453,10 @@ export default function IncidentsPage() {
                   <button
                     key={type}
                     onClick={() => setIncidentType(type)}
-                    className={`text-left px-4 py-3 rounded-xl text-sm border transition-colors ${
+                    className={`text-left px-4 py-3 rounded-xl text-sm font-bold transition-colors ${
                       incidentType === type
-                        ? 'bg-[#E8284A]/15 border-[#E8284A]/50 text-white font-semibold'
-                        : 'bg-gray-900 border-transparent text-gray-300'
+                        ? 'bg-rise-red text-white'
+                        : 'bg-white/5 text-white/50'
                     }`}
                   >
                     {type}
@@ -472,7 +472,7 @@ export default function IncidentsPage() {
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Describe what happened — corner, positions involved, what the other driver did, impact on your race…"
                 rows={5}
-                className="w-full bg-gray-900 text-white text-sm px-4 py-3 rounded-xl border border-gray-800 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600 resize-none"
+                className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none"
               />
             </div>
 
@@ -484,7 +484,7 @@ export default function IncidentsPage() {
                   value={season}
                   onChange={(e) => setSeason(e.target.value)}
                   placeholder="e.g. S7"
-                  className="w-full bg-gray-900 text-white text-sm px-3 py-3 rounded-xl border border-gray-800 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600"
+                  className="w-full bg-white/5 text-white text-sm px-3 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                 />
               </div>
               <div>
@@ -494,7 +494,7 @@ export default function IncidentsPage() {
                   value={round}
                   onChange={(e) => setRound(e.target.value)}
                   placeholder="e.g. 4"
-                  className="w-full bg-gray-900 text-white text-sm px-3 py-3 rounded-xl border border-gray-800 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600"
+                  className="w-full bg-white/5 text-white text-sm px-3 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                 />
               </div>
               <div>
@@ -504,7 +504,7 @@ export default function IncidentsPage() {
                   value={lap}
                   onChange={(e) => setLap(e.target.value)}
                   placeholder="e.g. 12"
-                  className="w-full bg-gray-900 text-white text-sm px-3 py-3 rounded-xl border border-gray-800 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600"
+                  className="w-full bg-white/5 text-white text-sm px-3 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                 />
               </div>
             </div>
@@ -512,12 +512,12 @@ export default function IncidentsPage() {
             <button
               disabled={!incidentType || description.trim().length < 20}
               onClick={() => setStep('accused')}
-              className="w-full bg-[#E8284A] disabled:bg-gray-800 disabled:text-gray-600 text-white font-bold py-4 rounded-xl text-sm transition-colors"
+              className="w-full bg-rise-red disabled:bg-white/10 disabled:text-white/20 text-white font-bold py-4 rounded-xl text-sm transition-colors"
             >
               Continue
             </button>
             {description.trim().length > 0 && description.trim().length < 20 && (
-              <p className="text-gray-600 text-xs text-center mt-2">Description must be at least 20 characters</p>
+              <p className="text-white/20 text-xs text-center mt-2">Description must be at least 20 characters</p>
             )}
           </div>
         )}
@@ -526,14 +526,14 @@ export default function IncidentsPage() {
         {step === 'accused' && (
           <div>
             <StepIndicator current={2} total={4} />
-            <p className="text-gray-400 text-xs uppercase tracking-widest mb-4">Driver Involved</p>
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-4">Driver Involved</p>
 
             {/* Toggle */}
-            <div className="flex bg-gray-900 rounded-xl p-1 mb-5">
+            <div className="flex bg-white/5 rounded-xl p-1 mb-5">
               <button
                 onClick={() => setUseManual(false)}
                 className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors ${
-                  !useManual ? 'bg-[#E8284A] text-white' : 'text-gray-500'
+                  !useManual ? 'bg-rise-red text-white' : 'text-white/40'
                 }`}
               >
                 Select from league
@@ -541,7 +541,7 @@ export default function IncidentsPage() {
               <button
                 onClick={() => setUseManual(true)}
                 className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-colors ${
-                  useManual ? 'bg-[#E8284A] text-white' : 'text-gray-500'
+                  useManual ? 'bg-rise-red text-white' : 'text-white/40'
                 }`}
               >
                 Enter manually
@@ -551,15 +551,15 @@ export default function IncidentsPage() {
             {!useManual ? (
               <div>
                 {loadingDrivers ? (
-                  <p className="text-gray-500 text-sm animate-pulse">Loading drivers…</p>
+                  <p className="text-white/30 text-sm animate-pulse">Loading drivers…</p>
                 ) : (
                   <div className="space-y-2 max-h-64 overflow-y-auto">
                     <button
                       onClick={() => setAccusedDriverId('')}
-                      className={`w-full text-left px-4 py-3 rounded-xl text-sm border transition-colors ${
+                      className={`w-full text-left px-4 py-3 rounded-xl text-sm transition-colors ${
                         accusedDriverId === ''
-                          ? 'bg-gray-800 border-gray-600 text-gray-300'
-                          : 'bg-gray-900 border-transparent text-gray-500'
+                          ? 'bg-white/10 text-white/70'
+                          : 'bg-white/5 text-white/40'
                       }`}
                     >
                       Not specified / Unknown
@@ -568,14 +568,14 @@ export default function IncidentsPage() {
                       <button
                         key={d.id}
                         onClick={() => setAccusedDriverId(d.id)}
-                        className={`w-full text-left px-4 py-3 rounded-xl text-sm border transition-colors ${
+                        className={`w-full text-left px-4 py-3 rounded-xl text-sm font-bold transition-colors ${
                           accusedDriverId === d.id
-                            ? 'bg-[#E8284A]/15 border-[#E8284A]/50 text-white font-semibold'
-                            : 'bg-gray-900 border-transparent text-gray-300'
+                            ? 'bg-rise-red text-white'
+                            : 'bg-white/5 text-white/50 font-normal'
                         }`}
                       >
                         {d.display_name ?? d.discord_username}
-                        <span className="text-gray-500 font-normal ml-1.5">@{d.discord_username}</span>
+                        <span className="text-white/30 font-normal ml-1.5">@{d.discord_username}</span>
                       </button>
                     ))}
                   </div>
@@ -589,9 +589,9 @@ export default function IncidentsPage() {
                   value={accusedManual}
                   onChange={(e) => setAccusedManual(e.target.value)}
                   placeholder="e.g. xjanx07x"
-                  className="w-full bg-gray-900 text-white text-sm px-4 py-3 rounded-xl border border-gray-800 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600"
+                  className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                 />
-                <p className="text-gray-600 text-xs mt-2">
+                <p className="text-white/20 text-xs mt-2">
                   Enter their Discord username without the @ symbol
                 </p>
               </div>
@@ -600,13 +600,13 @@ export default function IncidentsPage() {
             <div className="flex gap-3 mt-6">
               <button
                 onClick={() => setStep('details')}
-                className="flex-1 bg-gray-900 text-gray-300 font-semibold py-4 rounded-xl text-sm"
+                className="flex-1 bg-white/5 text-white/50 font-semibold py-4 rounded-xl text-sm"
               >
                 Back
               </button>
               <button
                 onClick={() => setStep('evidence')}
-                className="flex-1 bg-[#E8284A] text-white font-bold py-4 rounded-xl text-sm"
+                className="flex-1 bg-rise-red text-white font-bold py-4 rounded-xl text-sm"
               >
                 Continue
               </button>
@@ -618,8 +618,8 @@ export default function IncidentsPage() {
         {step === 'evidence' && (
           <div>
             <StepIndicator current={3} total={4} />
-            <p className="text-gray-400 text-xs uppercase tracking-widest mb-1">Evidence Links</p>
-            <p className="text-gray-600 text-xs mb-4">
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Evidence Links</p>
+            <p className="text-white/20 text-xs mb-4">
               Add video links (YouTube, Streamable, Medal, etc.). Optional but strongly recommended.
             </p>
 
@@ -635,12 +635,12 @@ export default function IncidentsPage() {
                       setEvidenceUrls(updated)
                     }}
                     placeholder="https://youtube.com/watch?v=..."
-                    className="flex-1 bg-gray-900 text-white text-sm px-4 py-3 rounded-xl border border-gray-800 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600"
+                    className="flex-1 bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                   />
                   {evidenceUrls.length > 1 && (
                     <button
                       onClick={() => setEvidenceUrls(evidenceUrls.filter((_, j) => j !== i))}
-                      className="text-gray-600 text-lg px-2"
+                      className="text-white/20 text-lg px-2"
                     >
                       ×
                     </button>
@@ -652,7 +652,7 @@ export default function IncidentsPage() {
             {evidenceUrls.length < 5 && (
               <button
                 onClick={() => setEvidenceUrls([...evidenceUrls, ''])}
-                className="text-[#E8284A] text-sm mb-6"
+                className="text-rise-red text-sm mb-6"
               >
                 + Add another link
               </button>
@@ -661,13 +661,13 @@ export default function IncidentsPage() {
             <div className="flex gap-3 mt-2">
               <button
                 onClick={() => setStep('accused')}
-                className="flex-1 bg-gray-900 text-gray-300 font-semibold py-4 rounded-xl text-sm"
+                className="flex-1 bg-white/5 text-white/50 font-semibold py-4 rounded-xl text-sm"
               >
                 Back
               </button>
               <button
                 onClick={() => setStep('review')}
-                className="flex-1 bg-[#E8284A] text-white font-bold py-4 rounded-xl text-sm"
+                className="flex-1 bg-rise-red text-white font-bold py-4 rounded-xl text-sm"
               >
                 Review
               </button>
@@ -679,9 +679,9 @@ export default function IncidentsPage() {
         {step === 'review' && selectedMeta && (
           <div>
             <StepIndicator current={4} total={4} />
-            <p className="text-gray-400 text-xs uppercase tracking-widest mb-4">Review & Submit</p>
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-4">Review & Submit</p>
 
-            <div className="bg-gray-900 rounded-2xl px-4 py-2 mb-5">
+            <div className="bg-white/5 rounded-2xl px-4 py-2 mb-5">
               <ReviewRow label="League" value={selectedMeta.name} />
               <ReviewRow label="Incident Type" value={incidentType} />
               <ReviewRow label="Season" value={season} />
@@ -707,13 +707,13 @@ export default function IncidentsPage() {
               />
             </div>
 
-            <div className="bg-gray-900 rounded-2xl px-4 py-4 mb-5">
-              <p className="text-gray-400 text-xs uppercase tracking-widest mb-2">Description</p>
-              <p className="text-gray-300 text-sm leading-relaxed">{description}</p>
+            <div className="bg-white/5 rounded-2xl px-4 py-4 mb-5">
+              <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Description</p>
+              <p className="text-white/70 text-sm leading-relaxed">{description}</p>
             </div>
 
-            <div className="bg-[#E8284A]/5 border border-[#E8284A]/20 rounded-xl px-4 py-3 mb-6">
-              <p className="text-gray-400 text-xs leading-relaxed">
+            <div className="bg-rise-red/5 border border-rise-red/20 rounded-xl px-4 py-3 mb-6">
+              <p className="text-white/40 text-xs leading-relaxed">
                 By submitting this report you confirm the information provided is accurate to the best
                 of your knowledge. False or malicious reports may result in disciplinary action.
               </p>
@@ -728,14 +728,14 @@ export default function IncidentsPage() {
             <div className="flex gap-3">
               <button
                 onClick={() => setStep('evidence')}
-                className="flex-1 bg-gray-900 text-gray-300 font-semibold py-4 rounded-xl text-sm"
+                className="flex-1 bg-white/5 text-white/50 font-semibold py-4 rounded-xl text-sm"
               >
                 Back
               </button>
               <button
                 onClick={handleSubmit}
                 disabled={submitting}
-                className="flex-1 bg-[#E8284A] disabled:bg-[#E8284A]/50 text-white font-bold py-4 rounded-xl text-sm"
+                className="flex-1 bg-rise-red disabled:bg-rise-red/50 text-white font-bold py-4 rounded-xl text-sm"
               >
                 {submitting ? 'Submitting…' : 'Submit Report'}
               </button>
