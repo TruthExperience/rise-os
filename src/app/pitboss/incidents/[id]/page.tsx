@@ -68,9 +68,9 @@ function statusColor(status: string) {
     open: 'text-yellow-400',
     under_review: 'text-blue-400',
     resolved: 'text-green-400',
-    dismissed: 'text-gray-500',
+    dismissed: 'text-white/30',
   }
-  return map[status] ?? 'text-gray-400'
+  return map[status] ?? 'text-white/40'
 }
 
 function statusDot(status: string) {
@@ -78,9 +78,9 @@ function statusDot(status: string) {
     open: 'bg-yellow-400',
     under_review: 'bg-blue-400',
     resolved: 'bg-green-400',
-    dismissed: 'bg-gray-500',
+    dismissed: 'bg-white/30',
   }
-  return map[status] ?? 'bg-gray-400'
+  return map[status] ?? 'bg-white/40'
 }
 
 function verdictColor(v: string | null) {
@@ -124,21 +124,21 @@ function ArticleDrawer({
   return (
     <div className="fixed inset-0 z-50 flex items-end">
       <div className="absolute inset-0 bg-black/70" onClick={onClose} />
-      <div className="relative w-full bg-[#1A1A1A] border-t border-gray-800 rounded-t-2xl max-h-[80vh] overflow-y-auto">
-        <div className="sticky top-0 bg-[#1A1A1A] px-4 pt-4 pb-3 border-b border-gray-800 flex items-start justify-between gap-3">
+      <div className="relative w-full bg-rise-black border-t border-white/10 rounded-t-2xl max-h-[80vh] overflow-y-auto">
+        <div className="sticky top-0 bg-rise-black px-4 pt-4 pb-3 border-b border-white/10 flex items-start justify-between gap-3">
           <div>
-            <p className="text-[#E8284A] text-xs font-bold uppercase tracking-widest">
+            <p className="text-rise-red text-xs font-bold uppercase tracking-widest">
               Article {article.article_number}
             </p>
             <h2 className="text-white font-bold text-base mt-0.5">{article.title}</h2>
             {article.category && (
-              <p className="text-gray-500 text-xs mt-0.5">{article.category}</p>
+              <p className="text-white/30 text-xs mt-0.5">{article.category}</p>
             )}
           </div>
-          <button onClick={onClose} className="text-gray-500 text-xl flex-shrink-0 mt-0.5">✕</button>
+          <button onClick={onClose} className="text-white/30 text-xl flex-shrink-0 mt-0.5">✕</button>
         </div>
         <div className="px-4 py-5">
-          <p className="text-gray-300 text-sm leading-relaxed whitespace-pre-wrap">{article.body}</p>
+          <p className="text-white/70 text-sm leading-relaxed whitespace-pre-wrap">{article.body}</p>
         </div>
       </div>
     </div>
@@ -305,17 +305,17 @@ export default function IncidentDetailPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#1A1A1A] flex items-center justify-center">
-        <p className="text-white animate-pulse">Loading incident…</p>
+      <div className="min-h-screen bg-rise-black flex items-center justify-center">
+        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
       </div>
     )
   }
 
   if (error || !incident) {
     return (
-      <div className="min-h-screen bg-[#1A1A1A] flex flex-col items-center justify-center gap-4 px-6">
-        <p className="text-[#E8284A] text-center">{error || 'Incident not found'}</p>
-        <button onClick={() => router.back()} className="text-gray-400 underline text-sm">Go back</button>
+      <div className="min-h-screen bg-rise-black flex flex-col items-center justify-center gap-4 px-6">
+        <p className="text-rise-red text-center">{error || 'Incident not found'}</p>
+        <button onClick={() => router.back()} className="text-white/40 underline text-sm">Go back</button>
       </div>
     )
   }
@@ -324,19 +324,19 @@ export default function IncidentDetailPage() {
   const isResolved = incident.status === 'resolved' || incident.status === 'dismissed'
 
   return (
-    <div className="min-h-screen bg-[#1A1A1A] pb-28">
+    <div className="min-h-screen bg-rise-black pb-28">
 
       {selectedArticle && (
         <ArticleDrawer article={selectedArticle} onClose={() => setSelectedArticle(null)} />
       )}
 
       {/* Header */}
-      <div className="px-4 pt-12 pb-4 border-b border-gray-800">
-        <button onClick={() => router.back()} className="text-gray-500 text-sm mb-3 block">← Back</button>
+      <div className="px-4 pt-12 pb-4 border-b border-white/10">
+        <button onClick={() => router.back()} className="text-white/40 text-sm mb-3 block">← Back</button>
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
-            <h1 className="text-white font-bold text-xl leading-tight">{incident.incident_type}</h1>
-            <p className="text-gray-500 text-xs mt-1">{formatDate(incident.created_at)}</p>
+            <h1 className="text-white font-black text-xl leading-tight">{incident.incident_type}</h1>
+            <p className="text-white/30 text-xs mt-1">{formatDate(incident.created_at)}</p>
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0 mt-1">
             <span className={`w-2 h-2 rounded-full ${statusDot(incident.status)}`} />
@@ -346,23 +346,23 @@ export default function IncidentDetailPage() {
           </div>
         </div>
         {incident.league && (
-          <p className="text-gray-600 text-xs mt-1">{incident.league.name}</p>
+          <p className="text-white/20 text-xs mt-1">{incident.league.name}</p>
         )}
       </div>
 
       <div className="px-4 pt-5 space-y-5">
 
         {/* Incident Details */}
-        <section className="bg-gray-900 rounded-2xl overflow-hidden">
-          <p className="text-gray-500 text-xs uppercase tracking-widest px-4 pt-4 pb-2">Incident Details</p>
-          <div className="divide-y divide-gray-800">
+        <section className="bg-white/5 rounded-2xl overflow-hidden">
+          <p className="text-white/40 text-xs uppercase tracking-widest px-4 pt-4 pb-2">Incident Details</p>
+          <div className="divide-y divide-white/10">
             {[
               { label: 'Season', value: incident.season },
               { label: 'Round', value: incident.round },
               { label: 'Lap', value: incident.lap },
             ].map(({ label, value }) => value && (
               <div key={label} className="flex justify-between px-4 py-3">
-                <span className="text-gray-500 text-sm">{label}</span>
+                <span className="text-white/40 text-sm">{label}</span>
                 <span className="text-white text-sm font-semibold">{value}</span>
               </div>
             ))}
@@ -372,8 +372,8 @@ export default function IncidentDetailPage() {
         {/* Drivers */}
         <section className="space-y-2">
           {incident.reporter && (
-            <div className="bg-gray-900 rounded-xl px-4 py-3 flex items-center gap-3">
-              <div className="w-8 h-8 rounded-xl bg-gray-800 overflow-hidden flex-shrink-0">
+            <div className="bg-white/5 rounded-xl px-4 py-3 flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-white/10 overflow-hidden flex-shrink-0">
                 {avatarUrl(incident.reporter) ? (
                   <img src={avatarUrl(incident.reporter)!} alt="" className="w-full h-full object-cover" />
                 ) : (
@@ -386,17 +386,17 @@ export default function IncidentDetailPage() {
                 <p className="text-white text-sm font-semibold">
                   {incident.reporter.display_name ?? incident.reporter.discord_username}
                 </p>
-                <p className="text-gray-500 text-xs">Reporter</p>
+                <p className="text-white/30 text-xs">Reporter</p>
               </div>
             </div>
           )}
           {incident.accused && (
-            <div className="bg-gray-900 rounded-xl px-4 py-3 flex items-center gap-3">
-              <div className="w-8 h-8 rounded-xl bg-[#E8284A]/20 overflow-hidden flex-shrink-0">
+            <div className="bg-white/5 rounded-xl px-4 py-3 flex items-center gap-3">
+              <div className="w-8 h-8 rounded-xl bg-rise-red/20 overflow-hidden flex-shrink-0">
                 {avatarUrl(incident.accused) ? (
                   <img src={avatarUrl(incident.accused)!} alt="" className="w-full h-full object-cover" />
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center text-[#E8284A] text-xs font-bold">
+                  <div className="w-full h-full flex items-center justify-center text-rise-red text-xs font-bold">
                     {(incident.accused.display_name ?? incident.accused.discord_username)[0].toUpperCase()}
                   </div>
                 )}
@@ -405,7 +405,7 @@ export default function IncidentDetailPage() {
                 <p className="text-white text-sm font-semibold">
                   {incident.accused.display_name ?? incident.accused.discord_username}
                 </p>
-                <p className="text-[#E8284A] text-xs">Accused</p>
+                <p className="text-rise-red text-xs">Accused</p>
               </div>
             </div>
           )}
@@ -413,16 +413,16 @@ export default function IncidentDetailPage() {
 
         {/* Description */}
         <section>
-          <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Description</p>
-          <div className="bg-gray-900 rounded-xl px-4 py-4">
-            <p className="text-gray-300 text-sm leading-relaxed">{incident.description}</p>
+          <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Description</p>
+          <div className="bg-white/5 rounded-xl px-4 py-4">
+            <p className="text-white/70 text-sm leading-relaxed">{incident.description}</p>
           </div>
         </section>
 
         {/* Evidence */}
         {incident.evidence_urls && incident.evidence_urls.length > 0 && (
           <section>
-            <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Evidence</p>
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Evidence</p>
             <div className="space-y-2">
               {incident.evidence_urls.map((url, i) => (
                 <a
@@ -430,7 +430,7 @@ export default function IncidentDetailPage() {
                   href={url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-3 bg-gray-900 rounded-xl px-4 py-3"
+                  className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3"
                 >
                   <span className="text-lg">{isVideoUrl(url) ? '▶️' : '🔗'}</span>
                   <span className="text-blue-400 text-sm truncate flex-1">{url}</span>
@@ -443,11 +443,11 @@ export default function IncidentDetailPage() {
         {/* Accused Response */}
         {incident.accused_response ? (
           <section>
-            <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Accused Response</p>
-            <div className="bg-gray-900 rounded-xl px-4 py-4">
-              <p className="text-gray-300 text-sm leading-relaxed">{incident.accused_response}</p>
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Accused Response</p>
+            <div className="bg-white/5 rounded-xl px-4 py-4">
+              <p className="text-white/70 text-sm leading-relaxed">{incident.accused_response}</p>
               {incident.accused_response_at && (
-                <p className="text-gray-600 text-xs mt-2">{formatDate(incident.accused_response_at)}</p>
+                <p className="text-white/20 text-xs mt-2">{formatDate(incident.accused_response_at)}</p>
               )}
             </div>
             {incident.accused_evidence_urls && incident.accused_evidence_urls.length > 0 && (
@@ -458,7 +458,7 @@ export default function IncidentDetailPage() {
                     href={url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center gap-3 bg-gray-900 rounded-xl px-4 py-3"
+                    className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3"
                   >
                     <span className="text-lg">▶️</span>
                     <span className="text-blue-400 text-sm truncate flex-1">{url}</span>
@@ -472,19 +472,19 @@ export default function IncidentDetailPage() {
             {!showDefenceForm ? (
               <button
                 onClick={() => setShowDefenceForm(true)}
-                className="w-full bg-gray-900 border border-gray-700 text-gray-300 font-semibold py-3 rounded-xl text-sm"
+                className="w-full bg-white/5 border border-white/10 text-white/70 font-semibold py-3 rounded-xl text-sm"
               >
                 Submit Your Response
               </button>
             ) : (
-              <div className="bg-gray-900 rounded-2xl p-4 space-y-3">
+              <div className="bg-white/5 rounded-2xl p-4 space-y-3">
                 <p className="text-white font-semibold text-sm">Your Response</p>
                 <textarea
                   value={defenceText}
                   onChange={(e) => setDefenceText(e.target.value)}
                   placeholder="Describe your perspective on the incident…"
                   rows={4}
-                  className="w-full bg-gray-800 text-white text-sm px-4 py-3 rounded-xl border border-gray-700 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600 resize-none"
+                  className="w-full bg-white/10 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none"
                 />
                 {defenceUrls.map((url, i) => (
                   <input
@@ -497,13 +497,13 @@ export default function IncidentDetailPage() {
                       setDefenceUrls(updated)
                     }}
                     placeholder="Evidence URL (optional)"
-                    className="w-full bg-gray-800 text-white text-sm px-4 py-3 rounded-xl border border-gray-700 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600"
+                    className="w-full bg-white/10 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                   />
                 ))}
                 {defenceUrls.length < 3 && (
                   <button
                     onClick={() => setDefenceUrls([...defenceUrls, ''])}
-                    className="text-[#E8284A] text-xs"
+                    className="text-rise-red text-xs"
                   >
                     + Add evidence link
                   </button>
@@ -512,14 +512,14 @@ export default function IncidentDetailPage() {
                 <div className="flex gap-2">
                   <button
                     onClick={() => setShowDefenceForm(false)}
-                    className="flex-1 bg-gray-800 text-gray-300 font-semibold py-3 rounded-xl text-sm"
+                    className="flex-1 bg-white/10 text-white/70 font-semibold py-3 rounded-xl text-sm"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={handleDefenceSubmit}
                     disabled={!defenceText.trim() || submittingDefence}
-                    className="flex-1 bg-[#E8284A] disabled:opacity-40 text-white font-bold py-3 rounded-xl text-sm"
+                    className="flex-1 bg-rise-red disabled:opacity-40 text-white font-bold py-3 rounded-xl text-sm"
                   >
                     {submittingDefence ? 'Submitting…' : 'Submit'}
                   </button>
@@ -532,12 +532,12 @@ export default function IncidentDetailPage() {
         {/* AI Steward Analysis */}
         <section>
           <div className="flex items-center justify-between mb-2">
-            <p className="text-gray-500 text-xs uppercase tracking-widest">AI Steward Analysis</p>
+            <p className="text-white/40 text-xs uppercase tracking-widest">AI Steward Analysis</p>
             {isSteward && (
               <button
                 onClick={handleAnalyse}
                 disabled={analysing}
-                className="text-[#E8284A] text-xs font-semibold flex items-center gap-1"
+                className="text-rise-red text-xs font-semibold flex items-center gap-1"
               >
                 {analysing ? (
                   <span className="animate-pulse">Analysing…</span>
@@ -549,20 +549,20 @@ export default function IncidentDetailPage() {
           </div>
 
           {analyseError && (
-            <p className="text-[#E8284A] text-xs mb-2">{analyseError}</p>
+            <p className="text-rise-red text-xs mb-2">{analyseError}</p>
           )}
 
           {hasAI ? (
-            <div className="bg-gray-900 rounded-2xl overflow-hidden">
-              <div className="px-4 pt-4 pb-3 border-b border-gray-800 grid grid-cols-3">
+            <div className="bg-white/5 rounded-2xl overflow-hidden">
+              <div className="px-4 pt-4 pb-3 border-b border-white/10 grid grid-cols-3">
                 <div>
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Verdict</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Verdict</p>
                   <p className={`text-sm font-black uppercase ${verdictColor(incident.ai_verdict)}`}>
                     {incident.ai_verdict?.replace('_', ' ') ?? '—'}
                   </p>
                 </div>
                 <div className="text-center">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Confidence</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Confidence</p>
                   <p className={`text-sm font-black ${
                     (incident.ai_confidence ?? 0) >= 0.7
                       ? 'text-green-400'
@@ -574,28 +574,28 @@ export default function IncidentDetailPage() {
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">PP</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">PP</p>
                   <p className="text-sm font-black text-white">{incident.ai_points ?? 0}</p>
                 </div>
               </div>
 
               {incident.ai_penalty && (
-                <div className="px-4 py-3 border-b border-gray-800">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Suggested Penalty</p>
-                  <p className="text-gray-300 text-sm leading-relaxed">{incident.ai_penalty}</p>
+                <div className="px-4 py-3 border-b border-white/10">
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Suggested Penalty</p>
+                  <p className="text-white/70 text-sm leading-relaxed">{incident.ai_penalty}</p>
                 </div>
               )}
 
               {incident.ai_reasoning && (
-                <div className="px-4 py-3 border-b border-gray-800">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Reasoning</p>
-                  <p className="text-gray-300 text-sm leading-relaxed">{incident.ai_reasoning}</p>
+                <div className="px-4 py-3 border-b border-white/10">
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Reasoning</p>
+                  <p className="text-white/70 text-sm leading-relaxed">{incident.ai_reasoning}</p>
                 </div>
               )}
 
               {incident.ai_articles && incident.ai_articles.length > 0 && (
                 <div className="px-4 py-3">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-2">Cited Articles</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-2">Cited Articles</p>
                   <div className="flex flex-wrap gap-2">
                     {incident.ai_articles.map((ref, i) => {
                       const article = findArticle(ref)
@@ -605,8 +605,8 @@ export default function IncidentDetailPage() {
                           onClick={() => article ? setSelectedArticle(article) : null}
                           className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
                             article
-                              ? 'bg-[#E8284A]/10 border-[#E8284A]/40 text-[#E8284A] active:bg-[#E8284A]/20'
-                              : 'bg-gray-800 border-gray-700 text-gray-500'
+                              ? 'bg-rise-red/10 border-rise-red/40 text-rise-red active:bg-rise-red/20'
+                              : 'bg-white/10 border-white/10 text-white/40'
                           }`}
                         >
                           {ref}
@@ -616,24 +616,24 @@ export default function IncidentDetailPage() {
                     })}
                   </div>
                   {!loadingArticles && articles.length === 0 && (
-                    <p className="text-gray-700 text-xs mt-2">No rulebook articles loaded for this league</p>
+                    <p className="text-white/20 text-xs mt-2">No rulebook articles loaded for this league</p>
                   )}
                 </div>
               )}
 
               {incident.ai_model && (
                 <div className="px-4 pb-3">
-                  <p className="text-gray-700 text-[10px]">
+                  <p className="text-white/20 text-[10px]">
                     Model: {incident.ai_model} · {formatDate(incident.ai_analysed_at)}
                   </p>
                 </div>
               )}
             </div>
           ) : (
-            <div className="bg-gray-900 rounded-2xl px-4 py-8 text-center">
-              <p className="text-gray-600 text-sm">No AI analysis yet.</p>
+            <div className="bg-white/5 rounded-2xl px-4 py-8 text-center">
+              <p className="text-white/30 text-sm">No AI analysis yet.</p>
               {isSteward && (
-                <p className="text-gray-700 text-xs mt-1">Tap ⚡ Analyse to run the AI steward.</p>
+                <p className="text-white/20 text-xs mt-1">Tap ⚡ Analyse to run the AI steward.</p>
               )}
             </div>
           )}
@@ -642,40 +642,40 @@ export default function IncidentDetailPage() {
         {/* Final Ruling */}
         {isResolved && (
           <section>
-            <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Final Ruling</p>
-            <div className="bg-gray-900 rounded-2xl overflow-hidden">
-              <div className="px-4 pt-4 pb-3 border-b border-gray-800 grid grid-cols-3">
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Final Ruling</p>
+            <div className="bg-white/5 rounded-2xl overflow-hidden">
+              <div className="px-4 pt-4 pb-3 border-b border-white/10 grid grid-cols-3">
                 <div>
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Verdict</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Verdict</p>
                   <p className={`text-sm font-black uppercase ${verdictColor(incident.verdict)}`}>
                     {incident.verdict?.replace('_', ' ') ?? '—'}
                   </p>
                 </div>
                 <div className="text-center">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">PP</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">PP</p>
                   <p className="text-sm font-black text-white">{incident.penalty_points ?? 0}</p>
                 </div>
                 <div className="text-right">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Resolved</p>
-                  <p className="text-gray-400 text-xs">{formatDate(incident.resolved_at)}</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Resolved</p>
+                  <p className="text-white/40 text-xs">{formatDate(incident.resolved_at)}</p>
                 </div>
               </div>
               {incident.penalty && (
-                <div className="px-4 py-3 border-b border-gray-800">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Penalty</p>
-                  <p className="text-gray-300 text-sm">{incident.penalty}</p>
+                <div className="px-4 py-3 border-b border-white/10">
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Penalty</p>
+                  <p className="text-white/70 text-sm">{incident.penalty}</p>
                 </div>
               )}
               {incident.steward_notes && (
-                <div className="px-4 py-3 border-b border-gray-800">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Steward Notes</p>
-                  <p className="text-gray-300 text-sm leading-relaxed">{incident.steward_notes}</p>
+                <div className="px-4 py-3 border-b border-white/10">
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Steward Notes</p>
+                  <p className="text-white/70 text-sm leading-relaxed">{incident.steward_notes}</p>
                 </div>
               )}
               {incident.override_reason && (
                 <div className="px-4 py-3">
-                  <p className="text-gray-500 text-[10px] uppercase tracking-widest mb-1">Override Reason</p>
-                  <p className="text-gray-400 text-sm">{incident.override_reason}</p>
+                  <p className="text-white/40 text-[10px] uppercase tracking-widest mb-1">Override Reason</p>
+                  <p className="text-white/40 text-sm">{incident.override_reason}</p>
                 </div>
               )}
             </div>
@@ -688,16 +688,16 @@ export default function IncidentDetailPage() {
             {!showRulingForm ? (
               <button
                 onClick={() => setShowRulingForm(true)}
-                className="w-full bg-[#E8284A] text-white font-black py-4 rounded-xl text-sm uppercase tracking-wider"
+                className="w-full bg-rise-red text-white font-black py-4 rounded-xl text-sm uppercase tracking-wider"
               >
                 Issue Ruling
               </button>
             ) : (
-              <div className="bg-gray-900 rounded-2xl p-4 space-y-4">
+              <div className="bg-white/5 rounded-2xl p-4 space-y-4">
                 <p className="text-white font-bold text-base">Issue Ruling</p>
 
                 <div>
-                  <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Verdict</p>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Verdict</p>
                   <div className="grid grid-cols-3 gap-2">
                     {(['guilty', 'not_guilty', 'inconclusive'] as const).map((v) => (
                       <button
@@ -710,7 +710,7 @@ export default function IncidentDetailPage() {
                               : v === 'not_guilty'
                               ? 'bg-green-500 text-white'
                               : 'bg-yellow-500 text-black'
-                            : 'bg-gray-800 text-gray-500'
+                            : 'bg-white/10 text-white/40'
                         }`}
                       >
                         {v.replace('_', ' ')}
@@ -721,25 +721,25 @@ export default function IncidentDetailPage() {
 
                 {rulingVerdict === 'guilty' && (
                   <div>
-                    <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Penalty Points</p>
+                    <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Points</p>
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => setRulingPP(Math.max(0, rulingPP - 1))}
-                        className="w-10 h-10 bg-gray-800 rounded-xl text-white font-bold text-lg flex items-center justify-center"
+                        className="w-10 h-10 bg-white/10 rounded-xl text-white font-bold text-lg flex items-center justify-center"
                       >
                         −
                       </button>
                       <span className="text-white font-black text-2xl w-8 text-center">{rulingPP}</span>
                       <button
                         onClick={() => setRulingPP(Math.min(25, rulingPP + 1))}
-                        className="w-10 h-10 bg-gray-800 rounded-xl text-white font-bold text-lg flex items-center justify-center"
+                        className="w-10 h-10 bg-white/10 rounded-xl text-white font-bold text-lg flex items-center justify-center"
                       >
                         +
                       </button>
                       {incident.ai_points !== null && incident.ai_points > 0 && (
                         <button
                           onClick={() => setRulingPP(incident.ai_points!)}
-                          className="text-xs text-[#E8284A] ml-2"
+                          className="text-xs text-rise-red ml-2"
                         >
                           Use AI ({incident.ai_points} PP)
                         </button>
@@ -750,34 +750,34 @@ export default function IncidentDetailPage() {
 
                 {rulingVerdict === 'guilty' && (
                   <div>
-                    <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Penalty Description</p>
+                    <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Penalty Description</p>
                     <input
                       type="text"
                       value={rulingPenalty}
                       onChange={(e) => setRulingPenalty(e.target.value)}
                       placeholder="e.g. 3-race suspension, time penalty…"
-                      className="w-full bg-gray-800 text-white text-sm px-4 py-3 rounded-xl border border-gray-700 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600"
+                      className="w-full bg-white/10 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20"
                     />
                   </div>
                 )}
 
                 <div>
-                  <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">Steward Notes</p>
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Steward Notes</p>
                   <textarea
                     value={rulingNotes}
                     onChange={(e) => setRulingNotes(e.target.value)}
                     placeholder="Explain the ruling…"
                     rows={3}
-                    className="w-full bg-gray-800 text-white text-sm px-4 py-3 rounded-xl border border-gray-700 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600 resize-none"
+                    className="w-full bg-white/10 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none"
                   />
                 </div>
 
                 {hasAI && incident.ai_verdict !== rulingVerdict && (
                   <div>
-                    <p className="text-gray-500 text-xs uppercase tracking-widest mb-2">
-                      Override Reason <span className="text-[#E8284A]">*</span>
+                    <p className="text-white/40 text-xs uppercase tracking-widest mb-2">
+                      Override Reason <span className="text-rise-red">*</span>
                     </p>
-                    <p className="text-gray-600 text-xs mb-2">
+                    <p className="text-white/20 text-xs mb-2">
                       Your verdict differs from AI ({incident.ai_verdict?.replace('_', ' ')}). Explain why.
                     </p>
                     <textarea
@@ -785,17 +785,17 @@ export default function IncidentDetailPage() {
                       onChange={(e) => setRulingOverride(e.target.value)}
                       placeholder="Reason for overriding AI recommendation…"
                       rows={2}
-                      className="w-full bg-gray-800 text-white text-sm px-4 py-3 rounded-xl border border-[#E8284A]/30 focus:border-[#E8284A]/50 focus:outline-none placeholder-gray-600 resize-none"
+                      className="w-full bg-rise-red/5 text-white text-sm px-4 py-3 rounded-xl border border-rise-red/30 focus:border-rise-red/50 focus:outline-none placeholder-white/20 resize-none"
                     />
                   </div>
                 )}
 
-                {rulingError && <p className="text-red-400 text-xs">{rulingError}</p>}
+                {rulingError && <p className="text-red-400 text-sm">{rulingError}</p>}
 
                 <div className="flex gap-2">
                   <button
                     onClick={() => setShowRulingForm(false)}
-                    className="flex-1 bg-gray-800 text-gray-300 font-semibold py-3 rounded-xl text-sm"
+                    className="flex-1 bg-white/10 text-white/70 font-semibold py-3 rounded-xl text-sm"
                   >
                     Cancel
                   </button>
@@ -805,7 +805,7 @@ export default function IncidentDetailPage() {
                       submittingRuling ||
                       (hasAI && incident.ai_verdict !== rulingVerdict && !rulingOverride.trim())
                     }
-                    className="flex-1 bg-[#E8284A] disabled:opacity-40 text-white font-bold py-3 rounded-xl text-sm"
+                    className="flex-1 bg-rise-red disabled:opacity-40 text-white font-bold py-3 rounded-xl text-sm"
                   >
                     {submittingRuling ? 'Issuing…' : 'Confirm Ruling'}
                   </button>
