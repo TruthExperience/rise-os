@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
+import DriverCareerCard from '@/components/pitboss/DriverCareerCard'
 
 interface Driver {
   id: string
@@ -166,7 +167,7 @@ export default function DriverProfilePage() {
   const [profile, setProfile] = useState<ProfileData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [activeTab, setActiveTab] = useState<'overview' | 'licences' | 'certs' | 'contract' | 'stats' | 'penalties'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'licences' | 'certs' | 'contract' | 'stats' | 'career' | 'penalties'>('overview')
 
   const isOwnProfile = session?.user?.id === id
 
@@ -220,6 +221,7 @@ export default function DriverProfilePage() {
     { key: 'certs', label: 'Certs' },
     { key: 'contract', label: 'Contract' },
     { key: 'stats', label: 'Stats' },
+    { key: 'career', label: 'Career' },
     { key: 'penalties', label: 'Penalties' },
   ] as const
 
@@ -570,6 +572,11 @@ export default function DriverProfilePage() {
               </>
             )}
           </div>
+        )}
+
+        {/* CAREER (wins/top3/top5/top10 + teams driven for) */}
+        {activeTab === 'career' && (
+          <DriverCareerCard driverId={id} />
         )}
 
         {/* PENALTIES */}
