@@ -3,7 +3,8 @@
 // Returns the selectable driver roster for a league, sourced from
 // pitboss.credential_registry (the AWC driver list of record) joined to
 // pitboss.drivers by discord_id. Used for steward-facing pickers — e.g.
-// "accused driver" / "reported by" when opening an incident ticket.
+// "accused driver" / "reported by" when opening an incident ticket — and
+// by the driver-facing incident report form.
 //
 // Entries with a blank discord_id (unassigned credential slots — "TBD",
 // placeholder cards) are excluded since they have no linked driver record
@@ -66,7 +67,7 @@ export async function GET(
     if (!driver || seen.has(c.discord_id)) continue
     seen.add(c.discord_id)
     roster.push({
-      driver_id: driver.id,
+      id: driver.id,
       discord_username: driver.discord_username,
       display_name: driver.display_name,
       discord_avatar: driver.discord_avatar,
