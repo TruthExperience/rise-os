@@ -1,15 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
-
 const ESPN_TEAMS_URL =
   "https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams";
 
 type EspnTeam = { id: string; displayName: string; nickname?: string };
+
+function getSupabase() {
+  return createClient(
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
 
 async function fetchEspnTeams(groups: number): Promise<EspnTeam[]> {
   const res = await fetch(`${ESPN_TEAMS_URL}?groups=${groups}&limit=700`);
@@ -37,6 +39,7 @@ function similarity(a: string, b: string) {
 
 // GET: return suggested matches for unmatched franchises
 export async function GET() {
+  const supabase = getSupabase();
   const [fbs, fcs] = await Promise.all([fetchEspnTeams(80), fetchEspnTeams(81)]);
   const espnTeams = [...fbs, ...fcs];
 
@@ -67,6 +70,7 @@ export async function GET() {
 
 // POST: confirm matches -> [{ franchiseId, espnTeamId }]
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase();
   const body = await req.json();
   const matches: { franchiseId: string; espnTeamId: number }[] = body.matches ?? [];
 
