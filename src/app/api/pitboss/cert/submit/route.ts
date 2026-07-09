@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
   const { data: cert, error: certError } = await supabase
     .schema('pitboss')
     .from('certifications')
-    .select('id, driver_id, league_id, status, started_at, pass_mark, attempt_number')
+    .select('id, driver_id, league_id, role_code, status, started_at, pass_mark, attempt_number')
     .eq('id', certification_id)
     .maybeSingle()
 
@@ -88,12 +88,18 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  // Score only against the questions actually submitted (i.e. the ones the
+  // driver was shown), scoped to this cert's role+league so answer keys
+  // from another role/league can't be spoofed into the grading set.
+  const submittedIds = Object.keys(answers)
+
   const { data: questions, error: questionsError } = await supabase
     .schema('pitboss')
     .from('questions')
     .select('id, correct_answer')
+    .in('id', submittedIds)
     .eq('league_id', cert.league_id)
-    .eq('active', true)
+    .eq('role_code', cert.role_code)
 
   if (questionsError || !questions) {
     console.error('[cert/submit] questions fetch', questionsError)
@@ -130,25 +136,32 @@ export async function POST(req: NextRequest) {
       .schema('rise_os').from('leagues')
       .select('name').eq('id', cert.league_id).maybeSingle()
 
+    const { data: roleReq } = await supabase
+      .schema('pitboss').from('role_requirements')
+      .select('role_name')
+      .eq('league_id', cert.league_id)
+      .eq('role_code', cert.role_code)
+      .maybeSingle()
+
     const { data: seqRow } = await supabase
       .schema('pitboss').from('licence_sequences')
       .select('id, last_number')
       .eq('league_id', cert.league_id)
-      .eq('role_code', 'driver')
+      .eq('role_code', cert.role_code)
       .maybeSingle()
 
     let nextNumber: number
     if (!seqRow) {
       nextNumber = 1
       await supabase.schema('pitboss').from('licence_sequences')
-        .insert({ league_id: cert.league_id, role_code: 'driver', last_number: 1 })
+        .insert({ league_id: cert.league_id, role_code: cert.role_code, last_number: 1 })
     } else {
       nextNumber = seqRow.last_number + 1
       await supabase.schema('pitboss').from('licence_sequences')
         .update({ last_number: nextNumber }).eq('id', seqRow.id)
     }
 
-    const licenceNumber = `DRV-${String(nextNumber).padStart(5, '0')}`
+    const licenceNumber = `${cert.role_code}-${String(nextNumber).padStart(5, '0')}`
 
     const { data: newLicence } = await supabase
       .schema('pitboss').from('licences')
@@ -156,8 +169,8 @@ export async function POST(req: NextRequest) {
         driver_id:      driver.id,
         league_id:      cert.league_id,
         licence_number: licenceNumber,
-        role_code:      'driver',
-        title:          `${league?.name ?? 'League'} Driver`,
+        role_code:      cert.role_code,
+        title:          `${league?.name ?? 'League'} ${roleReq?.role_name ?? cert.role_code}`,
         status:         'active',
       })
       .select('id, licence_number')
