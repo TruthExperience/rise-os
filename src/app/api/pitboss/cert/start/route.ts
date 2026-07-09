@@ -21,9 +21,8 @@ async function getDriver(supabase: any, discordId: string) {
     .maybeSingle()
 }
 
-// Rebuilds the same client payload shape from a cert's stored question_ids,
-// preserving each question's original option order isn't possible (we don't
-// store shuffled option order), so options are re-shuffled on every fetch —
+// Rebuilds the same client payload shape from a cert's stored question_ids.
+// Option order isn't persisted, so options are re-shuffled on every fetch —
 // harmless since correctness doesn't depend on option order.
 async function buildSessionPayload(
   supabase: any,
@@ -115,6 +114,10 @@ export async function GET(req: NextRequest) {
   const { data: league } = await supabase
     .schema('pitboss').from('leagues')
     .select('id, name, slug').eq('id', cert.league_id).maybeSingle()
+
+  if (!league) {
+    return NextResponse.json({ error: 'League not found' }, { status: 404 })
+  }
 
   const { data: requirement } = await supabase
     .schema('pitboss').from('role_requirements')
