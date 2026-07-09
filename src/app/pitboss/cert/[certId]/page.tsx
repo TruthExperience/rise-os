@@ -124,7 +124,6 @@ export default function CertExamPage() {
         return
       }
 
-      // Store results for the results page
       sessionStorage.setItem(`cert:${certId}:results`, JSON.stringify(data))
       sessionStorage.removeItem(`cert:${certId}`)
 
@@ -172,7 +171,6 @@ export default function CertExamPage() {
 
   return (
     <main className="min-h-screen bg-rise-black flex flex-col">
-      {/* Top bar */}
       <div className="flex items-center justify-between px-4 pt-6 pb-3 border-b border-white/10">
         <div>
           <p className="text-xs text-white/30 uppercase tracking-widest">
@@ -191,7 +189,6 @@ export default function CertExamPage() {
         </div>
       </div>
 
-      {/* Progress bar */}
       <div className="h-1 bg-white/10">
         <div
           className="h-1 bg-rise-red transition-all duration-300"
@@ -199,7 +196,6 @@ export default function CertExamPage() {
         />
       </div>
 
-      {/* Question */}
       <div className="flex-1 px-4 pt-6 pb-4 overflow-y-auto">
         <div className="mb-2 flex items-center gap-2">
           <span className="text-[10px] uppercase tracking-widest text-white/30">
@@ -244,7 +240,6 @@ export default function CertExamPage() {
         </div>
       </div>
 
-      {/* Bottom nav */}
       <div className="px-4 pb-8 pt-3 border-t border-white/10 flex items-center gap-3">
         <button
           onClick={() => setCurrent((c) => Math.max(0, c - 1))}
@@ -276,7 +271,6 @@ export default function CertExamPage() {
           </button>
         )}
 
-        {/* Jump to unanswered */}
         {answeredCount < questions.length && isLast && (
           <button
             onClick={() => {
