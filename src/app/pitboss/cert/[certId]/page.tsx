@@ -35,26 +35,53 @@ export default function CertExamPage() {
   const [loading, setLoading]         = useState(true)
   const timerRef                      = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Load session from sessionStorage (set by /pitboss/cert on start)
+  // Load session from sessionStorage (set by /pitboss/cert on start).
+  // If it's missing or corrupted — app backgrounded, tab closed, page
+  // reopened later — fall back to rebuilding it from the server using
+  // the certification's persisted question_ids.
   useEffect(() => {
+    if (!certId) {
+      setError('No certification ID provided.')
+      setLoading(false)
+      return
+    }
+
     const raw = sessionStorage.getItem(`cert:${certId}`)
     if (raw) {
       try {
         const data: CertSession = JSON.parse(raw)
         setSession(data)
-
-        // Calculate remaining time from server started_at
         const elapsed = Math.floor(
           (Date.now() - new Date(data.started_at).getTime()) / 1000
         )
         setSecondsLeft(Math.max(0, TIME_LIMIT_SECONDS - elapsed))
+        setLoading(false)
+        return
       } catch {
-        setError('Session data corrupted — please restart the exam.')
+        // fall through to server rebuild
       }
-    } else {
-      setError('No active session found — please restart the exam.')
     }
-    setLoading(false)
+
+    fetch(`/api/pitboss/cert/start?certification_id=${certId}`)
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setError(data.error ?? 'No active session found — please restart the exam.')
+          setLoading(false)
+          return
+        }
+        sessionStorage.setItem(`cert:${certId}`, JSON.stringify(data))
+        setSession(data)
+        const elapsed = Math.floor(
+          (Date.now() - new Date(data.started_at).getTime()) / 1000
+        )
+        setSecondsLeft(Math.max(0, TIME_LIMIT_SECONDS - elapsed))
+        setLoading(false)
+      })
+      .catch(() => {
+        setError('Network error — could not load exam session.')
+        setLoading(false)
+      })
   }, [certId])
 
   // Countdown timer
