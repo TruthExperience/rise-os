@@ -1,252 +1,300 @@
-'use client'
+// src/app/api/pitboss/admin/rulebook/upload/route.ts
+// POST /api/pitboss/admin/rulebook/upload
+// Uploads a rulebook PDF to storage, extracts text, calls the internal PitBoss
+// LLM gateway (pitboss-proxy Worker → Groq/OpenRouter, certgen mode) to generate
+// exam questions, and inserts them into pitboss.questions.
 
-import { useEffect, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { useSession } from 'next-auth/react'
+import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
+import { pbInfer } from '@/lib/pitboss-llm'
 
-interface League {
-  id: string
-  name: string
-  slug: string
-}
+const DEFAULT_QUESTION_COUNT = 30
 
-interface RoleRequirement {
-  role_code: string
-  role_name: string
-  question_count: number
-}
+// ── Inline PDF text extraction (no pdf-parse dep needed) ─────────────────────
+function extractTextFromPDF(buffer: Buffer): string {
+  const str = buffer.toString('latin1')
+  const textChunks: string[] = []
 
-interface UploadResult {
-  role_code: string
-  target_count: number
-  questions_generated: number
-  questions_inserted: number
-}
+  const btEtRegex = /BT([\s\S]*?)ET/g
+  let match: RegExpExecArray | null
 
-export default function RulebookAdminPage() {
-  const router          = useRouter()
-  const { status }      = useSession()
-  const fileRef         = useRef<HTMLInputElement>(null)
+  while ((match = btEtRegex.exec(str)) !== null) {
+    const block = match[1]
+    const strRegex = /\(([^)\\]*(?:\\.[^)\\]*)*)\)|<([0-9A-Fa-f]+)>/g
+    let strMatch: RegExpExecArray | null
 
-  const [leagues, setLeagues]     = useState<League[]>([])
-  const [leagueId, setLeagueId]   = useState('')
-  const [roles, setRoles]         = useState<RoleRequirement[]>([])
-  const [roleCode, setRoleCode]   = useState('')
-  const [version, setVersion]     = useState('')
-  const [file, setFile]           = useState<File | null>(null)
-  const [uploading, setUploading] = useState(false)
-  const [result, setResult]       = useState<UploadResult | null>(null)
-  const [error, setError]         = useState<string | null>(null)
-  const [loading, setLoading]     = useState(true)
-
-  useEffect(() => {
-    if (status === 'unauthenticated') router.push('/login')
-  }, [status, router])
-
-  useEffect(() => {
-    if (status !== 'authenticated') return
-    fetch('/api/leagues')
-      .then((r) => r.json())
-      .then((data) => {
-        const list = Array.isArray(data) ? data : data.leagues ?? []
-        setLeagues(list.filter((l: any) => l.pitboss_status === 'active' || l.pitboss_status === 'trial'))
-        if (list.length > 0) setLeagueId(list[0].id)
-      })
-      .finally(() => setLoading(false))
-  }, [status])
-
-  useEffect(() => {
-    if (!leagueId) {
-      setRoles([])
-      setRoleCode('')
-      return
-    }
-    fetch(`/api/pitboss/role-requirements?league_id=${leagueId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        const list: RoleRequirement[] = data.data ?? []
-        setRoles(list)
-        setRoleCode(list.length > 0 ? list[0].role_code : '')
-      })
-  }, [leagueId])
-
-  async function handleUpload() {
-    if (!file || !leagueId || !roleCode || !version.trim()) {
-      setError('Please select a league, a role, enter a version, and choose a file.')
-      return
-    }
-
-    setUploading(true)
-    setError(null)
-    setResult(null)
-
-    const form = new FormData()
-    form.append('file', file)
-    form.append('league_id', leagueId)
-    form.append('role_code', roleCode)
-    form.append('version', version.trim())
-
-    try {
-      const res  = await fetch('/api/pitboss/admin/rulebook/upload', {
-        method: 'POST',
-        body:   form,
-      })
-      const data = await res.json()
-
-      if (!res.ok) {
-        setError(data.error ?? 'Upload failed')
-        return
+    while ((strMatch = strRegex.exec(block)) !== null) {
+      if (strMatch[1] !== undefined) {
+        const text = strMatch[1]
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\\(/g, '(')
+          .replace(/\\\)/g, ')')
+          .replace(/\\\\/g, '\\')
+          .replace(/\\(\d{3})/g, (_, oct) =>
+            String.fromCharCode(parseInt(oct, 8))
+          )
+        if (text.trim()) textChunks.push(text)
+      } else if (strMatch[2] !== undefined) {
+        const hex = strMatch[2]
+        let decoded = ''
+        for (let i = 0; i < hex.length; i += 2) {
+          const code = parseInt(hex.slice(i, i + 2), 16)
+          if (code > 31) decoded += String.fromCharCode(code)
+        }
+        if (decoded.trim()) textChunks.push(decoded)
       }
-
-      setResult(data)
-      setFile(null)
-      setVersion('')
-      if (fileRef.current) fileRef.current.value = ''
-      // keep leagueId/roleCode selected so the next upload for the same role is easy
-    } catch {
-      setError('Network error — try again')
-    } finally {
-      setUploading(false)
     }
   }
 
-  if (status === 'loading' || loading) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-rise-black">
-        <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
-      </main>
+  return textChunks.join(' ').replace(/\s+/g, ' ').trim()
+}
+
+// ── Question generation prompt ────────────────────────────────────────────────
+function buildPrompt(leagueName: string, roleCode: string, ruleText: string, count: number): string {
+  const easy = Math.round(count * 0.3)
+  const hard = Math.round(count * 0.25)
+  const medium = count - easy - hard
+
+  return `You are an expert exam question writer for competitive sim racing leagues.
+
+You have been given the official rulebook for the ${leagueName} league (${roleCode} certification track). Generate exactly ${count} multiple-choice exam questions that test knowledge of the rules for this role.
+
+REQUIREMENTS:
+- Generate exactly ${count} questions, no more, no fewer
+- Each question must have exactly 4 options
+- Questions must cover a range of difficulty: ~${easy} easy, ~${medium} medium, ~${hard} hard
+- Questions must cover different categories from the rulebook (racing rules, penalties, governance, attendance, etc.)
+- The correct answer must be unambiguously correct based on the rulebook text
+- Options should be plausible — avoid obviously wrong distractors
+- Do NOT include question numbers in the question text
+
+RULEBOOK TEXT:
+${ruleText.slice(0, 12000)}
+
+Respond ONLY with a valid JSON array of exactly ${count} items. No preamble, no markdown, no explanation. Format:
+[
+  {
+    "category": "string (e.g. Racing Rules, Penalties, Governance)",
+    "difficulty": "easy" | "medium" | "hard",
+    "question": "string",
+    "options": ["option text A", "option text B", "option text C", "option text D"],
+    "correct_answer": "exact text of the correct option (must match one of the options exactly)"
+  }
+]`
+}
+
+// ─── POST handler ─────────────────────────────────────────────────────────────
+export async function POST(req: NextRequest) {
+  const supabase = await createClient()
+
+  // ── Auth: must be commissioner ────────────────────────────────────────────
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  if (authError || !user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const discordId = user.user_metadata?.provider_id ?? user.user_metadata?.sub ?? ''
+
+  const { data: driver } = await supabase
+    .schema('pitboss')
+    .from('drivers')
+    .select('id')
+    .eq('discord_id', discordId)
+    .maybeSingle()
+
+  if (!driver) {
+    return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
+  }
+
+  // ── Parse multipart form ──────────────────────────────────────────────────
+  let formData: FormData
+  try {
+    formData = await req.formData()
+  } catch {
+    return NextResponse.json({ error: 'Invalid form data' }, { status: 400 })
+  }
+
+  const file      = formData.get('file') as File | null
+  const league_id = formData.get('league_id') as string | null
+  const role_code = formData.get('role_code') as string | null
+  const version   = (formData.get('version') as string | null) ?? '1.0'
+
+  if (!file || !league_id || !role_code) {
+    return NextResponse.json(
+      { error: 'file, league_id, and role_code are required' },
+      { status: 400 }
     )
   }
 
-  return (
-    <main className="min-h-screen bg-rise-black px-4 py-8">
-      <button
-        onClick={() => router.back()}
-        className="flex items-center gap-2 text-white/40 text-sm mb-6"
-      >
-        ← Back
-      </button>
+  if (file.type !== 'application/pdf') {
+    return NextResponse.json({ error: 'Only PDF files are accepted' }, { status: 415 })
+  }
 
-      <div className="mb-8">
-        <h1 className="text-2xl font-black text-white">Rulebook Upload</h1>
-        <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
-          Upload a document to auto-generate exam questions
-        </p>
-      </div>
+  // ── Resolve league ────────────────────────────────────────────────────────
+  const { data: league, error: leagueError } = await supabase
+    .schema('rise_os')
+    .from('leagues')
+    .select('id, name, slug')
+    .eq('id', league_id)
+    .maybeSingle()
 
-      {error && (
-        <div className="mb-6 rounded-xl border border-rise-red/40 bg-rise-red/10 px-4 py-3">
-          <p className="text-sm text-rise-red">{error}</p>
-        </div>
-      )}
+  if (leagueError || !league) {
+    return NextResponse.json({ error: 'League not found' }, { status: 404 })
+  }
 
-      {result && (
-        <div className="mb-6 rounded-xl border border-green-500/30 bg-green-500/10 px-4 py-4">
-          <p className="text-xs font-bold text-green-400 uppercase tracking-wide mb-2">Upload Successful</p>
-          <p className="text-sm text-white font-bold">Role: {result.role_code}</p>
-          <p className="text-xs text-white/40 mt-1">
-            {result.questions_inserted} of {result.target_count} target questions generated via the internal LLM
-          </p>
-        </div>
-      )}
+  // ── Verify commissioner membership ────────────────────────────────────────
+  const { data: membership } = await supabase
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('role')
+    .eq('driver_id', driver.id)
+    .eq('league_id', league_id)
+    .maybeSingle()
 
-      <div className="flex flex-col gap-4">
-        {/* League picker */}
-        <div>
-          <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">League</label>
-          <select
-            value={leagueId}
-            onChange={(e) => setLeagueId(e.target.value)}
-            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white"
-          >
-            {leagues.map((l) => (
-              <option key={l.id} value={l.id} className="bg-neutral-900">
-                {l.name}
-              </option>
-            ))}
-          </select>
-        </div>
+  if (!membership || membership.role !== 'commissioner') {
+    return NextResponse.json(
+      { error: 'Only commissioners can upload rulebooks' },
+      { status: 403 }
+    )
+  }
 
-        {/* Role picker */}
-        <div>
-          <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">Certification Role</label>
-          <select
-            value={roleCode}
-            onChange={(e) => setRoleCode(e.target.value)}
-            disabled={roles.length === 0}
-            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white disabled:opacity-40"
-          >
-            {roles.length === 0 && <option className="bg-neutral-900">No roles configured for this league</option>}
-            {roles.map((r) => (
-              <option key={r.role_code} value={r.role_code} className="bg-neutral-900">
-                {r.role_name} ({r.question_count} questions)
-              </option>
-            ))}
-          </select>
-        </div>
+  // ── Resolve target question count from role_requirements ─────────────────
+  const { data: roleReq } = await supabase
+    .schema('pitboss')
+    .from('role_requirements')
+    .select('question_count, role_name')
+    .eq('league_id', league_id)
+    .eq('role_code', role_code)
+    .maybeSingle()
 
-        {/* Version */}
-        <div>
-          <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">Document Version</label>
-          <input
-            type="text"
-            placeholder="e.g. v2.1 or 2027-Season"
-            value={version}
-            onChange={(e) => setVersion(e.target.value)}
-            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder:text-white/20"
-          />
-        </div>
+  const targetCount = roleReq?.question_count ?? DEFAULT_QUESTION_COUNT
 
-        {/* File picker */}
-        <div>
-          <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">Document</label>
-          <div
-            onClick={() => fileRef.current?.click()}
-            className="w-full rounded-xl border border-dashed border-white/20 bg-white/5 px-4 py-6 text-center cursor-pointer"
-          >
-            {file ? (
-              <div>
-                <p className="text-sm font-bold text-white">{file.name}</p>
-                <p className="text-xs text-white/30 mt-1">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-              </div>
-            ) : (
-              <div>
-                <p className="text-sm text-white/40">Tap to select a PDF</p>
-                <p className="text-xs text-white/20 mt-1">PDF only — max 50MB</p>
-              </div>
-            )}
-          </div>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".pdf"
-            className="hidden"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
-        </div>
+  // ── Upload PDF to storage ─────────────────────────────────────────────────
+  const arrayBuffer = await file.arrayBuffer()
+  const buffer      = Buffer.from(arrayBuffer)
+  const filename    = `${league.slug}/rulebook_v${version}_${Date.now()}.pdf`
 
-        {/* Upload button */}
-        <button
-          onClick={handleUpload}
-          disabled={uploading || !file || !leagueId || !roleCode || !version.trim()}
-          className="w-full rounded-xl bg-rise-red py-3 text-sm font-bold text-white disabled:opacity-40 mt-2"
-        >
-          {uploading ? (
-            <span className="flex items-center justify-center gap-2">
-              <span className="h-4 w-4 rounded-full border-2 border-white border-t-transparent animate-spin" />
-              Generating via internal LLM…
-            </span>
-          ) : (
-            'Upload & Generate Exam'
-          )}
-        </button>
+  const { error: uploadError } = await supabase.storage
+    .from('rule-documents')
+    .upload(filename, buffer, {
+      contentType:  'application/pdf',
+      cacheControl: '3600',
+      upsert:       false,
+    })
 
-        <p className="text-xs text-white/20 text-center">
-          The internal PitBoss LLM gateway reads the rulebook and generates questions for the role
-          you selected above, sized to that role&apos;s exam length. New questions are added to the
-          existing pool for this role — they don&apos;t replace it.
-        </p>
-      </div>
-    </main>
-  )
+  if (uploadError) {
+    console.error('[rulebook/upload] storage upload', uploadError)
+    return NextResponse.json({ error: uploadError.message }, { status: 500 })
+  }
+
+  const { data: publicUrlData } = supabase.storage
+    .from('rule-documents')
+    .getPublicUrl(filename)
+
+  // ── Extract text from PDF buffer ──────────────────────────────────────────
+  let ruleText = ''
+  try {
+    ruleText = extractTextFromPDF(buffer)
+  } catch (err) {
+    console.error('[rulebook/upload] PDF extraction', err)
+  }
+
+  if (ruleText.length < 200) {
+    return NextResponse.json(
+      {
+        error:
+          'Could not extract readable text from this PDF. ' +
+          'Please ensure the document is text-based (not scanned).',
+        storage_path: filename,
+        public_url:   publicUrlData?.publicUrl,
+      },
+      { status: 422 }
+    )
+  }
+
+  // ── Call the internal PitBoss LLM gateway to generate questions ───────────
+  let generatedQuestions: Array<{
+    category:       string
+    difficulty:     string
+    question:       string
+    options:        string[]
+    correct_answer: string
+  }> = []
+
+  try {
+    const result = await pbInfer({
+      mode:        'certgen',
+      system:      `You are PitBoss AI, generating certification exam questions for the ${league.name} league.`,
+      prompt:      buildPrompt(league.name, role_code, ruleText, targetCount),
+      max_tokens:  Math.max(2048, targetCount * 160),
+      temperature: 0.5,
+    })
+
+    const raw = result.response.replace(/```json|```/g, '').trim()
+    generatedQuestions = JSON.parse(raw)
+
+    if (!Array.isArray(generatedQuestions)) {
+      throw new Error('Response is not an array')
+    }
+  } catch (err) {
+    console.error('[rulebook/upload] internal LLM generation', err)
+    return NextResponse.json(
+      {
+        error:        'Failed to generate questions from rulebook via the internal LLM',
+        storage_path: filename,
+        public_url:   publicUrlData?.publicUrl,
+      },
+      { status: 500 }
+    )
+  }
+
+  // ── Validate and insert questions ─────────────────────────────────────────
+  const validDifficulties = ['easy', 'medium', 'hard']
+  const toInsert = generatedQuestions
+    .filter(
+      (q) =>
+        q.question &&
+        Array.isArray(q.options) &&
+        q.options.length === 4 &&
+        q.correct_answer &&
+        q.options.includes(q.correct_answer) &&
+        validDifficulties.includes(q.difficulty)
+    )
+    .map((q) => ({
+      league_id,
+      role_code,
+      category:       q.category || 'General',
+      difficulty:     q.difficulty,
+      question:       q.question,
+      options:        q.options,
+      correct_answer: q.correct_answer,
+      active:         true,
+      generated_by:   'internal_llm',
+    }))
+
+  const { data: inserted, error: insertError } = await supabase
+    .schema('pitboss')
+    .from('questions')
+    .insert(toInsert)
+    .select('id')
+
+  if (insertError) {
+    console.error('[rulebook/upload] questions insert', insertError)
+    return NextResponse.json({ error: insertError.message }, { status: 500 })
+  }
+
+  return NextResponse.json({
+    success:             true,
+    storage_path:        filename,
+    public_url:          publicUrlData?.publicUrl,
+    text_length:         ruleText.length,
+    role_code,
+    target_count:        targetCount,
+    questions_generated: generatedQuestions.length,
+    questions_inserted:  inserted?.length ?? 0,
+    skipped:             generatedQuestions.length - (inserted?.length ?? 0),
+    generated_by:        'internal_llm',
+  }, { status: 201 })
 }
