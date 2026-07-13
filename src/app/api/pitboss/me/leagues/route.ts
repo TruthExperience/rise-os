@@ -32,33 +32,37 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
+  console.log('[me/leagues DEBUG] session.user.discordId =', JSON.stringify(session.user.discordId))
+
   const pitboss = getPitboss()
   const riseOs = getRiseOs()
   const publicClient = getPublic()
 
-  const { data: userRecord } = await publicClient
+  const { data: userRecord, error: userErr } = await publicClient
     .from('users')
     .select('id')
     .eq('discord_id', session.user.discordId)
     .single()
 
-  // league_id -> membership info. Only leagues present here are ones the
-  // driver actually belongs to (as a racing driver/steward/etc, or as a
-  // rise_os league admin) — this map defines the full set of "my leagues",
-  // not just role labels for an unrelated full league list.
+  console.log('[me/leagues DEBUG] userRecord =', JSON.stringify(userRecord), 'userErr =', JSON.stringify(userErr))
+
   const membershipMap: Record<string, { role: string; certified: boolean }> = {}
 
-  const { data: driver } = await pitboss
+  const { data: driver, error: driverErr } = await pitboss
     .from('drivers')
     .select('id')
     .eq('discord_id', session.user.discordId)
     .single()
 
+  console.log('[me/leagues DEBUG] driver =', JSON.stringify(driver), 'driverErr =', JSON.stringify(driverErr))
+
   if (driver) {
-    const { data: driverLeagues } = await pitboss
+    const { data: driverLeagues, error: dlErr } = await pitboss
       .from('driver_leagues')
       .select('league_id, role, certified')
       .eq('driver_id', driver.id)
+
+    console.log('[me/leagues DEBUG] driverLeagues =', JSON.stringify(driverLeagues), 'dlErr =', JSON.stringify(dlErr))
 
     for (const dl of driverLeagues ?? []) {
       membershipMap[dl.league_id] = { role: dl.role, certified: Boolean(dl.certified) }
@@ -66,17 +70,19 @@ export async function GET() {
   }
 
   if (userRecord) {
-    const { data: leagueAdmins } = await riseOs
+    const { data: leagueAdmins, error: laErr } = await riseOs
       .from('league_admins')
       .select('league_id, role')
       .eq('user_id', userRecord.id)
 
+    console.log('[me/leagues DEBUG] leagueAdmins =', JSON.stringify(leagueAdmins), 'laErr =', JSON.stringify(laErr))
+
     for (const la of leagueAdmins ?? []) {
-      // Admin roles (commissioner, etc.) have no certification gate —
-      // treat as certified so the UI doesn't show a false "Not Certified".
       membershipMap[la.league_id] = { role: la.role, certified: true }
     }
   }
+
+  console.log('[me/leagues DEBUG] final membershipMap =', JSON.stringify(membershipMap))
 
   const leagueIds = Object.keys(membershipMap)
   if (leagueIds.length === 0) {
