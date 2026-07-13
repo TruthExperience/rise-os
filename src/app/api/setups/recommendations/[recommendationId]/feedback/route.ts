@@ -69,18 +69,53 @@ export async function POST(
   }
 
   // 3. Call the LLM layer (worker-side /setup-feedback — engine stays pure/LLM-free)
-  const llmResult = await pbSetupFeedback(
-    feedback_text,
-    knownParamKeys,
-    {
-      car_class_id:  rec.car_class_id,
-      track_id:      rec.track_id,
-      conditions:    rec.conditions,
-      session_type:  rec.session_type,
-      current_setup: generatedSetup,
-    },
-    rec.league_id
-  );
+  // ADDED — wrap in try/catch. Previously an uncaught exception here (bad
+  // PITBOSS_WORKER_URL, network failure, non-JSON worker response) bypassed
+  // every parse_error/logging path below and surfaced a raw error string
+  // straight to the driver-facing UI ("The string did not match the
+  // expected pattern.").
+  let llmResult;
+  try {
+    llmResult = await pbSetupFeedback(
+      feedback_text,
+      knownParamKeys,
+      {
+        car_class_id:  rec.car_class_id,
+        track_id:      rec.track_id,
+        conditions:    rec.conditions,
+        session_type:  rec.session_type,
+        current_setup: generatedSetup,
+      },
+      rec.league_id
+    );
+  } catch (err) {
+    // ADDED — log this the same way a parse_error is logged, so it shows up
+    // in setup_feedback for review, then return a clean 502 instead of
+    // letting the raw exception bubble to the client unhandled.
+    const detail = err instanceof Error ? err.message : 'Unknown error contacting setup feedback service';
+
+    const { error: logErr } = await supabaseAdmin
+      .schema('pitboss')
+      .from('setup_feedback')
+      .insert({
+        recommendation_id: recommendationId,
+        driver_id:          driver_id ?? rec.driver_id ?? null,
+        feedback_text,
+        llm_adjustments:    [],
+        llm_summary:        null,
+        llm_tags:           { transport_error: true, detail },
+      });
+
+    if (logErr) {
+      // Non-fatal — still return the original transport error to the client.
+      console.error('Failed to log transport-error feedback:', logErr.message);
+    }
+
+    return NextResponse.json(
+      { error: `Setup feedback service unavailable: ${detail}` },
+      { status: 502 }
+    );
+  }
 
   if ('error' in llmResult) {
     return NextResponse.json({ error: llmResult.error }, { status: 502 });
