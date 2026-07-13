@@ -2,6 +2,22 @@
 
 const WORKER_URL = process.env.PITBOSS_WORKER_URL || 'https://pitboss-proxy.truthexper.workers.dev';
 
+// ADDED — catch a malformed env var at module load instead of at request
+// time, where it surfaces as an opaque "string did not match expected
+// pattern" error deep inside fetch/undici's URL parser.
+function validateWorkerUrl(url: string): string {
+  try {
+    new URL(url);
+    return url;
+  } catch {
+    throw new Error(
+      `PITBOSS_WORKER_URL is not a valid URL: ${JSON.stringify(url)}. ` +
+      `Check for stray whitespace, quotes, or a missing protocol in the env var.`
+    );
+  }
+}
+const VALIDATED_WORKER_URL = validateWorkerUrl(WORKER_URL); // ADDED
+
 export type LLMMode = 'fast' | 'primary' | 'reasoning' | 'certgen' | 'quick' | 'steward' | 'coding' | 'vision';
 
 export interface InferOptions {
@@ -81,17 +97,47 @@ function getInternalKey(): string {
   return key;
 }
 
+// ADDED — wrap the fetch + error-text read in try/catch so transport-level
+// failures (bad URL, DNS failure, network drop, worker unreachable) come
+// back as a consistent Error with a readable message instead of whatever
+// raw exception the underlying fetch/URL implementation throws.
 async function workerPost(path: string, body: object): Promise<any> {
-  const res = await fetch(`${WORKER_URL}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'X-PitBoss-Key': getInternalKey(),
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`PitBoss ${path} error ${res.status}: ${await res.text()}`);
-  return res.json();
+  let res: Response;
+  try {
+    res = await fetch(`${VALIDATED_WORKER_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'X-PitBoss-Key': getInternalKey(),
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    // ADDED — normalize transport failures (bad URL, DNS, network) into a
+    // predictable message rather than letting fetch's internal error
+    // (e.g. ada-url's "string did not match the expected pattern") leak
+    // straight to the caller / UI.
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`PitBoss worker request to ${path} failed before reaching the server: ${detail}`);
+  }
+
+  if (!res.ok) {
+    let bodyText = '';
+    try {
+      bodyText = await res.text();
+    } catch {
+      bodyText = '<unreadable response body>';
+    }
+    throw new Error(`PitBoss ${path} error ${res.status}: ${bodyText}`);
+  }
+
+  try {
+    return await res.json();
+  } catch (err) {
+    // ADDED — worker returned a non-JSON 2xx body; surface clearly instead
+    // of throwing an opaque JSON.parse error upstream.
+    throw new Error(`PitBoss ${path} returned a non-JSON response body`);
+  }
 }
 
 export const pbInfer = (opts: InferOptions) =>
@@ -118,6 +164,6 @@ export const pbSetupFeedback = (
   });
 
 export const pbHealth = () =>
-  fetch(`${WORKER_URL}/health`, {
+  fetch(`${VALIDATED_WORKER_URL}/health`, {
     headers: { 'X-PitBoss-Key': getInternalKey() },
   }).then((r) => r.json());
