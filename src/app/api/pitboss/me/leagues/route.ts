@@ -42,7 +42,11 @@ export async function GET() {
     .eq('discord_id', session.user.discordId)
     .single()
 
-  let roleMap: Record<string, string> = {}
+  // league_id -> membership info. Only leagues present here are ones the
+  // driver actually belongs to (as a racing driver/steward/etc, or as a
+  // rise_os league admin) — this map defines the full set of "my leagues",
+  // not just role labels for an unrelated full league list.
+  const membershipMap: Record<string, { role: string; certified: boolean }> = {}
 
   const { data: driver } = await pitboss
     .from('drivers')
@@ -53,11 +57,11 @@ export async function GET() {
   if (driver) {
     const { data: driverLeagues } = await pitboss
       .from('driver_leagues')
-      .select('league_id, role')
+      .select('league_id, role, certified')
       .eq('driver_id', driver.id)
 
     for (const dl of driverLeagues ?? []) {
-      roleMap[dl.league_id] = dl.role
+      membershipMap[dl.league_id] = { role: dl.role, certified: Boolean(dl.certified) }
     }
   }
 
@@ -68,24 +72,32 @@ export async function GET() {
       .eq('user_id', userRecord.id)
 
     for (const la of leagueAdmins ?? []) {
-      roleMap[la.league_id] = la.role
+      // Admin roles (commissioner, etc.) have no certification gate —
+      // treat as certified so the UI doesn't show a false "Not Certified".
+      membershipMap[la.league_id] = { role: la.role, certified: true }
     }
+  }
+
+  const leagueIds = Object.keys(membershipMap)
+  if (leagueIds.length === 0) {
+    return NextResponse.json([])
   }
 
   const { data: leagues, error } = await riseOs
     .from('leagues')
-    .select('id, name, sport, logo_url, is_public, commissioner_id')
+    .select('id, name, sport, logo_url')
+    .in('id', leagueIds)
     .order('name', { ascending: true })
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
   const result = (leagues ?? []).map((l) => ({
+    id: l.id,
     league_id: l.id,
-    name: l.name,
-    sport: l.sport,
-    logo_url: l.logo_url,
-    role: roleMap[l.id] ?? (l.commissioner_id ? 'commissioner' : 'member'),
+    role: membershipMap[l.id].role,
+    certified: membershipMap[l.id].certified,
+    league: { name: l.name, sport: l.sport, logo_url: l.logo_url },
   }))
 
-  return NextResponse.json({ leagues: result })
+  return NextResponse.json(result)
 }
