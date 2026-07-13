@@ -1,19 +1,12 @@
-// src/app/api/setups/recommendations/[recommendationId]/feedback/route.ts
-
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { pbSetupFeedback, type SetupAdjustment } from '@/lib/pitboss-llm';
+import { pbSetupFeedback } from '@/lib/pitboss-llm';
+import { applyFeedbackAdjustments, type FeedbackAdjustment, type GeneratedRecommendation } from '@/lib/pitboss/setup-engine';
+import { fetchParamRanges, fetchOverrides } from '@/lib/pitboss/setup-engine-data';
 
 interface FeedbackRequestBody {
   feedback_text: string;
   driver_id?:    string;
-}
-
-interface ParamRange {
-  param_key:     string;
-  min_value:     number;
-  max_value:     number;
-  default_value: number | null;
 }
 
 export async function POST(
@@ -39,7 +32,7 @@ export async function POST(
   const { data: rec, error: recErr } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_recommendations')
-    .select('id, league_id, car_class_id, track_id, conditions, session_type, driver_id, generated_setup, confidence')
+    .select('id, league_id, car_class_id, track_id, conditions, session_type, driver_id, generated_setup, rationale, confidence, baseline_used, model')
     .eq('id', recommendationId)
     .single();
 
@@ -60,24 +53,20 @@ export async function POST(
     );
   }
 
-  // 2. Pull param ranges for this car class so we can clamp deltas after the LLM responds
-  const { data: ranges, error: rangesErr } = await supabaseAdmin
-    .schema('pitboss')
-    .from('setup_parameter_ranges')
-    .select('param_key, min_value, max_value, default_value')
-    .eq('car_class_id', rec.car_class_id)
-    .in('param_key', knownParamKeys);
-
-  if (rangesErr) {
+  // 2. Load param ranges + overrides — applyFeedbackAdjustments needs these
+  //    for override-aware clamping, not just raw min/max.
+  let paramRanges, overrides;
+  try {
+    [paramRanges, overrides] = await Promise.all([
+      fetchParamRanges(rec.car_class_id, rec.session_type),
+      fetchOverrides(rec.track_id, rec.car_class_id),
+    ]);
+  } catch (err) {
     return NextResponse.json(
-      { error: `Failed to load param ranges: ${rangesErr.message}` },
+      { error: err instanceof Error ? err.message : 'Failed to load setup engine inputs' },
       { status: 500 }
     );
   }
-
-  const rangeMap = new Map<string, ParamRange>(
-    (ranges ?? []).map((r) => [r.param_key, r])
-  );
 
   // 3. Call the LLM layer (worker-side /setup-feedback — engine stays pure/LLM-free)
   const llmResult = await pbSetupFeedback(
@@ -108,52 +97,33 @@ export async function POST(
         feedback_text,
         llm_adjustments:    [],
         llm_summary:        null,
-        llm_tags:           {
-          parse_error: true,
-          raw:         llmResult.raw ?? null,
-          model:       llmResult.model,
-        },
+        llm_tags:           { parse_error: true, raw: llmResult.raw ?? null, model: llmResult.model },
       });
 
     if (logErr) {
-      return NextResponse.json(
-        { error: `Failed to log feedback: ${logErr.message}` },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: `Failed to log feedback: ${logErr.message}` }, { status: 500 });
     }
 
     return NextResponse.json(
-      {
-        adjustments: [],
-        summary: 'Model response could not be parsed. Flagged for manual review.',
-        parse_error: true,
-        resulting_recommendation_id: null,
-      },
+      { adjustments: [], summary: 'Model response could not be parsed. Flagged for manual review.', parse_error: true, resulting_recommendation_id: null },
       { status: 200 }
     );
   }
 
-  // 5. Defense-in-depth: re-validate + clamp every adjustment, never trust one validation layer
-  const cleanAdjustments: SetupAdjustment[] = [];
+  // 5. Defense-in-depth: re-validate shape before handing to the engine.
+  //    The engine itself will also silently ignore any param_key it doesn't
+  //    recognize (see applyFeedbackAdjustments), but we still gate here so
+  //    we can tell the difference between "nothing to apply" and "engine
+  //    rejected everything" for the response.
+  const validated: FeedbackAdjustment[] = [];
   for (const adj of llmResult.adjustments) {
     if (!knownParamKeys.includes(adj.param_key)) continue;
     if (typeof adj.delta !== 'number' || !Number.isFinite(adj.delta)) continue;
     if (!['low', 'medium', 'high'].includes(adj.confidence)) continue;
-
-    const range = rangeMap.get(adj.param_key);
-    if (range) {
-      const current = generatedSetup[adj.param_key] ?? range.default_value ?? 0;
-      const proposed = current + adj.delta;
-      const clamped = Math.min(range.max_value, Math.max(range.min_value, proposed));
-      // Re-express delta in terms of the clamped result so downstream math stays consistent
-      adj.delta = clamped - current;
-    }
-
-    cleanAdjustments.push(adj);
+    validated.push({ param_key: adj.param_key, delta: adj.delta, reason: adj.reasoning });
   }
 
-  // 6. No valid adjustments — log feedback, but don't create a new recommendation
-  if (cleanAdjustments.length === 0) {
+  if (validated.length === 0) {
     const { error: logErr } = await supabaseAdmin
       .schema('pitboss')
       .from('setup_feedback')
@@ -167,48 +137,53 @@ export async function POST(
       });
 
     if (logErr) {
-      return NextResponse.json(
-        { error: `Failed to log feedback: ${logErr.message}` },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: `Failed to log feedback: ${logErr.message}` }, { status: 500 });
     }
 
     return NextResponse.json(
-      {
-        adjustments: [],
-        summary: llmResult.summary || 'No valid adjustments could be derived from this feedback.',
-        parse_error: false,
-        resulting_recommendation_id: null,
-      },
+      { adjustments: [], summary: llmResult.summary || 'No valid adjustments could be derived from this feedback.', parse_error: false, resulting_recommendation_id: null },
       { status: 200 }
     );
   }
 
-  // 7. Build the adjusted setup and insert a new recommendation, chained via parent_recommendation_id
-  const adjustedSetup = { ...generatedSetup };
-  for (const adj of cleanAdjustments) {
-    adjustedSetup[adj.param_key] = (adjustedSetup[adj.param_key] ?? 0) + adj.delta;
-  }
+  // 6. Let the engine apply the deltas — override-aware clamp, per-round cap,
+  //    step-rounding, rationale tracking, and confidence decay all live here.
+  const base: GeneratedRecommendation = {
+    generated_setup: generatedSetup,
+    rationale:        (rec.rationale ?? {}) as GeneratedRecommendation['rationale'],
+    confidence:       Number(rec.confidence),
+    baseline_used:    Boolean(rec.baseline_used),
+    model:            rec.model,
+  };
 
-  const feedbackTags = cleanAdjustments.map((a) => a.param_key);
+  const adjustedResult = applyFeedbackAdjustments({
+    base,
+    paramRanges,
+    overrides,
+    adjustments: validated,
+  });
 
+  const feedbackTags = validated.map((a) => a.param_key);
+
+  // 7. Insert the adjusted recommendation, chained via parent_recommendation_id
   const { data: newRec, error: insertRecErr } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_recommendations')
     .insert({
-      league_id:                rec.league_id,
-      car_class_id:              rec.car_class_id,
-      track_id:                  rec.track_id,
-      conditions:                rec.conditions,
-      session_type:              rec.session_type,
-      driver_id:                  driver_id ?? rec.driver_id ?? null,
-      generated_setup:            adjustedSetup,
-      baseline_used:              false,
-      model:                      llmResult.model,
-      confidence:                 rec.confidence,
-      parent_recommendation_id:   recommendationId,
-      feedback_tags:              feedbackTags,
-      adjustment_summary:         llmResult.summary,
+      league_id:                 rec.league_id,
+      car_class_id:               rec.car_class_id,
+      track_id:                   rec.track_id,
+      conditions:                 rec.conditions,
+      session_type:               rec.session_type,
+      driver_id:                   driver_id ?? rec.driver_id ?? null,
+      generated_setup:             adjustedResult.generated_setup,
+      rationale:                   adjustedResult.rationale,
+      baseline_used:               adjustedResult.baseline_used,
+      model:                       adjustedResult.model,
+      confidence:                  adjustedResult.confidence,
+      parent_recommendation_id:    recommendationId,
+      feedback_tags:               feedbackTags,
+      adjustment_summary:          llmResult.summary,
     })
     .select('id')
     .single();
@@ -228,7 +203,7 @@ export async function POST(
       recommendation_id:           recommendationId,
       driver_id:                    driver_id ?? rec.driver_id ?? null,
       feedback_text,
-      llm_adjustments:              cleanAdjustments,
+      llm_adjustments:              validated,
       llm_summary:                  llmResult.summary,
       llm_tags:                     { model: llmResult.model, provider: llmResult.provider },
       resulting_recommendation_id:  newRec.id,
@@ -237,18 +212,15 @@ export async function POST(
     .single();
 
   if (insertFeedbackErr) {
-    return NextResponse.json(
-      { error: `Failed to log feedback: ${insertFeedbackErr.message}` },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: `Failed to log feedback: ${insertFeedbackErr.message}` }, { status: 500 });
   }
 
   return NextResponse.json(
     {
       feedback_id:                 feedbackRow.id,
       resulting_recommendation_id: newRec.id,
-      adjustments:                 cleanAdjustments,
-      adjusted_setup:               adjustedSetup,
+      adjustments:                 validated,
+      adjusted_setup:               adjustedResult.generated_setup,
       summary:                      llmResult.summary,
       disclaimer:                   llmResult.disclaimer,
       parse_error:                  false,
