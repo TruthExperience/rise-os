@@ -13,7 +13,7 @@ export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const discordId = (session.user as any).discord_id;
+  const discordId = (session.user as any).discordId;
 
   const { data: driver } = await supabaseAdmin
     .from("drivers")
@@ -36,7 +36,7 @@ export async function POST(req: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const discordId = (session.user as any).discord_id;
+  const discordId = (session.user as any).discordId;
   const { league_id } = await req.json();
 
   const { data: driver } = await supabaseAdmin
