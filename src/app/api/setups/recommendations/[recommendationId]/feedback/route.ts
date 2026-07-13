@@ -1,7 +1,7 @@
 // src/app/api/setups/recommendations/[recommendationId]/feedback/route.ts
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createAdminClient } from '@/lib/supabase/admin';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import { pbSetupFeedback, type SetupAdjustment } from '@/lib/pitboss-llm';
 
 interface FeedbackRequestBody {
@@ -35,10 +35,8 @@ export async function POST(
     return NextResponse.json({ error: 'feedback_text is required' }, { status: 400 });
   }
 
-  const supabase = createAdminClient();
-
   // 1. Load the recommendation being reacted to
-  const { data: rec, error: recErr } = await supabase
+  const { data: rec, error: recErr } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_recommendations')
     .select('id, league_id, car_class_id, track_id, conditions, session_type, driver_id, generated_setup, confidence')
@@ -63,7 +61,7 @@ export async function POST(
   }
 
   // 2. Pull param ranges for this car class so we can clamp deltas after the LLM responds
-  const { data: ranges, error: rangesErr } = await supabase
+  const { data: ranges, error: rangesErr } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_parameter_ranges')
     .select('param_key, min_value, max_value, default_value')
@@ -101,7 +99,7 @@ export async function POST(
 
   // 4. Parse failure — log the feedback, don't fabricate adjustments, flag for manual review
   if (llmResult.parse_error) {
-    const { error: logErr } = await supabase
+    const { error: logErr } = await supabaseAdmin
       .schema('pitboss')
       .from('setup_feedback')
       .insert({
@@ -156,7 +154,7 @@ export async function POST(
 
   // 6. No valid adjustments — log feedback, but don't create a new recommendation
   if (cleanAdjustments.length === 0) {
-    const { error: logErr } = await supabase
+    const { error: logErr } = await supabaseAdmin
       .schema('pitboss')
       .from('setup_feedback')
       .insert({
@@ -194,7 +192,7 @@ export async function POST(
 
   const feedbackTags = cleanAdjustments.map((a) => a.param_key);
 
-  const { data: newRec, error: insertRecErr } = await supabase
+  const { data: newRec, error: insertRecErr } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_recommendations')
     .insert({
@@ -223,7 +221,7 @@ export async function POST(
   }
 
   // 8. Log the feedback, linked to the recommendation it produced
-  const { data: feedbackRow, error: insertFeedbackErr } = await supabase
+  const { data: feedbackRow, error: insertFeedbackErr } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_feedback')
     .insert({
