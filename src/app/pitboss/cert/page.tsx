@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 
 interface League {
@@ -25,6 +25,8 @@ interface RoleRequirement {
 
 export default function CertPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const preselectLeagueId = searchParams.get('league')
   const { status } = useSession()
   const [leagues, setLeagues]               = useState<League[]>([])
   const [selectedLeague, setSelectedLeague] = useState<League | null>(null)
@@ -53,6 +55,14 @@ export default function CertPage() {
       .catch(() => setError('Failed to load leagues'))
       .finally(() => setLoading(false))
   }, [status])
+
+  // If a league was passed in via ?league=, auto-select it once the
+  // leagues list has loaded, so deep links skip straight to role selection.
+  useEffect(() => {
+    if (!preselectLeagueId || leagues.length === 0 || selectedLeague) return
+    const match = leagues.find((l) => l.id === preselectLeagueId)
+    if (match) selectLeague(match)
+  }, [preselectLeagueId, leagues])
 
   // Load roles + cert status when a league is selected
   async function selectLeague(league: League) {
