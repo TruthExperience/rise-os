@@ -51,7 +51,7 @@ export default function PitBossPage() {
   async function fetchMemberships() {
     const res = await fetch("/api/pitboss/drivers/me/leagues");
     const data = await res.json();
-    setMemberships(Array.isArray(data) ? data : []);
+    setMemberships(Array.isArray(data.result) ? data.result : []);
   }
 
   async function saveDisplayName() {
