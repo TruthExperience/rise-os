@@ -169,8 +169,6 @@ export default function DriverProfilePage() {
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState<'overview' | 'licences' | 'certs' | 'contract' | 'stats' | 'career' | 'penalties'>('overview')
 
-  const isOwnProfile = session?.user?.id === id
-
   useEffect(() => {
     loadProfile()
   }, [id, leagueFilter])
@@ -208,6 +206,13 @@ export default function DriverProfilePage() {
   }
 
   const { driver, leagues, licences, certifications, contracts, results, penalties } = profile
+
+  // session.user.id is a Discord snowflake (next-auth jwt strategy,
+  // token.sub seeded from the Discord profile id) — NOT a pitboss.drivers.id,
+  // which is what the [id] route param is. Compare on discord_id instead,
+  // which next-auth exposes as session.user.discordId and which is present
+  // natively on the loaded driver row.
+  const isOwnProfile = session?.user?.discordId === driver.discord_id
 
   const primaryFranchise = contracts[0]?.franchise
   const bannerColor = primaryFranchise?.primary_color ?? '#E8284A'
