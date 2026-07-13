@@ -13,9 +13,32 @@ export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const discordId = (session.user as any).discord_id;
-  const username = (session.user as any).name ?? session.user.email;
-  const avatar = (session.user as any).image ?? null;
+  const discordId = (session.user as any).discordId;
+  if (!discordId) {
+    return NextResponse.json({ error: "Missing discordId on session" }, { status: 401 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("drivers")
+    .select()
+    .eq("discord_id", discordId)
+    .single();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json(data);
+}
+
+export async function POST() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const discordId = (session.user as any).discordId;
+  if (!discordId) {
+    return NextResponse.json({ error: "Missing discordId on session" }, { status: 401 });
+  }
+
+  const username = (session.user as any).username ?? session.user.email;
+  const avatar = (session.user as any).avatar ?? null;
 
   const { data, error } = await supabaseAdmin
     .from("drivers")
@@ -38,7 +61,11 @@ export async function PATCH(req: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const discordId = (session.user as any).discord_id;
+  const discordId = (session.user as any).discordId;
+  if (!discordId) {
+    return NextResponse.json({ error: "Missing discordId on session" }, { status: 401 });
+  }
+
   const body = await req.json();
   const { display_name } = body;
 
