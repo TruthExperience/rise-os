@@ -29,10 +29,8 @@ function getPublic() {
 export async function GET() {
   const session = await getServerSession(authOptions)
   if (!session?.user?.discordId) {
-    return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
+    return NextResponse.json({ error: 'Unauthenticated', debug: { hadSession: !!session, sessionUser: session?.user ?? null } }, { status: 401 })
   }
-
-  console.log('[me/leagues DEBUG] session.user.discordId =', JSON.stringify(session.user.discordId))
 
   const pitboss = getPitboss()
   const riseOs = getRiseOs()
@@ -44,8 +42,6 @@ export async function GET() {
     .eq('discord_id', session.user.discordId)
     .single()
 
-  console.log('[me/leagues DEBUG] userRecord =', JSON.stringify(userRecord), 'userErr =', JSON.stringify(userErr))
-
   const membershipMap: Record<string, { role: string; certified: boolean }> = {}
 
   const { data: driver, error: driverErr } = await pitboss
@@ -54,39 +50,48 @@ export async function GET() {
     .eq('discord_id', session.user.discordId)
     .single()
 
-  console.log('[me/leagues DEBUG] driver =', JSON.stringify(driver), 'driverErr =', JSON.stringify(driverErr))
-
+  let driverLeagues: any = null
+  let dlErr: any = null
   if (driver) {
-    const { data: driverLeagues, error: dlErr } = await pitboss
+    const res = await pitboss
       .from('driver_leagues')
       .select('league_id, role, certified')
       .eq('driver_id', driver.id)
-
-    console.log('[me/leagues DEBUG] driverLeagues =', JSON.stringify(driverLeagues), 'dlErr =', JSON.stringify(dlErr))
+    driverLeagues = res.data
+    dlErr = res.error
 
     for (const dl of driverLeagues ?? []) {
       membershipMap[dl.league_id] = { role: dl.role, certified: Boolean(dl.certified) }
     }
   }
 
+  let leagueAdmins: any = null
+  let laErr: any = null
   if (userRecord) {
-    const { data: leagueAdmins, error: laErr } = await riseOs
+    const res = await riseOs
       .from('league_admins')
       .select('league_id, role')
       .eq('user_id', userRecord.id)
-
-    console.log('[me/leagues DEBUG] leagueAdmins =', JSON.stringify(leagueAdmins), 'laErr =', JSON.stringify(laErr))
+    leagueAdmins = res.data
+    laErr = res.error
 
     for (const la of leagueAdmins ?? []) {
       membershipMap[la.league_id] = { role: la.role, certified: true }
     }
   }
 
-  console.log('[me/leagues DEBUG] final membershipMap =', JSON.stringify(membershipMap))
+  const debug = {
+    discordId: session.user.discordId,
+    userRecord, userErr,
+    driver, driverErr,
+    driverLeagues, dlErr,
+    leagueAdmins, laErr,
+    membershipMap,
+  }
 
   const leagueIds = Object.keys(membershipMap)
   if (leagueIds.length === 0) {
-    return NextResponse.json([])
+    return NextResponse.json({ result: [], debug })
   }
 
   const { data: leagues, error } = await riseOs
@@ -95,7 +100,7 @@ export async function GET() {
     .in('id', leagueIds)
     .order('name', { ascending: true })
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return NextResponse.json({ error: error.message, debug }, { status: 500 })
 
   const result = (leagues ?? []).map((l) => ({
     id: l.id,
@@ -105,5 +110,5 @@ export async function GET() {
     league: { name: l.name, sport: l.sport, logo_url: l.logo_url },
   }))
 
-  return NextResponse.json(result)
+  return NextResponse.json({ result, debug })
 }
