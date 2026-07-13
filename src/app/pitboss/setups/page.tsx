@@ -21,6 +21,21 @@ interface Track {
   archetype: string | null
 }
 
+interface CarDriver {
+  id: string
+  team_id: string
+  driver_name: string
+  car_number: string | null
+}
+
+interface CarTeam {
+  id: string
+  team_name: string
+  short_name: string | null
+  logo_url: string | null
+  drivers: CarDriver[]
+}
+
 interface Rationale {
   value: number
   unit: string
@@ -67,6 +82,14 @@ export default function SetupsPage() {
   const [conditions, setConditions]   = useState<typeof CONDITIONS[number]>('dry')
   const [sessionType, setSessionType] = useState<typeof SESSION_TYPES[number]>('race')
 
+  // Team / driver picker — independent of setup-engine track-generation work.
+  // Scoped to the selected car class since car_class_teams is keyed that way.
+  const [teams, setTeams]                 = useState<CarTeam[]>([])
+  const [loadingTeams, setLoadingTeams]     = useState(false)
+  const [teamId, setTeamId]                 = useState('')
+  const [driverId, setDriverId]             = useState('')
+  const [driverFreetext, setDriverFreetext] = useState('')
+
   const [generating, setGenerating]   = useState(false)
   const [error, setError]             = useState('')
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null)
@@ -78,6 +101,23 @@ export default function SetupsPage() {
   useEffect(() => {
     loadOptions()
   }, [])
+
+  // Reload teams whenever the car class changes, and reset any picked
+  // team/driver since they belong to the previous car class's roster.
+  useEffect(() => {
+    setTeamId('')
+    setDriverId('')
+    setDriverFreetext('')
+    setTeams([])
+    if (!carClassId) return
+
+    setLoadingTeams(true)
+    fetch(`/api/pitboss/setups/teams?car_class_id=${carClassId}`)
+      .then((res) => res.json())
+      .then((data) => setTeams(data.teams ?? []))
+      .catch(() => setTeams([]))
+      .finally(() => setLoadingTeams(false))
+  }, [carClassId])
 
   async function loadOptions() {
     setLoadingOptions(true)
@@ -114,6 +154,9 @@ export default function SetupsPage() {
           // pitboss.drivers.id. The API route resolves this server-side via
           // resolveDriverIdFromSession() against pitboss.drivers.discord_id.
           discord_id: session?.user?.discordId ?? null,
+          car_team_id:   teamId || null,
+          car_driver_id: driverId || null,
+          car_driver_name_freetext: !driverId ? (driverFreetext.trim() || null) : null,
         }),
       })
       const data = await res.json()
@@ -144,6 +187,8 @@ export default function SetupsPage() {
   }
 
   const selectedTrack = tracks.find((t) => t.id === trackId)
+  const selectedTeam = teams.find((t) => t.id === teamId)
+  const selectedTeamDrivers = selectedTeam?.drivers ?? []
 
   return (
     <div className="min-h-screen bg-[#1A1A1A] pb-24">
@@ -194,6 +239,59 @@ export default function SetupsPage() {
             <p className="text-gray-500 text-xs mt-1.5 capitalize">{selectedTrack.archetype.replace(/_/g, ' ')}</p>
           )}
         </div>
+
+        <div>
+          <SectionHeader title="Team" />
+          {!carClassId ? (
+            <p className="text-gray-500 text-xs">Select a car class to see teams.</p>
+          ) : loadingTeams ? (
+            <p className="text-gray-500 text-xs">Loading teams…</p>
+          ) : teams.length === 0 ? (
+            <p className="text-gray-500 text-xs">No teams found for this car class.</p>
+          ) : (
+            <select
+              value={teamId}
+              onChange={(e) => {
+                setTeamId(e.target.value)
+                setDriverId('')
+                setDriverFreetext('')
+              }}
+              className="w-full rounded-xl bg-gray-900 border border-gray-800 px-4 py-3 text-white text-sm focus:outline-none focus:border-[#E8284A]"
+            >
+              <option value="">Select a team…</option>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>{t.team_name}</option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {teamId && (
+          <div>
+            <SectionHeader title="Driver" />
+            {selectedTeamDrivers.length > 0 ? (
+              <select
+                value={driverId}
+                onChange={(e) => setDriverId(e.target.value)}
+                className="w-full rounded-xl bg-gray-900 border border-gray-800 px-4 py-3 text-white text-sm focus:outline-none focus:border-[#E8284A]"
+              >
+                <option value="">Select a driver…</option>
+                {selectedTeamDrivers.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.driver_name}{d.car_number ? ` (#${d.car_number})` : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={driverFreetext}
+                onChange={(e) => setDriverFreetext(e.target.value)}
+                placeholder="Driver name (no roster on file for this team)"
+                className="w-full rounded-xl bg-gray-900 border border-gray-800 px-4 py-3 text-white text-sm placeholder-white/20 focus:outline-none focus:border-[#E8284A]"
+              />
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4">
           <div>
