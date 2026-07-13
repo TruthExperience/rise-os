@@ -2,57 +2,27 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { getSupabaseUserId } from "@/lib/getSupabaseUserId";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { db: { schema: "pitboss" } }
+  { db: { schema: "rise_os" } }
 );
 
 export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const discordId = (session.user as any).discordId;
-
-  const { data: driver } = await supabaseAdmin
-    .from("drivers")
-    .select("id")
-    .eq("discord_id", discordId)
-    .single();
-
-  if (!driver) return NextResponse.json([]);
+  const userId = await getSupabaseUserId(session);
+  if (!userId) return NextResponse.json({ leagues: [] });
 
   const { data, error } = await supabaseAdmin
-    .from("driver_leagues")
+    .from("league_memberships") // confirm this is the actual table join_league writes to
     .select("*, league:league_id(*)")
-    .eq("driver_id", driver.id);
+    .eq("user_id", userId);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
-}
 
-export async function POST(req: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  const discordId = (session.user as any).discordId;
-  const { league_id } = await req.json();
-
-  const { data: driver } = await supabaseAdmin
-    .from("drivers")
-    .select("id")
-    .eq("discord_id", discordId)
-    .single();
-
-  if (!driver) return NextResponse.json({ error: "Driver not found" }, { status: 404 });
-
-  const { data, error } = await supabaseAdmin
-    .from("driver_leagues")
-    .insert({ driver_id: driver.id, league_id, role: "driver" })
-    .select()
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
+  return NextResponse.json({ leagues: data ?? [] });
 }
