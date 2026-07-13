@@ -46,14 +46,20 @@ export async function POST(
     .single();
 
   if (recErr || !rec) {
-    return NextResponse.json({ error: `Recommendation not found: ${recErr?.message ?? recommendationId}` }, { status: 404 });
+    return NextResponse.json(
+      { error: `Recommendation not found: ${recErr?.message ?? recommendationId}` },
+      { status: 404 }
+    );
   }
 
   const generatedSetup = (rec.generated_setup ?? {}) as Record<string, number>;
   const knownParamKeys = Object.keys(generatedSetup);
 
   if (knownParamKeys.length === 0) {
-    return NextResponse.json({ error: 'Recommendation has no setup params to adjust against' }, { status: 422 });
+    return NextResponse.json(
+      { error: 'Recommendation has no setup params to adjust against' },
+      { status: 422 }
+    );
   }
 
   // 2. Pull param ranges for this car class so we can clamp deltas after the LLM responds
@@ -65,21 +71,26 @@ export async function POST(
     .in('param_key', knownParamKeys);
 
   if (rangesErr) {
-    return NextResponse.json({ error: `Failed to load param ranges: ${rangesErr.message}` }, { status: 500 });
+    return NextResponse.json(
+      { error: `Failed to load param ranges: ${rangesErr.message}` },
+      { status: 500 }
+    );
   }
 
-  const rangeMap = new Map<string, ParamRange>((ranges ?? []).map((r) => [r.param_key, r]));
+  const rangeMap = new Map<string, ParamRange>(
+    (ranges ?? []).map((r) => [r.param_key, r])
+  );
 
   // 3. Call the LLM layer (worker-side /setup-feedback — engine stays pure/LLM-free)
   const llmResult = await pbSetupFeedback(
     feedback_text,
     knownParamKeys,
     {
-      car_class_id:    rec.car_class_id,
-      track_id:        rec.track_id,
-      conditions:      rec.conditions,
-      session_type:    rec.session_type,
-      current_setup:   generatedSetup,
+      car_class_id:  rec.car_class_id,
+      track_id:      rec.track_id,
+      conditions:    rec.conditions,
+      session_type:  rec.session_type,
+      current_setup: generatedSetup,
     },
     rec.league_id
   );
@@ -99,11 +110,18 @@ export async function POST(
         feedback_text,
         llm_adjustments:    [],
         llm_summary:        null,
-        llm_tags:           { parse_error: true, raw: llmResult.raw ?? null, model: llmResult.model },
+        llm_tags:           {
+          parse_error: true,
+          raw:         llmResult.raw ?? null,
+          model:       llmResult.model,
+        },
       });
 
     if (logErr) {
-      return NextResponse.json({ error: `Failed to log feedback: ${logErr.message}` }, { status: 500 });
+      return NextResponse.json(
+        { error: `Failed to log feedback: ${logErr.message}` },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json(
@@ -151,7 +169,10 @@ export async function POST(
       });
 
     if (logErr) {
-      return NextResponse.json({ error: `Failed to log feedback: ${logErr.message}` }, { status: 500 });
+      return NextResponse.json(
+        { error: `Failed to log feedback: ${logErr.message}` },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json(
@@ -177,25 +198,28 @@ export async function POST(
     .schema('pitboss')
     .from('setup_recommendations')
     .insert({
-      league_id:              rec.league_id,
-      car_class_id:           rec.car_class_id,
-      track_id:               rec.track_id,
-      conditions:             rec.conditions,
-      session_type:           rec.session_type,
-      driver_id:               driver_id ?? rec.driver_id ?? null,
-      generated_setup:         adjustedSetup,
-      baseline_used:           false,
-      model:                   llmResult.model,
-      confidence:              rec.confidence,
-      parent_recommendation_id: recommendationId,
-      feedback_tags:           feedbackTags,
-      adjustment_summary:      llmResult.summary,
+      league_id:                rec.league_id,
+      car_class_id:              rec.car_class_id,
+      track_id:                  rec.track_id,
+      conditions:                rec.conditions,
+      session_type:              rec.session_type,
+      driver_id:                  driver_id ?? rec.driver_id ?? null,
+      generated_setup:            adjustedSetup,
+      baseline_used:              false,
+      model:                      llmResult.model,
+      confidence:                 rec.confidence,
+      parent_recommendation_id:   recommendationId,
+      feedback_tags:              feedbackTags,
+      adjustment_summary:         llmResult.summary,
     })
     .select('id')
     .single();
 
   if (insertRecErr || !newRec) {
-    return NextResponse.json({ error: `Failed to create adjusted recommendation: ${insertRecErr?.message}` }, { status: 500 });
+    return NextResponse.json(
+      { error: `Failed to create adjusted recommendation: ${insertRecErr?.message}` },
+      { status: 500 }
+    );
   }
 
   // 8. Log the feedback, linked to the recommendation it produced
@@ -215,7 +239,10 @@ export async function POST(
     .single();
 
   if (insertFeedbackErr) {
-    return NextResponse.json({ error: `Failed to log feedback: ${insertFeedbackErr.message}` }, { status: 500 });
+    return NextResponse.json(
+      { error: `Failed to log feedback: ${insertFeedbackErr.message}` },
+      { status: 500 }
+    );
   }
 
   return NextResponse.json(
