@@ -18,11 +18,22 @@ export async function GET() {
   if (!userId) return NextResponse.json({ leagues: [] });
 
   const { data, error } = await supabaseAdmin
-    .from("league_memberships") // confirm this is the actual table join_league writes to
-    .select("*, league:league_id(*)")
-    .eq("user_id", userId);
+    .from("league_members")
+    .select("role, league:league_id(id, name, sport, logo_url)")
+    .eq("user_id", userId)
+    .eq("status", "active");
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  return NextResponse.json({ leagues: data ?? [] });
+  const leagues = (data ?? [])
+    .filter((row: any) => row.league)
+    .map((row: any) => ({
+      league_id: row.league.id,
+      name: row.league.name,
+      sport: row.league.sport,
+      logo_url: row.league.logo_url,
+      role: row.role,
+    }));
+
+  return NextResponse.json({ leagues });
 }
