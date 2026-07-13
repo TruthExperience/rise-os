@@ -49,6 +49,15 @@ const navItems = [
       </svg>
     ),
   },
+  {
+    label: "PitBoss",
+    href: "/pitboss",
+    icon: (active: boolean) => (
+      <svg viewBox="0 0 24 24" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2} className="w-6 h-6">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M5 3v18M5 4h11l-2 3.5L16 11H5" />
+      </svg>
+    ),
+  },
 ];
 
 export default function BottomNav() {
