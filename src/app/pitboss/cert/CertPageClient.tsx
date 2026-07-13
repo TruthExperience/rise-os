@@ -23,7 +23,7 @@ interface RoleRequirement {
   certification_id?: string | null
 }
 
-export default function CertPage() {
+export default function CertPageClient() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const preselectLeagueId = searchParams.get('league')
