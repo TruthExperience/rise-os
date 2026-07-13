@@ -227,6 +227,76 @@ REGULATIONS:\n${regsBlock}`;
   }
 });
 
+// ─── /setup-feedback endpoint ─────────────────────────────────────────────────
+
+app.post('/setup-feedback', async (c) => {
+  const { feedback_text, known_param_keys = [], context = {}, league = 'AWC' } = await c.req.json();
+
+  if (!feedback_text || known_param_keys.length === 0) {
+    return c.json({ error: 'feedback_text and known_param_keys are required' }, 400);
+  }
+
+  const paramKeysBlock = known_param_keys.map((k: string) => `- ${k}`).join('\n');
+
+  const system = `You are a race engineering assistant for ${league} that converts driver setup feedback into structured parameter adjustments.
+Return ONLY valid JSON — no markdown, no preamble.
+VALID PARAM KEYS (you may ONLY use keys from this list — never invent a key):
+${paramKeysBlock}
+Shape: { "adjustments": [ { "param_key": string, "delta": number, "confidence": "low"|"medium"|"high", "reasoning": string } ], "summary": string }
+Rules: delta is signed (positive = increase, negative = decrease). If feedback doesn't map to any known param, omit it. If feedback is too vague, return an empty adjustments array and explain why in summary.`;
+
+  const prompt = `CONTEXT: ${JSON.stringify(context)}
+DRIVER FEEDBACK: "${feedback_text}"`;
+
+  const res = await inferWithWaterfall(
+    MODELS.reasoning,
+    {
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user',   content: prompt },
+      ],
+      max_tokens: 1024,
+      temperature: 0.2,
+    },
+    c.env.OPENROUTER_KEY
+  );
+
+  const data: any = await res.json();
+  if (data.error) return Response.json(data, { status: 503 });
+
+  const disclaimer = 'AI-generated suggestion. Review before applying to setup.';
+
+  try {
+    const raw = data.response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const parsed = JSON.parse(raw);
+
+    const validKeys = new Set(known_param_keys);
+    parsed.adjustments = (parsed.adjustments ?? []).filter((a: any) =>
+      a && typeof a.param_key === 'string' && validKeys.has(a.param_key) &&
+      typeof a.delta === 'number' &&
+      ['low', 'medium', 'high'].includes(a.confidence)
+    );
+
+    return Response.json({
+      ...data,
+      league,
+      adjustments: parsed.adjustments,
+      summary: parsed.summary ?? '',
+      disclaimer,
+    });
+  } catch {
+    return Response.json({
+      ...data,
+      league,
+      adjustments: [],
+      summary: '',
+      raw: data.response,
+      parse_error: true,
+      disclaimer,
+    });
+  }
+});
+
 // ─── /health endpoint ─────────────────────────────────────────────────────────
 
 app.get('/health', async (c) => {
