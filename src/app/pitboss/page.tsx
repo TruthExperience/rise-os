@@ -172,7 +172,7 @@ export default function PitBossPage() {
           <div className="flex flex-col gap-3">
             {memberships.map((m) => (
               <div key={m.id}
-                onClick={() => router.push(`/pitboss/certify/${m.league_id}`)}
+                onClick={() => router.push(`/pitboss/cert?league=${m.league_id}`)}
                 className="rounded-2xl border border-white/10 bg-white/5 p-4 cursor-pointer active:scale-95 transition-transform"
               >
                 <div className="flex items-center justify-between">
