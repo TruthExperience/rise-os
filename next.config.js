@@ -40,6 +40,17 @@ const withPWA = require("@ducanh2912/next-pwa").default({
         urlPattern: /^https?:\/\/[^/]+\/pitboss\/drivers\/.*/i,
         handler: "NetworkOnly",
       },
+      {
+        // Same issue again on /pitboss/setups: car class/track pickers and
+        // the generated recommendation are populated client-side per
+        // request, and with cacheOnFrontEndNav + aggressiveFrontEndNavCaching
+        // the service worker could otherwise replay a stale page
+        // shell/RSC payload on in-app navigation instead of hitting the
+        // options endpoint and recommend/feedback routes fresh. Force
+        // NetworkOnly so every visit re-fetches the live page.
+        urlPattern: /^https?:\/\/[^/]+\/pitboss\/setups.*/i,
+        handler: "NetworkOnly",
+      },
     ],
   },
 });
