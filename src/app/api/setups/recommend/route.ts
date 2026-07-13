@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { buildRecommendation } from '@/lib/pitboss/setup-engine';
 import { fetchParamRanges, fetchOverrides, fetchSubmissions } from '@/lib/pitboss/setup-engine-data';
+import { resolveDriverIdFromSession } from '@/lib/pitboss/resolveDriver';
 
 interface RecommendRequestBody {
   league_id?:    string | null;
@@ -9,6 +10,13 @@ interface RecommendRequestBody {
   track_id:      string;
   conditions:    'dry' | 'wet' | 'mixed';
   session_type:  'race' | 'qualifying' | 'sprint' | 'time_trial' | 'practice';
+  // Discord snowflake from session.user.discordId (next-auth jwt strategy,
+  // token.sub / p.id). Resolved server-side to a real pitboss.drivers.id —
+  // never trust a client-supplied driver_id for identity purposes.
+  discord_id?:   string | null;
+  // Optional direct override for non-session callers (e.g. admin tooling,
+  // backfill scripts) that already know the driver row. Ignored if
+  // discord_id resolves successfully.
   driver_id?:    string | null;
 }
 
@@ -20,13 +28,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const { league_id = null, car_class_id, track_id, conditions, session_type, driver_id = null } = body;
+  const {
+    league_id = null,
+    car_class_id,
+    track_id,
+    conditions,
+    session_type,
+    discord_id = null,
+    driver_id: driverIdOverride = null,
+  } = body;
 
   if (!car_class_id || !track_id || !conditions || !session_type) {
     return NextResponse.json(
       { error: 'car_class_id, track_id, conditions, and session_type are required' },
       { status: 400 }
     );
+  }
+
+  // Resolve the real driver id from the Discord snowflake. Falls back to an
+  // explicit driver_id override only when no discord_id was supplied or it
+  // didn't resolve to a known driver — e.g. someone signed in via Discord
+  // but hasn't been added to pitboss.drivers yet.
+  let driver_id: string | null = null;
+  if (discord_id) {
+    driver_id = await resolveDriverIdFromSession(discord_id);
+  }
+  if (!driver_id && driverIdOverride) {
+    driver_id = driverIdOverride;
   }
 
   let paramRanges, overrides, submissions;
