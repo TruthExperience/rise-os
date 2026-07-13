@@ -49,6 +49,24 @@ export type PbStewardResult = {
   disclaimer: string;
 };
 
+export type SetupAdjustment = {
+  param_key:  string;
+  delta:      number;
+  confidence: 'low' | 'medium' | 'high';
+  reasoning:  string;
+};
+
+export type PbSetupFeedbackResult = {
+  adjustments:  SetupAdjustment[];
+  summary:      string;
+  raw?:         string;
+  parse_error?: boolean;
+  model:        string;
+  provider:     string;
+  league:       string;
+  disclaimer:   string;
+};
+
 export type PbInferError = {
   error:       string;
   model?:      string;
@@ -85,6 +103,19 @@ export const pbSteward = (
   league:      string
 ): Promise<PbStewardResult | PbInferError> =>
   workerPost('/steward', { incident, regulations, league });
+
+export const pbSetupFeedback = (
+  feedbackText:    string,
+  knownParamKeys:  string[],
+  context:         Record<string, unknown>,
+  league:          string
+): Promise<PbSetupFeedbackResult | PbInferError> =>
+  workerPost('/setup-feedback', {
+    feedback_text:     feedbackText,
+    known_param_keys:  knownParamKeys,
+    context,
+    league,
+  });
 
 export const pbHealth = () =>
   fetch(`${WORKER_URL}/health`, {
