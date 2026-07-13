@@ -18,6 +18,11 @@ interface RecommendRequestBody {
   // backfill scripts) that already know the driver row. Ignored if
   // discord_id resolves successfully.
   driver_id?:    string | null;
+  // In-game team/driver being tuned for — distinct from the pitboss.drivers
+  // identity above. Links to car_class_teams / car_class_team_drivers.
+  car_team_id?:              string | null;
+  car_driver_id?:            string | null;
+  car_driver_name_freetext?: string | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -36,6 +41,9 @@ export async function POST(req: NextRequest) {
     session_type,
     discord_id = null,
     driver_id: driverIdOverride = null,
+    car_team_id = null,
+    car_driver_id = null,
+    car_driver_name_freetext = null,
   } = body;
 
   if (!car_class_id || !track_id || !conditions || !session_type) {
@@ -101,6 +109,9 @@ export async function POST(req: NextRequest) {
       baseline_used:    engineResult.baseline_used,
       model:            engineResult.model,
       source_submission_ids: submissions.map((s) => s.id),
+      car_team_id,
+      car_driver_id,
+      car_driver_name_freetext,
     })
     .select('id, generated_setup, rationale, confidence, baseline_used, model, created_at')
     .single();
