@@ -1,226 +1,245 @@
-"use client";
+// File: components/pitboss/CareerDriverRatingsCard.tsx
+//
+// Drop this into whatever page hosts the driver/career profile. Handles both
+// states in one component:
+//   - No career_mode_drivers row yet -> "Create Career Driver" form
+//   - Row exists -> live ratings with editable sliders + "Save Changes",
+//     for adjusting stats as the season/career progresses
+//
+// Styled to match SetupsPage: bg-[#1A1A1A], border-gray-800/gray-900,
+// #E8284A accent, uppercase tracking-widest section headers.
 
-import { useEffect, useState } from "react";
+'use client'
 
-type Franchise = {
-  id: string;
-  name: string;
-  abbreviation: string | null;
-  logo_url: string | null;
-  primary_color: string | null;
-  secondary_color: string | null;
-  race_starts: number | null;
-  race_wins: number | null;
-  race_top3: number | null;
-  race_top5: number | null;
-  race_top10: number | null;
-};
+import { useEffect, useState } from 'react'
+import { useSession } from 'next-auth/react'
 
-type Stats = {
-  starts: number;
-  wins: number;
-  top3: number;
-  top5: number;
-  top10: number;
-  poles: number;
-  fastestLaps: number;
-  dnfs: number;
-  points: number;
-};
-
-type TeamBlock = {
-  franchiseId: string | null;
-  franchise: Franchise | null;
-  seasonRange: string | null;
-  stats: Stats;
-};
-
-type CareerResponse = {
-  driverId: string;
-  career: Stats;
-  teams: TeamBlock[];
-};
-
-function ChevronDown({ size = 18, className = "" }: { size?: number; className?: string }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="m6 9 6 6 6-6" />
-    </svg>
-  );
+interface CareerDriver {
+  id: string
+  driver_id: string
+  driver_name: string
+  pace: number
+  racecraft: number
+  awareness: number
+  experience: number
+  focus: number
+  overall: number
+  notes: string | null
+  created_at: string
+  updated_at: string
 }
 
-function StatPill({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex flex-col items-center px-3">
-      <span className="text-2xl font-bold text-white leading-tight">{value}</span>
-      <span className="text-xs uppercase tracking-wide text-gray-400">{label}</span>
-    </div>
-  );
+type StatKey = 'pace' | 'racecraft' | 'awareness' | 'experience' | 'focus'
+
+const STAT_LABELS: { key: StatKey; short: string; label: string }[] = [
+  { key: 'pace', short: 'PAC', label: 'Pace' },
+  { key: 'racecraft', short: 'RAC', label: 'Racecraft' },
+  { key: 'awareness', short: 'AWA', label: 'Awareness' },
+  { key: 'experience', short: 'EXP', label: 'Experience' },
+  { key: 'focus', short: 'FOC', label: 'Focus' },
+]
+
+// Mirrors computeOverall() in the API routes — kept in sync manually for a
+// live preview while dragging. The server always recomputes and is the
+// source of truth; this is display-only.
+function previewOverall(stats: Record<StatKey, number>): number {
+  return Math.round(
+    stats.pace * 0.35 +
+      stats.racecraft * 0.2 +
+      stats.awareness * 0.2 +
+      stats.experience * 0.15 +
+      stats.focus * 0.1
+  )
 }
 
-function TeamCard({ team }: { team: TeamBlock }) {
-  const [open, setOpen] = useState(false);
-  const accent = team.franchise?.primary_color || "#E8284A";
-
+function RatingSlider({
+  short, label, value, onChange, disabled,
+}: {
+  short: string; label: string; value: number
+  onChange: (v: number) => void; disabled?: boolean
+}) {
   return (
-    <div
-      className="relative rounded-xl bg-[#12151c] overflow-hidden"
-      style={{ borderLeft: `4px solid ${accent}` }}
-    >
-      <div className="flex items-center gap-4 p-4">
-        <div className="w-14 h-14 rounded-lg bg-[#1e2330] flex items-center justify-center overflow-hidden shrink-0">
-          {team.franchise?.logo_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={team.franchise.logo_url}
-              alt={team.franchise.name}
-              className="w-full h-full object-contain"
-            />
-          ) : (
-            <span className="text-gray-500 text-xl font-bold">
-              {team.franchise?.abbreviation?.[0] ?? "?"}
-            </span>
-          )}
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <h3 className="text-white font-bold text-lg truncate">
-            {team.franchise?.name ?? "Unassigned"}
-          </h3>
-          {team.franchise?.abbreviation && (
-            <p className="text-sm font-medium" style={{ color: accent }}>
-              {team.franchise.abbreviation}
-            </p>
-          )}
-          {team.seasonRange && (
-            <p className="text-sm text-gray-400">{team.seasonRange}</p>
-          )}
-        </div>
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-white text-xs font-semibold uppercase tracking-wide">
+          <span className="text-[#E8284A] mr-1.5">{short}</span>{label}
+        </span>
+        <span className="text-white font-mono text-sm font-bold">{value}</span>
       </div>
-
-      <div className="flex justify-between px-4 pb-3">
-        <StatPill label="Starts" value={team.stats.starts} />
-        <StatPill label="Wins" value={team.stats.wins} />
-        <StatPill label="Top 3" value={team.stats.top3} />
-        <StatPill label="Top 5" value={team.stats.top5} />
-        <StatPill label="Top 10" value={team.stats.top10} />
-      </div>
-
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between px-4 py-3 border-t border-white/5 text-gray-300 text-sm"
-      >
-        <span>Detailed Stats</span>
-        <ChevronDown
-          size={18}
-          className={`transition-transform ${open ? "rotate-180" : ""}`}
-        />
-      </button>
-
-      {open && (
-        <div className="px-4 pb-4 space-y-4">
-          <div className="grid grid-cols-2 gap-y-2 text-sm text-gray-300">
-            <span>Poles</span>
-            <span className="text-right text-white">{team.stats.poles}</span>
-            <span>Fastest Laps</span>
-            <span className="text-right text-white">{team.stats.fastestLaps}</span>
-            <span>DNFs</span>
-            <span className="text-right text-white">{team.stats.dnfs}</span>
-            <span>Points</span>
-            <span className="text-right text-white">{team.stats.points}</span>
-          </div>
-
-          {team.franchise && team.franchise.race_starts != null && (
-            <div className="pt-3 border-t border-white/5">
-              <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">
-                {team.franchise.name} — All-Time Team Record
-              </p>
-              <div className="flex justify-between">
-                <StatPill label="Starts" value={team.franchise.race_starts ?? 0} />
-                <StatPill label="Wins" value={team.franchise.race_wins ?? 0} />
-                <StatPill label="Top 3" value={team.franchise.race_top3 ?? 0} />
-                <StatPill label="Top 5" value={team.franchise.race_top5 ?? 0} />
-                <StatPill label="Top 10" value={team.franchise.race_top10 ?? 0} />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      <input
+        type="range"
+        min={0}
+        max={99}
+        step={1}
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full h-1.5 rounded-full appearance-none bg-gray-800 accent-[#E8284A] disabled:opacity-40"
+      />
     </div>
-  );
+  )
 }
 
-export default function DriverCareerCard({ driverId }: { driverId: string }) {
-  const [data, setData] = useState<CareerResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export default function CareerDriverRatingsCard() {
+  const { data: session } = useSession()
+  const discordId = session?.user?.discordId
+
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [savedMessage, setSavedMessage] = useState('')
+
+  const [careerDriver, setCareerDriver] = useState<CareerDriver | null>(null)
+  const [driverName, setDriverName] = useState('')
+  const [stats, setStats] = useState<Record<StatKey, number>>({
+    pace: 50, racecraft: 50, awareness: 50, experience: 50, focus: 50,
+  })
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    fetch(`/api/pitboss/drivers/${driverId}/career`)
-      .then((r) => r.json())
-      .then((json) => {
-        if (!cancelled) setData(json);
+    if (!discordId) return
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const res = await fetch(`/api/pitboss/career-drivers?discord_id=${discordId}`)
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error ?? 'Failed to load career driver')
+        if (!cancelled && data.career_driver) {
+          const cd: CareerDriver = data.career_driver
+          setCareerDriver(cd)
+          setDriverName(cd.driver_name)
+          setStats({
+            pace: cd.pace,
+            racecraft: cd.racecraft,
+            awareness: cd.awareness,
+            experience: cd.experience,
+            focus: cd.focus ?? 50,
+          })
+        }
+      } catch (err: any) {
+        if (!cancelled) setError(err.message)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [discordId])
+
+  function updateStat(key: StatKey, value: number) {
+    setStats((prev) => ({ ...prev, [key]: value }))
+    setSavedMessage('')
+  }
+
+  async function handleCreate() {
+    if (!discordId || !driverName.trim()) return
+    setSaving(true)
+    setError('')
+    try {
+      const res = await fetch('/api/pitboss/career-drivers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discord_id: discordId, driver_name: driverName.trim(), ...stats }),
       })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to create career driver')
+      setCareerDriver(data.career_driver)
+      setSavedMessage('Career driver created.')
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleSaveChanges() {
+    if (!discordId || !careerDriver) return
+    setSaving(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/pitboss/career-drivers/${careerDriver.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discord_id: discordId, ...stats }),
       })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [driverId]);
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save changes')
+      setCareerDriver(data.career_driver)
+      setSavedMessage('Ratings updated.')
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   if (loading) {
-    return <div className="text-gray-400 text-sm py-6 text-center">Loading career stats…</div>;
+    return (
+      <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
+        <p className="text-gray-500 text-sm animate-pulse">Loading career driver…</p>
+      </div>
+    )
   }
-  if (error) {
-    return <div className="text-red-400 text-sm py-6 text-center">Couldn't load career stats.</div>;
-  }
-  if (!data) return null;
+
+  const isCreateMode = !careerDriver
+  const overall = previewOverall(stats)
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-xs uppercase tracking-wide text-gray-400 mb-3">
-          Career
+    <div className="rounded-xl border border-gray-800 bg-gray-900 p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-white font-bold text-base uppercase tracking-widest">
+          {isCreateMode ? 'Create Career Driver' : 'Career Driver Ratings'}
         </h2>
-        <div className="rounded-xl bg-[#12151c] border-l-4 border-[#E8284A] flex justify-between px-2 py-4">
-          <StatPill label="Starts" value={data.career.starts} />
-          <StatPill label="Wins" value={data.career.wins} />
-          <StatPill label="Top 3" value={data.career.top3} />
-          <StatPill label="Top 5" value={data.career.top5} />
-          <StatPill label="Top 10" value={data.career.top10} />
+        <div className="text-right">
+          <p className="text-[10px] text-gray-500 uppercase tracking-wide">RTG</p>
+          <p className="text-white font-mono text-xl font-black">{overall}</p>
         </div>
       </div>
 
-      <div>
-        <h2 className="text-xs uppercase tracking-wide text-gray-400 mb-3">
-          Teams Driven For
-        </h2>
-        {data.teams.length === 0 ? (
-          <p className="text-gray-500 text-sm">No results recorded yet.</p>
-        ) : (
-          <div className="space-y-3">
-            {data.teams.map((team) => (
-              <TeamCard key={team.franchiseId ?? "unassigned"} team={team} />
-            ))}
-          </div>
-        )}
+      {isCreateMode ? (
+        <input
+          type="text"
+          value={driverName}
+          onChange={(e) => setDriverName(e.target.value)}
+          placeholder="Driver name"
+          className="w-full rounded-lg bg-black/40 border border-gray-800 px-3 py-2 text-white text-sm placeholder:text-gray-600 focus:outline-none focus:border-[#E8284A]"
+        />
+      ) : (
+        <p className="text-gray-500 text-sm">
+          {careerDriver!.driver_name} · last updated{' '}
+          {new Date(careerDriver!.updated_at).toLocaleDateString()}
+        </p>
+      )}
+
+      <div className="space-y-3">
+        {STAT_LABELS.map(({ key, short, label }) => (
+          <RatingSlider
+            key={key}
+            short={short}
+            label={label}
+            value={stats[key]}
+            onChange={(v) => updateStat(key, v)}
+            disabled={saving}
+          />
+        ))}
       </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-900 bg-red-950/50 px-3 py-2 text-xs text-red-300">
+          {error}
+        </div>
+      )}
+      {savedMessage && !error && (
+        <p className="text-xs text-green-400">{savedMessage}</p>
+      )}
+
+      <button
+        onClick={isCreateMode ? handleCreate : handleSaveChanges}
+        disabled={saving || (isCreateMode && !driverName.trim())}
+        className="w-full rounded-lg bg-[#E8284A] py-2.5 text-sm font-bold text-white disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {saving ? 'Saving…' : isCreateMode ? 'Create Career Driver' : 'Save Changes'}
+      </button>
     </div>
-  );
+  )
 }
