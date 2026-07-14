@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { buildRecommendation } from '@/lib/pitboss/setup-engine';
-import { fetchParamRanges, fetchOverrides, fetchSubmissions } from '@/lib/pitboss/setup-engine-data';
+import { buildRecommendation, applyTeamAndDriverBias } from '@/lib/pitboss/setup-engine';
+import {
+  fetchParamRanges,
+  fetchOverrides,
+  fetchSubmissions,
+  fetchTeamTraits,
+  fetchCareerDriverStats,
+} from '@/lib/pitboss/setup-engine-data';
 import { resolveDriverIdFromSession } from '@/lib/pitboss/resolveDriver';
 
 interface RecommendRequestBody {
@@ -23,6 +29,11 @@ interface RecommendRequestBody {
   car_team_id?:              string | null;
   car_driver_id?:            string | null;
   car_driver_name_freetext?: string | null;
+  // "League Driver" vs "Career Mode Driver" picker: when set to Career Mode
+  // Driver, this points at pitboss.career_mode_drivers and its Pace/
+  // Racecraft/Awareness/Experience stats nudge the setup. car_team_id above
+  // is independent of this — both can be present and stack.
+  career_driver_id?: string | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -44,6 +55,7 @@ export async function POST(req: NextRequest) {
     car_team_id = null,
     car_driver_id = null,
     car_driver_name_freetext = null,
+    career_driver_id = null,
   } = body;
 
   if (!car_class_id || !track_id || !conditions || !session_type) {
@@ -65,12 +77,14 @@ export async function POST(req: NextRequest) {
     driver_id = driverIdOverride;
   }
 
-  let paramRanges, overrides, submissions;
+  let paramRanges, overrides, submissions, teamTraits, careerDriverStats;
   try {
-    [paramRanges, overrides, submissions] = await Promise.all([
+    [paramRanges, overrides, submissions, teamTraits, careerDriverStats] = await Promise.all([
       fetchParamRanges(car_class_id, session_type),
       fetchOverrides(track_id, car_class_id),
       fetchSubmissions({ trackId: track_id, carClassId: car_class_id, conditions, sessionType: session_type }),
+      car_team_id ? fetchTeamTraits(car_team_id) : Promise.resolve(null),
+      career_driver_id ? fetchCareerDriverStats(career_driver_id) : Promise.resolve(null),
     ]);
   } catch (err) {
     return NextResponse.json(
@@ -86,12 +100,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const engineResult = buildRecommendation({
+  let engineResult = buildRecommendation({
     paramRanges,
     overrides,
     submissions,
     requestingLeagueId: league_id,
   });
+
+  // Layer the deterministic team/driver bias on top, only if either source
+  // was actually requested and resolved to a real row.
+  if (teamTraits || careerDriverStats) {
+    engineResult = applyTeamAndDriverBias({
+      base: engineResult,
+      paramRanges,
+      overrides,
+      teamTraits,
+      driverStats: careerDriverStats,
+    });
+  }
 
   const { data: newRec, error: insertErr } = await supabaseAdmin
     .schema('pitboss')
@@ -112,8 +138,9 @@ export async function POST(req: NextRequest) {
       car_team_id,
       car_driver_id,
       car_driver_name_freetext,
+      career_driver_id,
     })
-    .select('id, generated_setup, rationale, confidence, baseline_used, model, created_at')
+    .select('id, generated_setup, rationale, confidence, baseline_used, model, car_team_id, career_driver_id, created_at')
     .single();
 
   if (insertErr || !newRec) {
