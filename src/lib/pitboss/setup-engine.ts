@@ -5,6 +5,8 @@
 // LLM-driven delta layers on top. No Supabase calls in here — routes fetch
 // rows and pass them in, which keeps this testable and reusable.
 
+export type SessionType = "race" | "qualifying" | "sprint" | "time_trial" | "practice";
+
 export interface ParamRange {
   param_key: string;
   param_group: string;
@@ -44,7 +46,13 @@ export interface ParamContributor {
 export interface ParamRationale {
   value: number;
   unit: string;
-  origin: "weighted_average" | "override_default" | "class_default" | "feedback_adjusted" | "trait_adjusted";
+  origin:
+    | "weighted_average"
+    | "override_default"
+    | "class_default"
+    | "feedback_adjusted"
+    | "trait_adjusted"
+    | "session_adjusted";
   override_applied: boolean;
   contributors: ParamContributor[];
   adjustment?: {
@@ -182,9 +190,10 @@ export function buildRecommendation(params: {
 // Shared delta-application core
 // ---------------------------------------------------------------------------
 //
-// Both the LLM feedback loop and the deterministic team/driver trait bias
-// move a generated setup by applying a per-param delta on top of the current
-// value, through the exact same clamp/round/override pipeline.
+// The LLM feedback loop, the deterministic team/driver trait bias, and the
+// deterministic session-type bias all move a generated setup by applying a
+// per-param delta on top of the current value, through the exact same
+// clamp/round/override pipeline.
 
 export interface DeltaAdjustment {
   param_key: string;
@@ -436,6 +445,105 @@ export function applyTeamAndDriverBias(params: {
     origin: "trait_adjusted",
     maxDeltaFraction: MAX_TRAIT_DELTA_FRACTION,
     modelSuffix: "trait-bias-v1",
+    confidenceMultiplier: 1.0,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Session-type bias (deterministic) — NEW
+// ---------------------------------------------------------------------------
+//
+// Reuses the same accumulateWeightedDeltas/applyDeltas core as team/driver
+// bias above. Session type isn't a continuous trait, so it's modeled as a
+// single always-on source (normalizedValue: 1) whose weight map already
+// encodes the full desired shift fraction for that specific session.
+//
+// Qualifying/time trial favor a lower, stiffer, more aggressive car for a
+// single fast lap; race favors stability and tyre/fuel management; sprint
+// sits between race and qualifying; practice stays neutral (empty map) so
+// drivers see the same baseline they'll refine for whatever session comes
+// next.
+
+const MAX_SESSION_DELTA_FRACTION = 0.25;
+
+const SESSION_PARAM_MAP: Record<SessionType, ParamWeightMap> = {
+  qualifying: {
+    front_ride_height: -0.15,
+    rear_ride_height: -0.15,
+    front_suspension: 0.10,
+    rear_suspension: 0.10,
+    front_arb: 0.08,
+    rear_arb: 0.08,
+    diff_adjustment_on_throttle: 0.10,
+    brake_pressure: 0.05,
+    front_wing_aero: -0.05,
+    rear_wing_aero: -0.05,
+  },
+  time_trial: {
+    front_ride_height: -0.20,
+    rear_ride_height: -0.20,
+    front_suspension: 0.15,
+    rear_suspension: 0.15,
+    front_arb: 0.12,
+    rear_arb: 0.12,
+    diff_adjustment_on_throttle: 0.15,
+    brake_pressure: 0.10,
+    front_wing_aero: -0.05,
+    rear_wing_aero: -0.05,
+  },
+  sprint: {
+    front_ride_height: -0.08,
+    rear_ride_height: -0.08,
+    front_suspension: 0.05,
+    rear_suspension: 0.05,
+    front_arb: 0.04,
+    rear_arb: 0.04,
+    diff_adjustment_on_throttle: 0.03,
+    brake_pressure: 0.02,
+    front_wing_aero: 0.02,
+    rear_wing_aero: 0.02,
+  },
+  race: {
+    front_ride_height: 0.05,
+    rear_ride_height: 0.05,
+    front_suspension: -0.05,
+    rear_suspension: -0.05,
+    front_arb: -0.04,
+    rear_arb: -0.04,
+    diff_adjustment_on_throttle: -0.05,
+    brake_pressure: -0.05,
+    front_wing_aero: 0.05,
+    rear_wing_aero: 0.05,
+  },
+  practice: {},
+};
+
+export function applySessionBias(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  sessionType: SessionType;
+}): GeneratedRecommendation {
+  const { base, paramRanges, overrides, sessionType } = params;
+
+  const map = SESSION_PARAM_MAP[sessionType];
+  if (!map || Object.keys(map).length === 0) return base;
+
+  const adjustments = accumulateWeightedDeltas({
+    paramRanges,
+    overrides,
+    sources: [{ label: `session ${sessionType}`, normalizedValue: 1, map }],
+  });
+  if (adjustments.length === 0) return base;
+
+  return applyDeltas({
+    base,
+    paramRanges,
+    overrides,
+    adjustments,
+    origin: "session_adjusted",
+    maxDeltaFraction: MAX_SESSION_DELTA_FRACTION,
+    modelSuffix: "session-bias-v1",
     confidenceMultiplier: 1.0,
   });
 }
