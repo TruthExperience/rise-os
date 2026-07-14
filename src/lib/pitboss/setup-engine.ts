@@ -1,9 +1,9 @@
 // File: src/lib/pitboss/setup-engine.ts
 //
 // Pure aggregation logic for turning multiple community/driver setup
-// submissions into a single recommended setup. No Supabase calls in here —
-// the API route is responsible for fetching rows and passing them in, which
-// keeps this testable and reusable (e.g. from a script or a cron job).
+// submissions into a single recommended setup, plus deterministic and
+// LLM-driven delta layers on top. No Supabase calls in here — routes fetch
+// rows and pass them in, which keeps this testable and reusable.
 
 export interface ParamRange {
   param_key: string;
@@ -44,14 +44,13 @@ export interface ParamContributor {
 export interface ParamRationale {
   value: number;
   unit: string;
-  origin: "weighted_average" | "override_default" | "class_default" | "feedback_adjusted";
+  origin: "weighted_average" | "override_default" | "class_default" | "feedback_adjusted" | "trait_adjusted";
   override_applied: boolean;
   contributors: ParamContributor[];
-  /** Present only when this param was moved by driver feedback. */
   adjustment?: {
     delta: number;
     reason: string;
-    clamped: boolean; // true if the LLM's requested delta was reduced to respect the per-round cap or the param's legal range
+    clamped: boolean;
   };
 }
 
@@ -65,9 +64,6 @@ export interface GeneratedRecommendation {
 
 const MODEL_TAG = "weighted-average-v1";
 
-/**
- * Decimal precision implied by a step size, e.g. 0.01 -> 2, 1 -> 0.
- */
 function decimalsFor(step: number): number {
   const s = step.toString();
   const i = s.indexOf(".");
@@ -85,11 +81,6 @@ export function roundToStep(value: number, min: number, step: number): number {
   return Number(result.toFixed(decimalsFor(step)));
 }
 
-/**
- * Per-submission weight: base confidence, boosted for verified (admin-checked)
- * submissions, and further boosted if it came from the requesting league
- * specifically rather than the global/community pool.
- */
 function submissionWeight(
   sub: SetupSubmissionInput,
   requestingLeagueId: string | null
@@ -188,31 +179,39 @@ export function buildRecommendation(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Feedback-driven adjustment
+// Shared delta-application core
 // ---------------------------------------------------------------------------
 //
-// The LLM never invents raw setup values. It proposes a *delta* per param key
-// plus a reason, in response to a driver's free-text feedback. This function
-// is the only thing allowed to turn those deltas into actual numbers, and it
-// applies the exact same clamp/round/override rules as buildRecommendation,
-// so a feedback round can never push a param outside the car's legal range.
+// Both the LLM feedback loop and the deterministic team/driver trait bias
+// move a generated setup by applying a per-param delta on top of the current
+// value, through the exact same clamp/round/override pipeline.
 
-/** No single feedback round may move a param by more than this fraction of its legal span. */
-const MAX_FEEDBACK_DELTA_FRACTION = 0.25;
-
-export interface FeedbackAdjustment {
+export interface DeltaAdjustment {
   param_key: string;
   delta: number;
   reason: string;
 }
 
-export function applyFeedbackAdjustments(params: {
+function applyDeltas(params: {
   base: GeneratedRecommendation;
   paramRanges: ParamRange[];
   overrides: TrackOverride[];
-  adjustments: FeedbackAdjustment[];
+  adjustments: DeltaAdjustment[];
+  origin: ParamRationale["origin"];
+  maxDeltaFraction: number;
+  modelSuffix: string;
+  confidenceMultiplier: number;
 }): GeneratedRecommendation {
-  const { base, paramRanges, overrides, adjustments } = params;
+  const {
+    base,
+    paramRanges,
+    overrides,
+    adjustments,
+    origin,
+    maxDeltaFraction,
+    modelSuffix,
+    confidenceMultiplier,
+  } = params;
 
   const overrideByKey = new Map(overrides.map((o) => [o.param_key, o]));
   const rangeByKey = new Map(paramRanges.map((r) => [r.param_key, r]));
@@ -224,13 +223,13 @@ export function applyFeedbackAdjustments(params: {
   for (const [key, adj] of adjustmentByKey) {
     const range = rangeByKey.get(key);
     const priorRationale = base.rationale[key];
-    if (!range || !priorRationale) continue; // LLM referenced a param that isn't valid for this car class — ignore it
+    if (!range || !priorRationale) continue;
 
     const override = overrideByKey.get(key);
     const min = override?.override_min ?? range.min_value;
     const max = override?.override_max ?? range.max_value;
     const span = max - min;
-    const deltaCap = span * MAX_FEEDBACK_DELTA_FRACTION;
+    const deltaCap = span * maxDeltaFraction;
 
     const requestedDelta = adj.delta;
     const cappedDelta = clamp(requestedDelta, -deltaCap, deltaCap);
@@ -246,7 +245,7 @@ export function applyFeedbackAdjustments(params: {
     rationale[key] = {
       ...priorRationale,
       value: finalValue,
-      origin: "feedback_adjusted",
+      origin,
       adjustment: {
         delta: Number((finalValue - currentValue).toFixed(decimalsFor(range.step))),
         reason: adj.reason,
@@ -255,19 +254,188 @@ export function applyFeedbackAdjustments(params: {
     };
   }
 
-  // A feedback round is a real revision, not fresh crowd data, so treat it as
-  // slightly less certain than the recommendation it started from -- unless
-  // that recommendation was already a pure baseline default, in which case
-  // there's nothing to lose confidence in.
   const confidence = base.baseline_used
     ? base.confidence
-    : Number(clamp(base.confidence * 0.95, 0.1, 0.95).toFixed(2));
+    : Number(clamp(base.confidence * confidenceMultiplier, 0.1, 0.95).toFixed(2));
 
   return {
     generated_setup,
     rationale,
     confidence,
     baseline_used: base.baseline_used,
-    model: `${base.model}+feedback`,
+    model: `${base.model}+${modelSuffix}`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Feedback-driven adjustment (LLM)
+// ---------------------------------------------------------------------------
+
+const MAX_FEEDBACK_DELTA_FRACTION = 0.25;
+
+export type FeedbackAdjustment = DeltaAdjustment;
+
+export function applyFeedbackAdjustments(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  adjustments: FeedbackAdjustment[];
+}): GeneratedRecommendation {
+  return applyDeltas({
+    ...params,
+    origin: "feedback_adjusted",
+    maxDeltaFraction: MAX_FEEDBACK_DELTA_FRACTION,
+    modelSuffix: "feedback",
+    confidenceMultiplier: 0.95,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Team & driver trait bias (deterministic)
+// ---------------------------------------------------------------------------
+//
+// Team characteristics (car_class_teams, -1..1) and career-mode driver stats
+// (Pace/Racecraft/Awareness/Experience, 0-99, EA's F1 25 scale) each nudge
+// the generated setup by a small fraction of each param's legal span. This
+// is a first-pass tuning table, not derived telemetry — expect to adjust
+// these coefficients once they've been driven.
+
+const MAX_TRAIT_DELTA_FRACTION = 0.15;
+
+export interface TeamTraits {
+  aero_efficiency: number;
+  engine_power: number;
+  mechanical_grip: number;
+  reliability: number;
+  drag_efficiency: number;
+  tyre_wear_management: number;
+}
+
+export interface DriverStats {
+  pace: number; // 0-99
+  racecraft: number; // 0-99
+  awareness: number; // 0-99
+  experience: number; // 0-99
+}
+
+type ParamWeightMap = Partial<Record<string, number>>;
+
+const TEAM_TRAIT_PARAM_MAP: Record<keyof TeamTraits, ParamWeightMap> = {
+  aero_efficiency: { front_wing_aero: -0.06, rear_wing_aero: -0.06 },
+  engine_power: { rear_wing_aero: -0.05 },
+  mechanical_grip: {
+    front_arb: -0.06,
+    rear_arb: -0.06,
+    front_ride_height: -0.04,
+    rear_ride_height: -0.04,
+  },
+  reliability: { brake_pressure: 0.03 },
+  drag_efficiency: { front_wing_aero: 0.05, rear_wing_aero: 0.05 },
+  tyre_wear_management: {
+    front_camber: -0.05,
+    rear_camber: -0.05,
+    front_tyre_pressure: -0.03,
+    rear_tyre_pressure: -0.03,
+  },
+};
+
+const DRIVER_STAT_PARAM_MAP: Record<keyof DriverStats, ParamWeightMap> = {
+  pace: {
+    front_wing_aero: -0.04,
+    rear_wing_aero: -0.04,
+    front_arb: -0.03,
+    rear_arb: -0.03,
+  },
+  racecraft: { diff_adjustment_on_throttle: -0.04, front_brake_bias: 0.02 },
+  awareness: { rear_toe_in: 0.03, front_toe_out: -0.03 },
+  experience: { front_ride_height: -0.03, rear_ride_height: -0.03, brake_pressure: 0.02 },
+};
+
+function normalizeDriverStat(value: number): number {
+  return clamp((value - 50) / 49, -1, 1);
+}
+
+function accumulateWeightedDeltas(params: {
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  sources: Array<{ label: string; normalizedValue: number; map: ParamWeightMap }>;
+}): DeltaAdjustment[] {
+  const { paramRanges, overrides, sources } = params;
+  const overrideByKey = new Map(overrides.map((o) => [o.param_key, o]));
+  const rangeByKey = new Map(paramRanges.map((r) => [r.param_key, r]));
+
+  const totals = new Map<string, { delta: number; reasons: string[] }>();
+
+  for (const source of sources) {
+    if (source.normalizedValue === 0) continue;
+    for (const [paramKey, weightPerUnit] of Object.entries(source.map)) {
+      if (!weightPerUnit) continue;
+      const range = rangeByKey.get(paramKey);
+      if (!range) continue;
+      const override = overrideByKey.get(paramKey);
+      const min = override?.override_min ?? range.min_value;
+      const max = override?.override_max ?? range.max_value;
+      const span = max - min;
+
+      const delta = span * weightPerUnit * source.normalizedValue;
+      const entry = totals.get(paramKey) ?? { delta: 0, reasons: [] };
+      entry.delta += delta;
+      entry.reasons.push(source.label);
+      totals.set(paramKey, entry);
+    }
+  }
+
+  return Array.from(totals.entries()).map(([param_key, { delta, reasons }]) => ({
+    param_key,
+    delta,
+    reason: `Adjusted for ${reasons.join(", ")}`,
+  }));
+}
+
+export function applyTeamAndDriverBias(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  teamTraits?: TeamTraits | null;
+  driverStats?: DriverStats | null;
+}): GeneratedRecommendation {
+  const { base, paramRanges, overrides, teamTraits, driverStats } = params;
+
+  const sources: Array<{ label: string; normalizedValue: number; map: ParamWeightMap }> = [];
+
+  if (teamTraits) {
+    for (const key of Object.keys(TEAM_TRAIT_PARAM_MAP) as Array<keyof TeamTraits>) {
+      sources.push({
+        label: `team ${key.replace(/_/g, " ")}`,
+        normalizedValue: clamp(teamTraits[key] ?? 0, -1, 1),
+        map: TEAM_TRAIT_PARAM_MAP[key],
+      });
+    }
+  }
+
+  if (driverStats) {
+    for (const key of Object.keys(DRIVER_STAT_PARAM_MAP) as Array<keyof DriverStats>) {
+      sources.push({
+        label: `driver ${key}`,
+        normalizedValue: normalizeDriverStat(driverStats[key] ?? 50),
+        map: DRIVER_STAT_PARAM_MAP[key],
+      });
+    }
+  }
+
+  if (sources.length === 0) return base;
+
+  const adjustments = accumulateWeightedDeltas({ paramRanges, overrides, sources });
+  if (adjustments.length === 0) return base;
+
+  return applyDeltas({
+    base,
+    paramRanges,
+    overrides,
+    adjustments,
+    origin: "trait_adjusted",
+    maxDeltaFraction: MAX_TRAIT_DELTA_FRACTION,
+    modelSuffix: "trait-bias-v1",
+    confidenceMultiplier: 1.0,
+  });
 }
