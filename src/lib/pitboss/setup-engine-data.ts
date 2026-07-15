@@ -138,3 +138,30 @@ export async function fetchCareerDriverStats(careerDriverId: string): Promise<Dr
     experience: Number(data.experience ?? 50),
   };
 }
+
+export interface DriverStyleProfileData {
+  car_feel_preference: string;
+  preferred_race_length: string;
+  assists: Record<string, unknown>;
+}
+
+export async function fetchDriverStyleProfile(
+  driverId: string
+): Promise<DriverStyleProfileData | null> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("driver_style_profiles")
+    .select("car_feel_preference, preferred_race_length, assists")
+    .eq("driver_id", driverId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to load driver style profile: ${error.message}`);
+  if (!data) return null;
+
+  return {
+    car_feel_preference: data.car_feel_preference,
+    preferred_race_length: data.preferred_race_length,
+    assists: (data.assists as Record<string, unknown>) ?? {},
+  };
+}
