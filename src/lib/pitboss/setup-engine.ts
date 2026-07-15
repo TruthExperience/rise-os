@@ -547,3 +547,92 @@ export function applySessionBias(params: {
     confidenceMultiplier: 1.0,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Driver style / car feel bias (deterministic) — NEW
+// ---------------------------------------------------------------------------
+//
+// Reuses the same accumulateWeightedDeltas/applyDeltas core as team/driver
+// and session bias above. car_feel_preference comes from the driver style
+// questionnaire (pitboss.driver_style_profiles) and is a categorical
+// self-report, not a continuous trait, so — same pattern as session bias —
+// it's modeled as a single always-on source (normalizedValue: 1) whose
+// weight map already encodes the full desired shift for that preference.
+// "balanced" is intentionally an empty map: no bias, same baseline everyone
+// else gets.
+
+export type CarFeelPreference =
+  | "loose_oversteer"
+  | "planted_understeer"
+  | "balanced"
+  | "aggressive_rotation"
+  | "stable_predictable";
+
+const MAX_STYLE_DELTA_FRACTION = 0.15;
+
+const CAR_FEEL_PARAM_MAP: Record<CarFeelPreference, ParamWeightMap> = {
+  loose_oversteer: {
+    rear_wing_aero: -0.06,
+    rear_arb: -0.06,
+    rear_ride_height: -0.04,
+    diff_adjustment_on_throttle: 0.06,
+  },
+  planted_understeer: {
+    front_wing_aero: 0.06,
+    front_arb: 0.05,
+    rear_wing_aero: 0.03,
+    diff_adjustment_on_throttle: -0.04,
+  },
+  balanced: {},
+  aggressive_rotation: {
+    rear_wing_aero: -0.10,
+    rear_arb: -0.08,
+    rear_ride_height: -0.06,
+    diff_adjustment_on_throttle: 0.10,
+    rear_toe_in: -0.03,
+  },
+  stable_predictable: {
+    front_wing_aero: 0.05,
+    rear_wing_aero: 0.05,
+    front_arb: -0.03,
+    rear_arb: -0.03,
+    diff_adjustment_on_throttle: -0.05,
+  },
+};
+
+export function applyDriverStyleBias(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  carFeelPreference?: CarFeelPreference | null;
+}): GeneratedRecommendation {
+  const { base, paramRanges, overrides, carFeelPreference } = params;
+
+  if (!carFeelPreference) return base;
+  const map = CAR_FEEL_PARAM_MAP[carFeelPreference];
+  if (!map || Object.keys(map).length === 0) return base;
+
+  const adjustments = accumulateWeightedDeltas({
+    paramRanges,
+    overrides,
+    sources: [
+      {
+        label: `driver style ${carFeelPreference.replace(/_/g, " ")}`,
+        normalizedValue: 1,
+        map,
+      },
+    ],
+  });
+  if (adjustments.length === 0) return base;
+
+  return applyDeltas({
+    base,
+    paramRanges,
+    overrides,
+    adjustments,
+    origin: "trait_adjusted",
+    maxDeltaFraction: MAX_STYLE_DELTA_FRACTION,
+    modelSuffix: "style-bias-v1",
+    confidenceMultiplier: 1.0,
+  });
+}
