@@ -12,6 +12,7 @@ import type {
   SetupSubmissionInput,
   TeamTraits,
   DriverStats,
+  CarFeelPreference,
 } from "./setup-engine";
 
 function getSupabase() {
@@ -139,8 +140,16 @@ export async function fetchCareerDriverStats(careerDriverId: string): Promise<Dr
   };
 }
 
+const CAR_FEEL_VALUES = [
+  "loose_oversteer",
+  "planted_understeer",
+  "balanced",
+  "aggressive_rotation",
+  "stable_predictable",
+] as const;
+
 export interface DriverStyleProfileData {
-  car_feel_preference: string;
+  car_feel_preference: CarFeelPreference;
   preferred_race_length: string;
   assists: Record<string, unknown>;
 }
@@ -159,8 +168,15 @@ export async function fetchDriverStyleProfile(
   if (error) throw new Error(`Failed to load driver style profile: ${error.message}`);
   if (!data) return null;
 
+  const pref = data.car_feel_preference as string;
+  if (!CAR_FEEL_VALUES.includes(pref as CarFeelPreference)) {
+    // DB has a CHECK constraint, so this should be unreachable in practice —
+    // guarding anyway rather than trusting the cast silently.
+    throw new Error(`Unexpected car_feel_preference value: ${pref}`);
+  }
+
   return {
-    car_feel_preference: data.car_feel_preference,
+    car_feel_preference: pref as CarFeelPreference,
     preferred_race_length: data.preferred_race_length,
     assists: (data.assists as Record<string, unknown>) ?? {},
   };
