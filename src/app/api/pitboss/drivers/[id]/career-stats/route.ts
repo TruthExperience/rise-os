@@ -1,4 +1,4 @@
-// File: app/api/pitboss/drivers/[id]/career-stats/route.ts
+// File: app/api/pitboss/drivers/[driverId]/career-stats/route.ts
 //
 // Public read-only aggregate for the driver profile page's "Career" tab.
 // No ownership/session check — this is public career history, same as the
@@ -23,16 +23,16 @@ interface TeamDrivenFor {
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ driverId: string }> }
 ) {
-  const { id } = await params
+  const { driverId } = await params
   const supabase = createAdminClient()
 
   const { data: results, error: resultsError } = await supabase
     .schema('pitboss')
     .from('results')
     .select('finish_position, dnf, fastest_lap, franchise_id, season, round')
-    .eq('driver_id', id)
+    .eq('driver_id', driverId)
 
   if (resultsError) {
     return NextResponse.json({ error: resultsError.message }, { status: 500 })
@@ -83,7 +83,7 @@ export async function GET(
       .schema('pitboss')
       .from('driver_contracts')
       .select('franchise_id')
-      .eq('driver_id', id)
+      .eq('driver_id', driverId)
 
     const franchiseIdsFromContracts = Array.from(
       new Set((contracts ?? []).map((c) => c.franchise_id).filter((f): f is string => !!f))
