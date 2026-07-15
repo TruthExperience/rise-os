@@ -1,12 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { buildRecommendation, applyTeamAndDriverBias } from '@/lib/pitboss/setup-engine';
+import {
+  buildRecommendation,
+  applyTeamAndDriverBias,
+  applySessionBias,
+  applyDriverStyleBias,
+} from '@/lib/pitboss/setup-engine';
 import {
   fetchParamRanges,
   fetchOverrides,
   fetchSubmissions,
   fetchTeamTraits,
   fetchCareerDriverStats,
+  fetchDriverStyleProfile,
 } from '@/lib/pitboss/setup-engine-data';
 import { resolveDriverIdFromSession } from '@/lib/pitboss/resolveDriver';
 
@@ -77,15 +83,20 @@ export async function POST(req: NextRequest) {
     driver_id = driverIdOverride;
   }
 
-  let paramRanges, overrides, submissions, teamTraits, careerDriverStats;
+  let paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile;
   try {
-    [paramRanges, overrides, submissions, teamTraits, careerDriverStats] = await Promise.all([
-      fetchParamRanges(car_class_id, session_type),
-      fetchOverrides(track_id, car_class_id),
-      fetchSubmissions({ trackId: track_id, carClassId: car_class_id, conditions, sessionType: session_type }),
-      car_team_id ? fetchTeamTraits(car_team_id) : Promise.resolve(null),
-      career_driver_id ? fetchCareerDriverStats(career_driver_id) : Promise.resolve(null),
-    ]);
+    [paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile] =
+      await Promise.all([
+        fetchParamRanges(car_class_id, session_type),
+        fetchOverrides(track_id, car_class_id),
+        fetchSubmissions({ trackId: track_id, carClassId: car_class_id, conditions, sessionType: session_type }),
+        car_team_id ? fetchTeamTraits(car_team_id) : Promise.resolve(null),
+        career_driver_id ? fetchCareerDriverStats(career_driver_id) : Promise.resolve(null),
+        // Style profile is tied to the resolved pitboss.drivers identity,
+        // not the in-game car_team_id/career_driver_id — same as the
+        // driver-style-profile route, it's "my own record", not a param.
+        driver_id ? fetchDriverStyleProfile(driver_id) : Promise.resolve(null),
+      ]);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Failed to load setup engine inputs' },
@@ -116,6 +127,28 @@ export async function POST(req: NextRequest) {
       overrides,
       teamTraits,
       driverStats: careerDriverStats,
+    });
+  }
+
+  // Session-type bias is always applied — session_type is required on every
+  // request, and "practice" is an intentional no-op (empty weight map) so
+  // this call is a safe no-cost pass-through for that case.
+  engineResult = applySessionBias({
+    base: engineResult,
+    paramRanges,
+    overrides,
+    sessionType: session_type,
+  });
+
+  // Driver style bias only applies if the caller resolved to a real driver
+  // and that driver has filled out a style profile. "balanced" preference
+  // (or no profile at all) is a no-op, same as practice above.
+  if (driverStyleProfile) {
+    engineResult = applyDriverStyleBias({
+      base: engineResult,
+      paramRanges,
+      overrides,
+      carFeelPreference: driverStyleProfile.car_feel_preference as any,
     });
   }
 
