@@ -43,8 +43,10 @@ interface CareerDriver {
   racecraft: number
   awareness: number
   experience: number
+  focus: number
   overall: number
 }
+
 
 interface Rationale {
   value: number
@@ -140,11 +142,13 @@ export default function SetupsPage() {
   const [careerDriverId, setCareerDriverId]       = useState('')
   const [creatingCareerDriver, setCreatingCareerDriver] = useState(false)
   const [newCareerDriverName, setNewCareerDriverName]   = useState('')
-  const [newPace, setNewPace]             = useState(70)
+    const [newPace, setNewPace]             = useState(70)
   const [newRacecraft, setNewRacecraft]   = useState(70)
   const [newAwareness, setNewAwareness]   = useState(70)
   const [newExperience, setNewExperience] = useState(70)
+  const [newFocus, setNewFocus]           = useState(70)
   const [savingCareerDriver, setSavingCareerDriver] = useState(false)
+
 
   const [generating, setGenerating]   = useState(false)
   const [error, setError]             = useState('')
@@ -224,14 +228,15 @@ export default function SetupsPage() {
       const res = await fetch('/api/pitboss/setups/career-drivers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+                 body: JSON.stringify({
           driver_name: newCareerDriverName.trim(),
           pace: newPace,
           racecraft: newRacecraft,
           awareness: newAwareness,
           experience: newExperience,
+          focus: newFocus,
         }),
-      })
+
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed to save career driver')
       setCareerDrivers((prev) => [...prev, data])
@@ -460,10 +465,12 @@ export default function SetupsPage() {
                     placeholder="Driver name"
                     className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-white text-sm placeholder-white/20 focus:outline-none focus:border-[#E8284A]"
                   />
-                  <StatSlider label="Pace" value={newPace} onChange={setNewPace} />
+                                    <StatSlider label="Pace" value={newPace} onChange={setNewPace} />
                   <StatSlider label="Racecraft" value={newRacecraft} onChange={setNewRacecraft} />
                   <StatSlider label="Awareness" value={newAwareness} onChange={setNewAwareness} />
                   <StatSlider label="Experience" value={newExperience} onChange={setNewExperience} />
+                  <StatSlider label="Focus" value={newFocus} onChange={setNewFocus} />
+
                   <div className="flex gap-2">
                     <button
                       onClick={saveNewCareerDriver}
