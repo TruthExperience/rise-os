@@ -90,7 +90,7 @@ export default function DriverStyleProfilePage() {
       setLoading(true)
       setError('')
       try {
-        const res = await fetch('/api/pitboss/setups/driver-style-profile')
+        const res = await fetch('/api/pitboss/setups/driving-style')
         const data = await res.json()
         if (!res.ok) throw new Error(data.error ?? 'Failed to load style profile')
         if (!cancelled && data.profile) {
@@ -122,7 +122,7 @@ export default function DriverStyleProfilePage() {
     setError('')
     setSavedMessage('')
     try {
-      const res = await fetch('/api/pitboss/setups/driver-style-profile', {
+      const res = await fetch('/api/pitboss/setups/driving-style', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
