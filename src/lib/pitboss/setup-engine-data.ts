@@ -125,7 +125,7 @@ export async function fetchCareerDriverStats(careerDriverId: string): Promise<Dr
   const { data, error } = await supabase
     .schema("pitboss")
     .from("career_mode_drivers")
-    .select("pace, racecraft, awareness, experience")
+    .select("pace, racecraft, awareness, experience, focus")
     .eq("id", careerDriverId)
     .maybeSingle();
 
@@ -137,8 +137,10 @@ export async function fetchCareerDriverStats(careerDriverId: string): Promise<Dr
     racecraft: Number(data.racecraft ?? 50),
     awareness: Number(data.awareness ?? 50),
     experience: Number(data.experience ?? 50),
+    focus: Number(data.focus ?? 50),
   };
 }
+
 
 const CAR_FEEL_VALUES = [
   "loose_oversteer",
