@@ -102,7 +102,9 @@ export default function DriverStyleProfilePage() {
           setAssists({ ...DEFAULT_ASSISTS, ...(data.profile.assists ?? {}) })
         }
       } catch (err: any) {
-        if (!cancelled) setError(err.message)
+        if (!cancelled) {
+          setError(`${err?.name ?? 'Error'}: ${err?.message ?? String(err)} | ${err?.stack?.split('\n')[1]?.trim() ?? 'no stack'}`)
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -136,7 +138,7 @@ export default function DriverStyleProfilePage() {
       if (!res.ok) throw new Error(data.error ?? 'Failed to save style profile')
       setSavedMessage('Style profile saved. Future setup recommendations will use this.')
     } catch (err: any) {
-      setError(err.message)
+      setError(`${err?.name ?? 'Error'}: ${err?.message ?? String(err)} | ${err?.stack?.split('\n')[1]?.trim() ?? 'no stack'}`)
     } finally {
       setSaving(false)
     }
