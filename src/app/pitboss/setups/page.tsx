@@ -318,9 +318,21 @@ export default function SetupsPage() {
         <p className="text-gray-500 text-sm mt-1">Community-weighted baseline, tuned by your feedback.</p>
       </div>
 
-      <div className="px-4 space-y-6">
+            <div className="px-4 space-y-6">
+        <button
+          onClick={() => router.push('/pitboss/setups/driver-style-profile')}
+          className="w-full rounded-xl border border-gray-800 bg-gray-900 px-4 py-3 text-left flex items-center justify-between"
+        >
+          <div>
+            <p className="text-white text-sm font-semibold">Driving Style</p>
+            <p className="text-gray-500 text-xs mt-0.5">Car feel, race length, and assists — tunes every generated setup</p>
+          </div>
+          <span className="text-[#E8284A] text-lg">→</span>
+        </button>
+
         <div>
           <SectionHeader title="Car Class" />
+
           <div className="grid grid-cols-2 gap-2">
             {carClasses.map((cc) => (
               <button
