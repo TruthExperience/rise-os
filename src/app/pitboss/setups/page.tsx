@@ -228,7 +228,7 @@ export default function SetupsPage() {
       const res = await fetch('/api/pitboss/setups/career-drivers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-                 body: JSON.stringify({
+         body: JSON.stringify({
           driver_name: newCareerDriverName.trim(),
           pace: newPace,
           racecraft: newRacecraft,
@@ -236,7 +236,7 @@ export default function SetupsPage() {
           experience: newExperience,
           focus: newFocus,
         }),
-
+      })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed to save career driver')
       setCareerDrivers((prev) => [...prev, data])
