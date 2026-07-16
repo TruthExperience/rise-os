@@ -325,6 +325,7 @@ export interface DriverStats {
   racecraft: number; // 0-99
   awareness: number; // 0-99
   experience: number; // 0-99
+  focus: number; // 0-9
 }
 
 type ParamWeightMap = Partial<Record<string, number>>;
@@ -357,7 +358,11 @@ const DRIVER_STAT_PARAM_MAP: Record<keyof DriverStats, ParamWeightMap> = {
   },
   racecraft: { diff_adjustment_on_throttle: -0.04, front_brake_bias: 0.02 },
   awareness: { rear_toe_in: 0.03, front_toe_out: -0.03 },
-  experience: { front_ride_height: -0.03, rear_ride_height: -0.03, brake_pressure: 0.02 },
+  experience: { front_ride_height: -0.03, rear_ride_height: -0.03, brake_pressure: 0.02 }, 
+  // First-pass coefficient, same caveat as the others above — a high-focus
+  // driver trusts a slightly less conservative brake setup since they're
+  // less prone to lock-ups/mistakes under threshold braking.
+  focus: { front_brake_bias: -0.02, brake_pressure: -0.02 },
 };
 
 function normalizeDriverStat(value: number): number {
