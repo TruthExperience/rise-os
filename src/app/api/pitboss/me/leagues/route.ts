@@ -25,15 +25,23 @@ export async function GET() {
 
   const { data, error } = await supabaseAdmin
     .from("driver_leagues")
-    .select("*, league:league_id(*)")
+    .select("league_id, role, league:league_id(name, sport, logo_url)")
     .eq("driver_id", driver.id);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // IncidentsPage.tsx expects { leagues: [...] } with each row shaped as
-  // { league_id, role, league: {...} } — driver_leagues already has
-  // league_id and role columns, so we just need to wrap the array.
-  return NextResponse.json({ leagues: data ?? [] });
+  // LeaguePickerPage.tsx expects { leagues: [...] } with each row shaped
+  // flat as { league_id, name, sport, logo_url, role } — the join above
+  // nests the league row under `league`, so we flatten it here.
+  const leagues = (data ?? []).map((row: any) => ({
+    league_id: row.league_id,
+    role: row.role,
+    name: row.league?.name ?? "",
+    sport: row.league?.sport ?? "other",
+    logo_url: row.league?.logo_url ?? null,
+  }));
+
+  return NextResponse.json({ leagues });
 }
 
 export async function POST(req: Request) {
