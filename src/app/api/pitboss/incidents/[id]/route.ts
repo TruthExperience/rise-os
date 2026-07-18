@@ -2,89 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
-import { pbSteward } from '@/lib/pitboss-llm'
+import { pbSteward, pbInfer } from '@/lib/pitboss-llm'
 import type { RuleArticle } from '@/lib/pitboss-llm'
-
-const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
-const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward', 'bsac_chief']
-
-async function getRequestingDriver(supabase: any, session: any) {
-  const user = session.user as any
-  const discordId: string | undefined = user.discordId ?? user.discord_id ?? user.id
-  const email: string | undefined = user.email ?? undefined
-
-  let driver = null
-
-  if (discordId) {
-    const { data } = await supabase
-      .schema('pitboss')
-      .from('drivers')
-      .select('id')
-      .eq('discord_id', discordId)
-      .maybeSingle()
-    driver = data
-  }
-
-  if (!driver && email) {
-    const { data } = await supabase
-      .schema('pitboss')
-      .from('drivers')
-      .select('id')
-      .eq('email', email)
-      .maybeSingle()
-    driver = data
-  }
-
-  return driver
-}
-
-async function hasStewwardAccess(
-  supabase: any,
-  driverId: string,
-  leagueId: string
-): Promise<boolean> {
-  const { data: licence } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id')
-    .eq('driver_id', driverId)
-    .eq('league_id', leagueId)
-    .eq('status', 'active')
-    .in('role_code', STEWARD_ROLES)
-    .maybeSingle()
-
-  if (licence) return true
-
-  const { data: anyLicence } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id')
-    .eq('driver_id', driverId)
-    .eq('status', 'active')
-    .in('role_code', STEWARD_ROLES)
-    .maybeSingle()
-
-  if (anyLicence) return true
-
-  const { data: memberships } = await supabase
-    .schema('pitboss')
-    .from('driver_leagues')
-    .select('role, league_id')
-    .eq('driver_id', driverId)
-
-  if (!memberships) return false
-
-  for (const m of memberships) {
-    const roles = (m.role as string)
-      .split(',')
-      .map((r: string) => r.trim().toLowerCase())
-    if (roles.some((r: string) => STEWARD_LEAGUE_ROLES.includes(r))) {
-      return true
-    }
-  }
-
-  return false
-}
+import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
 
 export async function GET(
   req: NextRequest,
@@ -352,9 +272,6 @@ export async function POST(
       rule_book_id:   a.rule_book_id ?? '',
     }))
 
-    // Build a penalty-range map keyed by incident_type for the worker to
-    // constrain its pp_recommendation against. rule_references rows carry
-    // incident_types[] arrays, so one article can apply to multiple types.
     const penaltyRanges: Record<string, { min: number; max: number; options: string[] }> = {}
     for (const a of articles ?? []) {
       for (const ref of a.rule_references ?? []) {
@@ -371,20 +288,32 @@ export async function POST(
       }
     }
 
+    // Pull steward discussion into AI context
+    const { data: comments } = await supabase
+      .schema('pitboss')
+      .from('incident_steward_comments')
+      .select('body, drivers(display_name, discord_username)')
+      .eq('incident_id', params.id)
+      .order('created_at', { ascending: true })
+
+    const stewardDiscussion = (comments ?? [])
+      .map((c: any) => `${c.drivers?.display_name ?? c.drivers?.discord_username ?? 'Steward'}: ${c.body}`)
+      .join('\n')
+
     try {
       const ai = await pbSteward(
         {
-          incident_type:    incident.incident_type,
-          description:      incident.description,
-          season:           incident.season,
-          round:            incident.round,
-          lap:              incident.lap,
-          league_id:        incident.league_id,
-          accused_response: incident.accused_response ?? undefined,
-          // Full map plus the specific range for this incident's type, so the
-          // worker's /steward prompt can constrain pp_recommendation to it.
-          penalty_ranges:   penaltyRanges,
-          applicable_range: penaltyRanges[incident.incident_type] ?? null,
+          incident_type:      incident.incident_type,
+          description:        incident.description,
+          season:             incident.season,
+          round:              incident.round,
+          lap:                incident.lap,
+          league_id:          incident.league_id,
+          accused_response:   incident.accused_response ?? undefined,
+          evidence_urls:      incident.evidence_urls ?? [],
+          steward_discussion: stewardDiscussion || undefined,
+          penalty_ranges:     penaltyRanges,
+          applicable_range:   penaltyRanges[incident.incident_type] ?? null,
         },
         regulations,
         incident.league_id
@@ -401,18 +330,41 @@ export async function POST(
         high: 0.9, medium: 0.6, low: 0.3,
       }
 
+      let penaltyExplanation: string | null = null
+      try {
+        const expl = await pbInfer({
+          mode: 'primary',
+          system:
+            'Write a short, clear, neutral explanation of this incident ruling for the affected ' +
+            'driver and league to read. Plain language, no rule-article numbers, no steward jargon.',
+          prompt: [
+            `Incident: ${incident.incident_type} — ${incident.description}`,
+            `Verdict: ${suggestion.verdict ?? 'unresolved'}`,
+            `Reasoning: ${suggestion.reasoning ?? ''}`,
+            stewardDiscussion ? `Steward discussion:\n${stewardDiscussion}` : '',
+          ].filter(Boolean).join('\n\n'),
+          max_tokens: 400,
+          temperature: 0.4,
+        })
+        penaltyExplanation = expl.response ?? null
+      } catch (explErr) {
+        console.error('[incidents/id POST] explanation infer failed', explErr)
+      }
+
       const { error: aiUpdateError } = await supabase
         .schema('pitboss')
         .from('incidents')
         .update({
-          ai_verdict:     suggestion.verdict                   ?? null,
-          ai_penalty:     suggestion.steward_notes             ?? null,
-          ai_points:      suggestion.pp_recommendation?.min    ?? 0,
-          ai_confidence:  confidenceMap[suggestion.confidence] ?? 0.5,
-          ai_reasoning:   suggestion.reasoning                 ?? null,
-          ai_articles:    suggestion.cited_articles            ?? [],
-          ai_model:       ai.model                             ?? 'unknown',
-          ai_analysed_at: new Date().toISOString(),
+          ai_verdict:                suggestion.verdict                   ?? null,
+          ai_penalty:                suggestion.steward_notes             ?? null,
+          ai_points:                 suggestion.pp_recommendation?.min    ?? 0,
+          ai_confidence:             confidenceMap[suggestion.confidence] ?? 0.5,
+          ai_reasoning:              suggestion.reasoning                 ?? null,
+          ai_articles:               suggestion.cited_articles            ?? [],
+          ai_model:                  ai.model                             ?? 'unknown',
+          ai_analysed_at:            new Date().toISOString(),
+          ai_penalty_explanation:    penaltyExplanation,
+          ai_penalty_explanation_at: penaltyExplanation ? new Date().toISOString() : null,
         })
         .eq('id', params.id)
 
@@ -421,7 +373,7 @@ export async function POST(
         return NextResponse.json({ error: aiUpdateError.message }, { status: 500 })
       }
 
-      return NextResponse.json({ success: true })
+      return NextResponse.json({ success: true, penalty_explanation: penaltyExplanation })
     } catch (err: any) {
       console.error('[incidents/id POST] ai analyse', err)
       return NextResponse.json({ error: 'AI analysis failed' }, { status: 500 })
