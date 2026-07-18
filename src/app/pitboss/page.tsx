@@ -144,21 +144,41 @@ export default function PitBossPage() {
       {/* Tools */}
       <div className="mb-6">
         <p className="text-xs text-white/40 uppercase tracking-widest mb-3">Tools</p>
-        <div
-          onClick={() => router.push("/pitboss/setups")}
-          className="rounded-2xl border border-white/10 bg-white/5 p-4 cursor-pointer active:scale-95 transition-transform"
-        >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-rise-red/20 border border-rise-red/30 flex items-center justify-center text-lg">
-                🔧
+        <div className="flex flex-col gap-3">
+          <div
+            onClick={() => router.push("/pitboss/setups")}
+            className="rounded-2xl border border-white/10 bg-white/5 p-4 cursor-pointer active:scale-95 transition-transform"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rise-red/20 border border-rise-red/30 flex items-center justify-center text-lg">
+                  🔧
+                </div>
+                <div>
+                  <p className="text-white font-bold text-sm">Setup Generator</p>
+                  <p className="text-white/30 text-xs">Community-weighted setups, tuned by your feedback</p>
+                </div>
               </div>
-              <div>
-                <p className="text-white font-bold text-sm">Setup Generator</p>
-                <p className="text-white/30 text-xs">Community-weighted setups, tuned by your feedback</p>
-              </div>
+              <span className="text-white/20 text-lg">›</span>
             </div>
-            <span className="text-white/20 text-lg">›</span>
+          </div>
+
+          <div
+            onClick={() => router.push("/pitboss/appeals")}
+            className="rounded-2xl border border-white/10 bg-white/5 p-4 cursor-pointer active:scale-95 transition-transform"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rise-red/20 border border-rise-red/30 flex items-center justify-center text-lg">
+                  ⚖️
+                </div>
+                <div>
+                  <p className="text-white font-bold text-sm">Appeals</p>
+                  <p className="text-white/30 text-xs">Review and track incident appeals</p>
+                </div>
+              </div>
+              <span className="text-white/20 text-lg">›</span>
+            </div>
           </div>
         </div>
       </div>
