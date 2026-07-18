@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
+import { StewardDiscussion } from '@/components/pitboss/StewardDiscussion'
 
 interface Incident {
   id: string
@@ -30,6 +31,8 @@ interface Incident {
   ai_articles: string[] | null
   ai_model: string | null
   ai_analysed_at: string | null
+  ai_penalty_explanation: string | null
+  ai_penalty_explanation_at: string | null
   accused_response: string | null
   accused_response_at: string | null
   accused_evidence_urls: string[] | null
@@ -424,6 +427,14 @@ export default function IncidentDetailPage() {
           )}
         </div>
 
+        {/* Steward Discussion */}
+        {isSteward && (
+          <div>
+            <SectionHeader title="Steward Discussion" />
+            <StewardDiscussion incidentId={id} />
+          </div>
+        )}
+
         {/* AI Analysis */}
         <div>
           <div className="flex items-center justify-between mb-3">
@@ -483,6 +494,12 @@ export default function IncidentDetailPage() {
                       <span key={i} className="text-xs bg-rise-red/10 text-rise-red border border-rise-red/20 px-2 py-0.5 rounded-full">{a}</span>
                     ))}
                   </div>
+                </div>
+              )}
+              {incident.ai_penalty_explanation && (
+                <div className="pt-3 border-t border-white/10">
+                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Suggested Explanation (for driver)</p>
+                  <p className="text-white/70 text-sm leading-relaxed">{incident.ai_penalty_explanation}</p>
                 </div>
               )}
               <p className="text-white/20 text-[10px]">{incident.ai_model} · {formatDate(incident.ai_analysed_at)}</p>
