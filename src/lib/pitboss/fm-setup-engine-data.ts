@@ -1,0 +1,155 @@
+// File: src/lib/pitboss/fm-setup-engine-data.ts
+//
+// Shared fetch/persist helpers for the F1 Manager setup engine. Kept
+// separate from fm-setup-engine.ts (which is pure logic, no I/O), same
+// convention as setup-engine.ts / setup-engine-data.ts on the F1 25 side.
+
+import { createAdminClient } from "@/lib/supabase/server";
+import type { FmParamRange, FmSetupParamKey, FmFeedbackByBias, FmBiasKey, FmFeedbackValue } from "./fm-setup-engine";
+import { FM_BIAS_ORDER } from "./fm-setup-engine";
+
+function getSupabase() {
+  return createAdminClient();
+}
+
+export async function fetchFmParamRanges(): Promise<FmParamRange[]> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_params")
+    .select("param_key, min_value, max_value, step")
+    .order("display_order");
+
+  if (error) throw new Error(`Failed to load fm setup param ranges: ${error.message}`);
+
+  return (data ?? []).map((r) => ({
+    param_key: r.param_key as FmSetupParamKey,
+    min_value: Number(r.min_value),
+    max_value: Number(r.max_value),
+    step: Number(r.step),
+  }));
+}
+
+export interface FmSetupSessionRow {
+  id: string;
+  driver_id: string;
+  circuit_id: string;
+  conditions: "dry" | "wet";
+  driver_slot: 1 | 2;
+  driver_slot_name: string | null;
+  current_values: Record<FmSetupParamKey, number>;
+  current_feedback: FmFeedbackByBias;
+  iteration_count: number;
+}
+
+const SESSION_SELECT =
+  "id, driver_id, circuit_id, conditions, driver_slot, driver_slot_name, current_values, current_feedback, iteration_count";
+
+function emptyFeedback(): FmFeedbackByBias {
+  const out = {} as FmFeedbackByBias;
+  for (const key of FM_BIAS_ORDER) out[key] = [];
+  return out;
+}
+
+/**
+ * Fetches the session for (driver, circuit, conditions, driver_slot), or
+ * creates a fresh one if this is the driver's first calculation here.
+ * driver_slot is 1|2 (two drivers per team in F1 Manager) — always required.
+ */
+export async function fetchOrCreateFmSetupSession(params: {
+  driverId: string;
+  circuitId: string;
+  conditions: "dry" | "wet";
+  driverSlot: 1 | 2;
+  driverSlotName?: string | null;
+}): Promise<FmSetupSessionRow> {
+  const supabase = getSupabase();
+  const { driverId, circuitId, conditions, driverSlot, driverSlotName = null } = params;
+
+  const { data: existing, error: fetchErr } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_sessions")
+    .select(SESSION_SELECT)
+    .eq("driver_id", driverId)
+    .eq("circuit_id", circuitId)
+    .eq("conditions", conditions)
+    .eq("driver_slot", driverSlot)
+    .maybeSingle();
+
+  if (fetchErr) throw new Error(`Failed to load fm setup session: ${fetchErr.message}`);
+  if (existing) return existing as unknown as FmSetupSessionRow;
+
+  const { data: created, error: insertErr } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_sessions")
+    .insert({
+      driver_id: driverId,
+      circuit_id: circuitId,
+      conditions,
+      driver_slot: driverSlot,
+      driver_slot_name: driverSlotName,
+      current_values: {},
+      current_feedback: emptyFeedback(),
+      iteration_count: 0,
+    })
+    .select(SESSION_SELECT)
+    .single();
+
+  if (insertErr || !created) {
+    throw new Error(`Failed to create fm setup session: ${insertErr?.message ?? "unknown error"}`);
+  }
+  return created as unknown as FmSetupSessionRow;
+}
+
+export async function updateFmSetupSession(
+  sessionId: string,
+  updates: {
+    current_values?: Record<FmSetupParamKey, number>;
+    current_feedback?: FmFeedbackByBias;
+    iteration_count?: number;
+  },
+): Promise<FmSetupSessionRow> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_sessions")
+    .update({ ...updates, updated_at: new Date().toISOString() })
+    .eq("id", sessionId)
+    .select(SESSION_SELECT)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to update fm setup session: ${error?.message ?? "unknown error"}`);
+  }
+  return data as unknown as FmSetupSessionRow;
+}
+
+export interface FmFeedbackLogEntry {
+  bias: FmBiasKey;
+  value: number;
+  feedback: FmFeedbackValue;
+}
+
+/**
+ * Appends an audit row to fm_setup_feedback_log for this calculation.
+ * `feedback` is the raw feedback points just recorded this call;
+ * `appliedDeltas` is whatever the caller wants to record about the
+ * resulting search (e.g. lowestRuleBreak, possibleSetups, chosen candidate)
+ * for later debugging/analysis — shape is intentionally loose (jsonb).
+ */
+export async function logFmFeedback(params: {
+  sessionId: string;
+  iterationNumber: number;
+  feedback: FmFeedbackLogEntry[];
+  appliedDeltas: Record<string, unknown>;
+}): Promise<void> {
+  const supabase = getSupabase();
+  const { error } = await supabase.schema("pitboss").from("fm_setup_feedback_log").insert({
+    session_id: params.sessionId,
+    iteration_number: params.iterationNumber,
+    feedback: params.feedback,
+    applied_deltas: params.appliedDeltas,
+  });
+
+  if (error) throw new Error(`Failed to log fm feedback: ${error.message}`);
+}
