@@ -67,11 +67,21 @@ export async function GET(
     .eq('id', incident.league_id)
     .maybeSingle()
 
+  // One appeal per incident, ever — fetch it if it exists so the client can
+  // render appeal status / review UI without a second round trip.
+  const { data: appeal } = await supabase
+    .schema('pitboss')
+    .from('incident_appeals')
+    .select('*')
+    .eq('incident_id', incident.id)
+    .maybeSingle()
+
   return NextResponse.json({
     incident:   { ...incident, reporter, accused, league },
     isAccused,
     isSteward,
     isReporter,
+    appeal: appeal ?? null,
   })
 }
 
