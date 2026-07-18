@@ -5,6 +5,7 @@ import {
   neutralAnchorBias,
   FM_BIAS_ORDER,
   FM_SETUP_PARAM_ORDER,
+  MAX_SETUP_CANDIDATES,
   FmSetupParamKey,
   FmBiasKey,
   FmFeedbackValue,
@@ -35,6 +36,10 @@ interface CalculateRequestBody {
   // One feedback point per bias category being reported this call. Only
   // include the categories the driver actually gave feedback on.
   new_feedback?: Partial<Record<FmBiasKey, FmFeedbackValue>>;
+  // Number of ranked candidates to return, capped at MAX_SETUP_CANDIDATES.
+  // Defaults to 10 for normal UI calls; stewards/debug views can request up
+  // to the full 99 already computed by the search.
+  candidate_limit?: number;
 }
 
 export async function POST(req: NextRequest) {
@@ -54,6 +59,7 @@ export async function POST(req: NextRequest) {
     driver_id: driverIdOverride = null,
     current_values,
     new_feedback,
+    candidate_limit,
   } = body;
 
   if (!circuit_id || !conditions || !driver_slot) {
@@ -68,6 +74,8 @@ export async function POST(req: NextRequest) {
   if (conditions !== "dry" && conditions !== "wet") {
     return NextResponse.json({ error: "conditions must be 'dry' or 'wet'" }, { status: 400 });
   }
+
+  const limit = Math.min(Math.max(Number(candidate_limit) || 10, 1), MAX_SETUP_CANDIDATES);
 
   let driver_id: string | null = null;
   if (discord_id) {
@@ -170,7 +178,7 @@ export async function POST(req: NextRequest) {
         best_setup: result.best
           ? Object.fromEntries(FM_SETUP_PARAM_ORDER.map((key, i) => [key, result.best![i]]))
           : null,
-        candidates: result.candidates.slice(0, 10).map((c) => ({
+        candidates: result.candidates.slice(0, limit).map((c) => ({
           setup: Object.fromEntries(FM_SETUP_PARAM_ORDER.map((key, i) => [key, c.setup[i]])),
           diff: c.diff,
         })),
