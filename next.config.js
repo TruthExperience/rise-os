@@ -51,6 +51,19 @@ const withPWA = require("@ducanh2912/next-pwa").default({
         urlPattern: /^https?:\/\/[^/]+\/pitboss\/setups.*/i,
         handler: "NetworkOnly",
       },
+      {
+        // Same issue as rules/drivers/setups above: franchise detail data
+        // (lifetime record, roster counts, GM info) is populated
+        // client-side via fetch in useEffect, but cacheOnFrontEndNav +
+        // aggressiveFrontEndNavCaching could replay a stale page
+        // shell/RSC payload on in-app navigation to
+        // /franchises/[leagueId]/[franchiseId] instead of hitting the API
+        // fresh — e.g. lifetime records backfilled on 7/1 not showing for
+        // anyone who'd already visited the page before that. Force
+        // NetworkOnly so every visit re-fetches the live page.
+        urlPattern: /^https?:\/\/[^/]+\/franchises\/.*/i,
+        handler: "NetworkOnly",
+      },
     ],
   },
 });
