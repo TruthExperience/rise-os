@@ -153,3 +153,84 @@ export async function logFmFeedback(params: {
 
   if (error) throw new Error(`Failed to log fm feedback: ${error.message}`);
 }
+
+/**
+ * Reads the best converged setup on record for a given circuit + conditions,
+ * if any driver has ever converged one. Used to seed a brand-new session's
+ * anchor bias instead of starting from neutral every time — new drivers get
+ * a warm start based on what's already been proven at this circuit.
+ */
+export async function fetchFmSetupMemory(
+  circuitId: string,
+  conditions: "dry" | "wet",
+): Promise<{
+  setup_values: Record<FmSetupParamKey, number>;
+  lowest_rule_break: number;
+  possible_setups: number;
+  sample_count: number;
+} | null> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_memory")
+    .select("setup_values, lowest_rule_break, possible_setups, sample_count")
+    .eq("circuit_id", circuitId)
+    .eq("conditions", conditions)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to fetch fm setup memory: ${error.message}`);
+  return data as {
+    setup_values: Record<FmSetupParamKey, number>;
+    lowest_rule_break: number;
+    possible_setups: number;
+    sample_count: number;
+  } | null;
+}
+
+/**
+ * Records a converged setup for a circuit + conditions, but only if it's at
+ * least as good (lowest_rule_break <= what's stored) as the current best —
+ * the memory bank should monotonically improve, never regress toward a
+ * worse-converged setup from an earlier or noisier session.
+ */
+export async function upsertFmSetupMemory(params: {
+  circuitId: string;
+  conditions: "dry" | "wet";
+  setupValues: Record<FmSetupParamKey, number>;
+  lowestRuleBreak: number;
+  possibleSetups: number;
+}): Promise<void> {
+  const supabase = getSupabase();
+
+  const { data: existing, error: fetchErr } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_memory")
+    .select("id, lowest_rule_break, sample_count")
+    .eq("circuit_id", params.circuitId)
+    .eq("conditions", params.conditions)
+    .maybeSingle();
+
+  if (fetchErr) throw new Error(`Failed to check fm setup memory: ${fetchErr.message}`);
+
+  if (existing && existing.lowest_rule_break < params.lowestRuleBreak) {
+    return;
+  }
+
+  const { error: upsertErr } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_memory")
+    .upsert(
+      {
+        circuit_id: params.circuitId,
+        conditions: params.conditions,
+        setup_values: params.setupValues,
+        lowest_rule_break: params.lowestRuleBreak,
+        possible_setups: params.possibleSetups,
+        sample_count: (existing?.sample_count ?? 0) + 1,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "circuit_id,conditions" },
+    );
+
+  if (upsertErr) throw new Error(`Failed to upsert fm setup memory: ${upsertErr.message}`);
+}
