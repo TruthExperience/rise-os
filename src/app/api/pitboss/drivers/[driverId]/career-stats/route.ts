@@ -27,7 +27,6 @@ type ResultRow = {
   dnf: boolean | null;
   fastest_lap: boolean | null;
   round_id: string | null;
-  calendar_round: { is_sprint: boolean | null } | null;
 };
 
 type FranchiseRow = {
@@ -38,11 +37,8 @@ type FranchiseRow = {
   primary_color: string | null;
 };
 
-function isSprint(r: ResultRow) {
-  return r.calendar_round?.is_sprint === true;
-}
-
-function summarize(results: ResultRow[]) {
+function summarize(results: ResultRow[], sprintRoundIds: Set<string>) {
+  const isSprint = (r: ResultRow) => r.round_id != null && sprintRoundIds.has(r.round_id);
   const classified = results.filter((r) => !r.dnf && r.finish_position != null);
   const feature = classified.filter((r) => !isSprint(r));
 
@@ -68,10 +64,7 @@ export async function GET(
     .schema("pitboss")
     .from("results")
     .select(
-      `
-      franchise_id, finish_position, qualifying_position, dnf, fastest_lap,
-      round_id, calendar_round:round_id ( is_sprint )
-      `
+      "franchise_id, finish_position, qualifying_position, dnf, fastest_lap, round_id"
     )
     .eq("driver_id", driverId)
     .returns<ResultRow[]>();
@@ -80,8 +73,31 @@ export async function GET(
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
+  // results.round_id has no FK to rise_os.calendar_rounds (different schema,
+  // no constraint), so PostgREST can't embed it — fetch separately instead,
+  // same pattern as the franchises lookup below.
+  const roundIds = Array.from(
+    new Set((results ?? []).map((r) => r.round_id).filter(Boolean))
+  ) as string[];
+
+  let sprintRoundIds = new Set<string>();
+  if (roundIds.length > 0) {
+    const { data: rounds, error: roundErr } = await supabase
+      .schema("rise_os")
+      .from("calendar_rounds")
+      .select("id, is_sprint")
+      .in("id", roundIds);
+
+    if (roundErr) {
+      return NextResponse.json({ error: roundErr.message }, { status: 500 });
+    }
+    sprintRoundIds = new Set(
+      (rounds ?? []).filter((r) => r.is_sprint === true).map((r) => r.id as string)
+    );
+  }
+
   const hasResults = (results ?? []).length > 0;
-  const stats = summarize(results ?? []);
+  const stats = summarize(results ?? [], sprintRoundIds);
 
   let teamFranchiseIds: string[] = [];
   let teamsSource: "results" | "contract" | "none" = "none";
