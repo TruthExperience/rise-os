@@ -11,6 +11,43 @@ interface EvidencePostBody {
   label?: string | null
 }
 
+interface EvidenceRow {
+  id: string
+  party: 'reporter' | 'accused'
+  source: 'upload' | 'link'
+  url: string
+  label: string | null
+  added_by: string
+  added_by_role: 'reporter' | 'accused' | 'steward'
+  created_at: string | null
+  legacy?: boolean
+}
+
+const SIGNED_URL_EXPIRY_SECONDS = 60 * 60 * 72 // 72 hours
+
+// Resolves 'upload' rows (which store a raw storage path, since the bucket
+// is private) into a short-lived signed URL for display. 'link' rows
+// (external URLs, including the folded-in legacy ones) pass through
+// unchanged — they were never in Storage to begin with.
+async function resolveEvidenceUrls(
+  supabase: ReturnType<typeof createAdminClient>,
+  rows: EvidenceRow[],
+): Promise<EvidenceRow[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      if (row.source !== 'upload') return row
+      const { data, error } = await supabase.storage
+        .from('incident-evidence')
+        .createSignedUrl(row.url, SIGNED_URL_EXPIRY_SECONDS)
+      if (error || !data) {
+        console.error('[incidents/id/evidence] failed to sign url for', row.id, error)
+        return row // fall back to the raw path rather than dropping the item
+      }
+      return { ...row, url: data.signedUrl }
+    }),
+  )
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -58,7 +95,7 @@ export async function GET(
 
   // Fold in the legacy flat arrays as read-only 'link' entries so the client
   // renders one unified list regardless of when the evidence was added.
-  const legacy = [
+  const legacy: EvidenceRow[] = [
     ...(incident.evidence_urls ?? []).map((url: string, i: number) => ({
       id: `legacy-reporter-${i}`,
       party: 'reporter' as const,
@@ -83,7 +120,9 @@ export async function GET(
     })),
   ]
 
-  return NextResponse.json({ evidence: [...legacy, ...(rows ?? [])] })
+  const resolved = await resolveEvidenceUrls(supabase, (rows ?? []) as EvidenceRow[])
+
+  return NextResponse.json({ evidence: [...legacy, ...resolved] })
 }
 
 export async function POST(
@@ -176,5 +215,10 @@ export async function POST(
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  return NextResponse.json({ evidence: data }, { status: 201 })
+  // Resolve immediately so the client's onAdded() callback gets a working
+  // playback URL right away, instead of a raw storage path that only
+  // becomes usable after the next GET.
+  const [resolved] = await resolveEvidenceUrls(supabase, [data as EvidenceRow])
+
+  return NextResponse.json({ evidence: resolved }, { status: 201 })
 }
