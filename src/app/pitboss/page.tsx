@@ -164,6 +164,24 @@ export default function PitBossPage() {
           </div>
 
           <div
+            onClick={() => router.push("/pitboss/fm-setups")}
+            className="rounded-2xl border border-white/10 bg-white/5 p-4 cursor-pointer active:scale-95 transition-transform"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rise-red/20 border border-rise-red/30 flex items-center justify-center text-lg">
+                  🏁
+                </div>
+                <div>
+                  <p className="text-white font-bold text-sm">FM Setup Generator</p>
+                  <p className="text-white/30 text-xs">F1 Manager setup solver, tuned by sim feedback</p>
+                </div>
+              </div>
+              <span className="text-white/20 text-lg">›</span>
+            </div>
+          </div>
+
+          <div
             onClick={() => router.push("/pitboss/appeals")}
             className="rounded-2xl border border-white/10 bg-white/5 p-4 cursor-pointer active:scale-95 transition-transform"
           >
