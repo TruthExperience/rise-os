@@ -396,7 +396,11 @@ export default function IncidentsPage() {
           <div className="mb-6 space-y-2">
             <p className="text-gray-400 text-xs uppercase tracking-widest mb-3">Your Reports</p>
             {myIncidents.map((inc) => (
-              <div key={inc.id} className="bg-gray-900 rounded-xl px-4 py-3">
+              <button
+                key={inc.id}
+                onClick={() => router.push(`/pitboss/incidents/${inc.id}`)}
+                className="w-full bg-gray-900 hover:bg-gray-800 rounded-xl px-4 py-3 text-left transition-colors active:scale-[0.98]"
+              >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <p className="text-white text-sm font-semibold truncate">{inc.incident_type}</p>
@@ -415,7 +419,7 @@ export default function IncidentsPage() {
                     {inc.penalty_points ? ` · ${inc.penalty_points} PP` : ''}
                   </p>
                 )}
-              </div>
+              </button>
             ))}
           </div>
         )}
