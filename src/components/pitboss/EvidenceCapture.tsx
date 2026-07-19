@@ -45,11 +45,10 @@ export function EvidenceCapture({ incidentId, party, onAdded, compact = false }:
         .upload(path, file)
       if (uploadError) throw uploadError
 
-      const { data: publicUrl } = supabaseBrowser.storage
-        .from('incident-evidence')
-        .getPublicUrl(path)
-
-      await postEvidence('upload', publicUrl.publicUrl, file.name)
+      // Bucket is private — store the raw storage path, not a public URL.
+      // The server resolves this into a short-lived signed URL whenever
+      // this evidence is actually fetched for display.
+      await postEvidence('upload', path, file.name)
     } catch (err: any) {
       setError(err.message ?? 'Upload failed')
     } finally {
