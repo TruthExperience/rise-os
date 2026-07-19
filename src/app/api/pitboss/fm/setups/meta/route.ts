@@ -8,9 +8,9 @@ export async function GET() {
     await Promise.all([
       supabase
         .schema('pitboss')
-        .from('tracks')
+        .from('fm_circuits')
         .select('id, name, slug, country')
-        .order('name', { ascending: true }),
+        .order('round_order', { ascending: true }),
       supabase
         .schema('pitboss')
         .from('fm_setup_params')
