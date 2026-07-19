@@ -61,7 +61,7 @@ const BIAS_LABELS: Record<FmBiasKey, string> = {
 }
 
 function formatValue(v: number, p: ParamDef) {
-  if (p.value_format === 'ratio_out_of_10') return `${v}${p.unit}`
+  if (p.value_format === 'ratio_out_of_10') return `${v}:${10 - v}`
   return `${v}${p.unit}`
 }
 
