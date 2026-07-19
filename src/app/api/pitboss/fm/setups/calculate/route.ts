@@ -15,6 +15,8 @@ import {
   fetchOrCreateFmSetupSession,
   updateFmSetupSession,
   logFmFeedback,
+  fetchFmSetupMemory,
+  upsertFmSetupMemory,
 } from "@/lib/pitboss/fm-setup-engine-data";
 import { resolveDriverIdFromSession } from "@/lib/pitboss/resolveDriver";
 
@@ -142,10 +144,28 @@ export async function POST(req: NextRequest) {
     iterationCount += 1;
   }
 
-  const anchorBias =
-    Object.keys(currentValues).length === FM_SETUP_PARAM_ORDER.length
-      ? FM_BIAS_ORDER.map((k) => setupToBiasKeyed(currentValues, ranges)[k])
+  // Anchor the search's tie-breaking distance against: the driver's own
+  // current setup if they have one this session, otherwise the best
+  // community-converged setup on record for this circuit + conditions (a
+  // warm start instead of neutral), falling back to neutral only if neither
+  // exists yet.
+  let anchorBias: number[];
+  if (Object.keys(currentValues).length === FM_SETUP_PARAM_ORDER.length) {
+    anchorBias = FM_BIAS_ORDER.map((k) => setupToBiasKeyed(currentValues, ranges)[k]);
+  } else {
+    let memory;
+    try {
+      memory = await fetchFmSetupMemory(circuit_id, conditions);
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Failed to load fm setup memory" },
+        { status: 500 },
+      );
+    }
+    anchorBias = memory
+      ? FM_BIAS_ORDER.map((k) => setupToBiasKeyed(memory.setup_values, ranges)[k])
       : neutralAnchorBias();
+  }
 
   const result = nearestSetup({ ranges, feedbackByBias: currentFeedback, anchorBias });
 
@@ -167,6 +187,29 @@ export async function POST(req: NextRequest) {
           bestSetup: result.best,
         },
       });
+    }
+
+    // Record this converged setup as the new memory-bank best for this
+    // circuit + conditions, if it's at least as good as whatever's already
+    // on record. No-op on the very first neutral-anchor pass before any
+    // feedback has been given, since result.best is only meaningful once
+    // the search has something to converge toward.
+    if (result.best) {
+      try {
+        await upsertFmSetupMemory({
+          circuitId: circuit_id,
+          conditions,
+          setupValues: Object.fromEntries(
+            FM_SETUP_PARAM_ORDER.map((key, i) => [key, result.best![i]]),
+          ) as Record<FmSetupParamKey, number>,
+          lowestRuleBreak: result.lowestRuleBreak,
+          possibleSetups: result.possibleSetups,
+        });
+      } catch (err) {
+        // Non-fatal — don't fail the whole calculation if the memory bank
+        // write fails, the driver still gets their result this call.
+        console.error("[fm/setups/calculate] fm setup memory upsert failed", err);
+      }
     }
 
     return NextResponse.json(
