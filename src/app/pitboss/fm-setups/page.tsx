@@ -390,7 +390,9 @@ export default function FmSetupsPage() {
                     </div>
                   )}
 
-                  {lane.expanded && lane.currentValues && (
+                  {lane.expanded && lane.currentValues && (() => {
+                    const currentValues = lane.currentValues!
+                    return (
                     <div className="space-y-4 pt-2">
                       <p className="text-white/70 font-bold text-xs">Report Back From The Sim</p>
                       <div className="space-y-3">
@@ -399,7 +401,7 @@ export default function FmSetupsPage() {
                             <div className="flex items-center justify-between mb-1">
                               <p className="text-white/40 text-xs uppercase tracking-widest">{p.label}</p>
                               <p className="text-white text-xs font-bold">
-                                {formatValue(lane.currentValues![p.param_key], p)}
+                                {formatValue(currentValues[p.param_key], p)}
                               </p>
                             </div>
                             <input
@@ -407,7 +409,7 @@ export default function FmSetupsPage() {
                               min={p.min_value}
                               max={p.max_value}
                               step={p.step}
-                              value={lane.currentValues[p.param_key]}
+                              value={currentValues[p.param_key]}
                               onChange={(e) => updateCurrentValue(idx, p.param_key, Number(e.target.value))}
                               className="w-full accent-rise-red"
                             />
@@ -453,7 +455,8 @@ export default function FmSetupsPage() {
                         {lane.calculating ? 'Recalculating…' : 'Submit Feedback & Recalculate'}
                       </button>
                     </div>
-                  )}
+                    )
+                  })()}
                 </div>
               )
             })}
