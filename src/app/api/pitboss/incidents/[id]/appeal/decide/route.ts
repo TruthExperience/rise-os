@@ -135,14 +135,27 @@ export async function POST(
     return NextResponse.json({ error: 'Forbidden — steward access required' }, { status: 403 })
   }
 
-  // Reviewing steward must be neither the original resolver nor the appellant
-  if (requestingDriver.id === incident.resolved_by) {
+  // Reviewing steward must be neither the original resolver nor the appellant.
+  // TESTING WINDOW: self-review is allowed until SELF_REVIEW_TEST_WINDOW_END
+  // below, then this reverts to strict enforcement automatically — no env
+  // var to remember to unset. This is a real conflict-of-interest guard in
+  // production; only extend the date if you deliberately need more time,
+  // don't remove the check itself.
+  const SELF_REVIEW_TEST_WINDOW_END = new Date('2026-08-18T00:00:00Z')
+  const bypassSelfReview = new Date() < SELF_REVIEW_TEST_WINDOW_END
+  if (bypassSelfReview) {
+    console.warn(
+      `[appeal/decide POST] self-review test window active (expires ${SELF_REVIEW_TEST_WINDOW_END.toISOString()}) — driver ${requestingDriver.id} reviewing incident ${incident.id}`
+    )
+  }
+
+  if (!bypassSelfReview && requestingDriver.id === incident.resolved_by) {
     return NextResponse.json(
       { error: 'A steward cannot review an appeal of their own ruling' },
       { status: 403 }
     )
   }
-  if (requestingDriver.id === appeal.appealed_by) {
+  if (!bypassSelfReview && requestingDriver.id === appeal.appealed_by) {
     return NextResponse.json(
       { error: 'A steward cannot review an appeal they filed themselves' },
       { status: 403 }
