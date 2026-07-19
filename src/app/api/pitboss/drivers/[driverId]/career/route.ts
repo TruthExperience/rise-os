@@ -31,7 +31,6 @@ type ResultRow = {
   fastest_lap: boolean | null;
   points_earned: number | null;
   round_id: string | null;
-  calendar_round: { is_sprint: boolean | null } | null;
 };
 
 type Franchise = {
@@ -48,11 +47,8 @@ type Franchise = {
   race_top10: number | null;
 };
 
-function isSprint(r: ResultRow) {
-  return r.calendar_round?.is_sprint === true;
-}
-
-function summarize(results: ResultRow[]) {
+function summarize(results: ResultRow[], sprintRoundIds: Set<string>) {
+  const isSprint = (r: ResultRow) => r.round_id != null && sprintRoundIds.has(r.round_id);
   const classified = results.filter((r) => !r.dnf && r.finish_position != null);
   const feature = classified.filter((r) => !isSprint(r));
   const sprint = classified.filter((r) => isSprint(r));
@@ -90,7 +86,7 @@ export async function GET(
       `
       id, league_id, franchise_id, season, round, track,
       finish_position, qualifying_position, dnf, fastest_lap, points_earned,
-      round_id, calendar_round:round_id ( is_sprint )
+      round_id
       `
     )
     .eq("driver_id", driverId)
@@ -103,6 +99,29 @@ export async function GET(
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  // results.round_id has no FK to rise_os.calendar_rounds (different schema,
+  // no constraint), so PostgREST can't embed it — fetch separately instead,
+  // same pattern as the franchises lookup below.
+  const roundIds = Array.from(
+    new Set((results ?? []).map((r) => r.round_id).filter(Boolean))
+  ) as string[];
+
+  let sprintRoundIds = new Set<string>();
+  if (roundIds.length > 0) {
+    const { data: rounds, error: roundErr } = await supabase
+      .schema("rise_os")
+      .from("calendar_rounds")
+      .select("id, is_sprint")
+      .in("id", roundIds);
+
+    if (roundErr) {
+      return NextResponse.json({ error: roundErr.message }, { status: 500 });
+    }
+    sprintRoundIds = new Set(
+      (rounds ?? []).filter((r) => r.is_sprint === true).map((r) => r.id as string)
+    );
   }
 
   // Driver identity + PP — needed for the profile header/stat grid.
@@ -155,7 +174,7 @@ export async function GET(
   }
   const franchiseById = new Map(franchises.map((f) => [f.id, f]));
 
-  const career = summarize(results ?? []);
+  const career = summarize(results ?? [], sprintRoundIds);
 
   const byFranchise = new Map<string, ResultRow[]>();
   for (const r of results ?? []) {
@@ -176,7 +195,7 @@ export async function GET(
             ? seasons[0]
             : `${seasons[0]}–${seasons[seasons.length - 1]}`
           : null,
-      stats: summarize(rows),
+      stats: summarize(rows, sprintRoundIds),
     };
   });
 
