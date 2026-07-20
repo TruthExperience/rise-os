@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 import { SetupFeedbackPanel } from '@/components/setups/SetupFeedbackPanel'
+import { SubmitSetupForm } from '@/components/setups/SubmitSetupForm'
 
 interface CarClass {
   id: string
@@ -550,6 +551,16 @@ export default function SetupsPage() {
           <div className="rounded-xl border border-red-900 bg-red-950/50 px-4 py-3 text-sm text-red-300">
             {error}
           </div>
+        )}
+
+        {carClassId && trackId && (
+          <SubmitSetupForm
+            carClassId={carClassId}
+            trackId={trackId}
+            conditions={conditions}
+            sessionType={sessionType}
+            discordId={session?.user?.discordId}
+          />
         )}
 
         {recommendation && (
