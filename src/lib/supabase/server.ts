@@ -32,6 +32,13 @@ export async function createClient() {
 
 // Service-role admin client — bypasses RLS.
 // Never expose this to the browser. Use only in trusted server contexts.
+//
+// The `global.fetch` override below forces every request this client makes
+// to skip Next.js's Data Cache (cache: 'no-store'). Without it, a route
+// handler that forgets `export const dynamic = 'force-dynamic'` can end up
+// serving a frozen response indefinitely — this data changes via direct
+// SQL/migrations, never via a revalidation path, so there's no downside to
+// always bypassing the cache here.
 export function createAdminClient() {
   return createSupabaseClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -40,6 +47,10 @@ export function createAdminClient() {
       auth: {
         autoRefreshToken: false,
         persistSession: false,
+      },
+      global: {
+        fetch: (url, options = {}) =>
+          fetch(url, { ...options, cache: 'no-store' }),
       },
     }
   )
