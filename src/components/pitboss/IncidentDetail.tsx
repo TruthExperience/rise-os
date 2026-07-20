@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { StewardDiscussion } from '@/components/pitboss/StewardDiscussion'
+import { EvidenceCapture, type EvidenceItem } from '@/components/pitboss/EvidenceCapture'
 
 interface Incident {
   id: string
@@ -57,17 +58,6 @@ interface Appeal {
   reviewed_by: string | null
   reviewed_at: string | null
   created_at: string
-}
-
-interface EvidenceItem {
-  id: string
-  party: 'reporter' | 'accused'
-  source: 'upload' | 'link'
-  url: string
-  label: string | null
-  added_by_role: 'reporter' | 'accused' | 'steward'
-  created_at: string | null
-  legacy?: boolean
 }
 
 const TIME_PENALTIES = ['+3s', '+5s', '+10s', '+15s', 'Drive-Through', 'Pit Lane Start']
@@ -188,10 +178,6 @@ export function IncidentDetail({ id }: { id: string }) {
   const [evidence, setEvidence]               = useState<EvidenceItem[]>([])
   const [showAddEvidence, setShowAddEvidence] = useState(false)
   const [evidenceParty, setEvidenceParty]     = useState<'reporter' | 'accused'>('reporter')
-  const [evidenceUrl, setEvidenceUrl]         = useState('')
-  const [evidenceLabel, setEvidenceLabel]     = useState('')
-  const [addingEvidence, setAddingEvidence]   = useState(false)
-  const [evidenceError, setEvidenceError]     = useState('')
 
   useEffect(() => { loadIncident() }, [id])
 
@@ -221,6 +207,10 @@ export function IncidentDetail({ id }: { id: string }) {
       if (inc.ai_points)  setPenaltyPoints(String(inc.ai_points))
       if (inc.accused_response) setDefenceText(inc.accused_response)
       if (inc.accused_evidence_urls) setDefenceUrls((inc.accused_evidence_urls as string[]).join('\n'))
+      // Default the evidence party toggle to whichever side this viewer
+      // actually is, so a non-steward can't accidentally post as the other party.
+      if (data.isAccused) setEvidenceParty('accused')
+      else setEvidenceParty('reporter')
       await loadEvidence()
     } catch (err: any) {
       setError(err.message)
@@ -229,32 +219,9 @@ export function IncidentDetail({ id }: { id: string }) {
     }
   }
 
-  async function handleAddEvidence() {
-    if (!evidenceUrl.trim()) return
-    setAddingEvidence(true)
-    setEvidenceError('')
-    try {
-      const res = await fetch(`/api/pitboss/incidents/${id}/evidence`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          party: evidenceParty,
-          source: 'link',
-          url: evidenceUrl.trim(),
-          label: evidenceLabel.trim() || null,
-        }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Failed to add evidence')
-      setEvidence((prev) => [...prev, data.evidence])
-      setEvidenceUrl('')
-      setEvidenceLabel('')
-      setShowAddEvidence(false)
-    } catch (err: any) {
-      setEvidenceError(err.message)
-    } finally {
-      setAddingEvidence(false)
-    }
+  function handleEvidenceAdded(item: EvidenceItem) {
+    setEvidence((prev) => [...prev, item])
+    setShowAddEvidence(false)
   }
 
   async function handleAnalyse() {
@@ -505,17 +472,12 @@ export function IncidentDetail({ id }: { id: string }) {
                   ))}
                 </div>
               )}
-              <input value={evidenceUrl} onChange={(e) => setEvidenceUrl(e.target.value)}
-                placeholder="https://..."
-                className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-blue-400/50 focus:outline-none placeholder-white/20" />
-              <input value={evidenceLabel} onChange={(e) => setEvidenceLabel(e.target.value)}
-                placeholder="Label (optional)"
-                className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-blue-400/50 focus:outline-none placeholder-white/20" />
-              {evidenceError && <p className="text-red-400 text-sm">{evidenceError}</p>}
-              <button onClick={handleAddEvidence} disabled={!evidenceUrl.trim() || addingEvidence}
-                className="w-full bg-blue-600 disabled:bg-white/10 disabled:text-white/20 text-white font-black py-3 rounded-2xl text-sm uppercase tracking-widest">
-                {addingEvidence ? 'Adding…' : 'Add Evidence'}
-              </button>
+              <EvidenceCapture
+                incidentId={id}
+                party={evidenceParty}
+                onAdded={handleEvidenceAdded}
+                compact
+              />
             </div>
           )}
 
