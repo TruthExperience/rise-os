@@ -13,11 +13,11 @@
 // Core idea: five setup sliders (Front Angle, Rear Angle, Anti-Roll,
 // Tyre Camber, Toe-Out) linearly combine into five performance biases
 // (Oversteer, Braking, Cornering, Traction, Straights). Practice feedback
-// on each bias ("optimal"/"great"/"good"/"bad"/"bad+"/"bad-") is a
-// constraint, not a bound — every feedback point ever given is kept and
-// re-validated against every candidate setup on each search. The search
-// walks the full grid of ~1,000,000 valid setups, pruning branches whose
-// running rule-break count already exceeds the best candidate found.
+// on each bias ("optimal"/"great"/"good"/"bad") is a constraint, not a
+// bound — every feedback point ever given is kept and re-validated against
+// every candidate setup on each search. The search walks the full grid of
+// ~1,000,000 valid setups, pruning branches whose running rule-break count
+// already exceeds the best candidate found.
 
 export type FmSetupParamKey =
   | "front_wing_angle"
@@ -33,14 +33,10 @@ export type FmBiasKey =
   | "traction"
   | "straights";
 
-export type FmFeedbackValue =
-  | "optimal"
-  | "great"
-  | "good"
-  | "bad"
-  | "bad+"
-  | "bad-"
-  | "unknown";
+// "bad+"/"bad-" removed — they don't correspond to any real in-game
+// feedback option (the game only exposes optimal/great/good/bad), so they
+// were unreachable from actual play and only ever set by test data.
+export type FmFeedbackValue = "optimal" | "great" | "good" | "bad" | "unknown";
 
 export interface FmFeedbackPoint {
   value: number; // the computed bias (0-1) at the moment this feedback was given
@@ -211,8 +207,6 @@ export function validateFeedbackBreaks(
       if (f === "unknown") continue;
       const breaks =
         (f === "bad" && dx < GOOD_BREAKPOINT) ||
-        (f === "bad+" && fb.value - x < GOOD_BREAKPOINT) ||
-        (f === "bad-" && fb.value - x > -GOOD_BREAKPOINT) ||
         (f === "good" && (dx > GOOD_BREAKPOINT || dx < GREAT_BREAKPOINT)) ||
         (f === "great" && (dx > GREAT_BREAKPOINT || dx < OPTIMAL_BREAKPOINT)) ||
         (f === "optimal" && dx >= OPTIMAL_BREAKPOINT);
@@ -413,10 +407,6 @@ function allowedIntervalsFor(fb: FmFeedbackPoint): Interval[] {
         [0, v - D],
         [v + D, 1],
       ]);
-    case "bad+":
-      return clampSet([[0, v - D]]);
-    case "bad-":
-      return clampSet([[v + D, 1]]);
     default:
       return [[0, 1]];
   }
