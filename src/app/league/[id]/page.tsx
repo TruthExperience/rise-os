@@ -173,6 +173,22 @@ export default function LeagueDetailPage() {
         />
         {showPitboss && (
           <NavCard
+            icon="🏆"
+            label="Standings"
+            sub="Driver championship"
+            onClick={() => router.push(`/pitboss/standings?league_id=${id}`)}
+          />
+        )}
+        {showPitboss && (
+          <NavCard
+            icon="🏁"
+            label="Results"
+            sub="Race results"
+            onClick={() => router.push(`/pitboss/results?league_id=${id}`)}
+          />
+        )}
+        {showPitboss && (
+          <NavCard
             icon="🎓"
             label="Certification"
             sub="Pitboss exams"
