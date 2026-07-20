@@ -48,6 +48,17 @@ export async function GET(req: NextRequest) {
 
   const supabase = createAdminClient()
 
+  const { data: league, error: leagueError } = await supabase
+    .schema('pitboss')
+    .from('leagues')
+    .select('name, logo_url')
+    .eq('id', leagueId)
+    .single()
+
+  if (leagueError || !league) {
+    return NextResponse.json({ error: 'League not found' }, { status: 404 })
+  }
+
   let query = supabase
     .schema('pitboss')
     .from('results')
@@ -87,7 +98,11 @@ export async function GET(req: NextRequest) {
     driver: driverMap[r.driver_id] ?? null,
   }))
 
-  return NextResponse.json({ results: enriched })
+  return NextResponse.json({
+    league_name: league.name,
+    league_logo_url: league.logo_url,
+    results: enriched,
+  })
 }
 
 // POST — bulk insert results for a round (steward only)
