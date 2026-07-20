@@ -41,6 +41,22 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
 
+  // Hidden debug toggle — tap the header title 5x to reveal raw param
+  // payload as received by the client. Not gated behind an env flag on
+  // purpose: this needs to work against production without a redeploy,
+  // since the bug we're chasing may only reproduce on live data.
+  const [titleTapCount, setTitleTapCount] = useState(0)
+  const [debugVisible, setDebugVisible] = useState(false)
+
+  function handleTitleTap() {
+    const next = titleTapCount + 1
+    setTitleTapCount(next)
+    if (next >= 5) {
+      setDebugVisible((prev) => !prev)
+      setTitleTapCount(0)
+    }
+  }
+
   useEffect(() => {
     if (!expanded || !carClassId || !sessionType) return
     setLoadingParams(true)
@@ -50,6 +66,9 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
       .then((data) => {
         if (data.error) throw new Error(data.error)
         const ranges: ParamRange[] = data.params ?? []
+        if (debugVisible) {
+          console.log('RAW PARAMS RESPONSE:', JSON.stringify(ranges, null, 2))
+        }
         setParams(ranges)
         setValues(
           Object.fromEntries(ranges.map((r) => [r.param_key, r.default_value ?? r.min_value]))
@@ -57,7 +76,7 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
       })
       .catch((err) => setError(err.message ?? 'Failed to load setup parameters'))
       .finally(() => setLoadingParams(false))
-  }, [expanded, carClassId, sessionType])
+  }, [expanded, carClassId, sessionType, debugVisible])
 
   const grouped = useMemo(() => {
     const groups: Record<string, ParamRange[]> = {}
@@ -114,7 +133,15 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
         className="w-full flex items-center justify-between px-4 py-3 text-left"
       >
         <div>
-          <p className="text-white text-sm font-semibold">Submit Your Own Setup</p>
+          <p
+            className="text-white text-sm font-semibold"
+            onClick={(e) => {
+              e.stopPropagation()
+              handleTitleTap()
+            }}
+          >
+            Submit Your Own Setup
+          </p>
           <p className="text-gray-500 text-xs mt-0.5">
             Ran a setup that worked? Contribute it — future recommendations here will factor it in.
           </p>
@@ -124,6 +151,17 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
 
       {expanded && (
         <div className="px-4 pb-4 space-y-4 border-t border-gray-800 pt-4">
+          {debugVisible && (
+            <div className="rounded-lg border border-green-700 bg-black p-2">
+              <p className="text-green-400 text-[9px] uppercase tracking-wide mb-1">
+                Debug — raw params from API ({params.length} total, {params.filter((p) => p.param_group === 'tyres').length} tyres)
+              </p>
+              <pre className="text-[8px] text-green-400 overflow-auto max-h-64 whitespace-pre-wrap break-all">
+                {JSON.stringify(params.filter((p) => p.param_group === 'tyres'), null, 2)}
+              </pre>
+            </div>
+          )}
+
           {loadingParams ? (
             <p className="text-gray-500 text-xs">Loading setup parameters…</p>
           ) : params.length === 0 ? (
@@ -134,6 +172,9 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
                 <div key={group}>
                   <p className="text-gray-400 text-xs font-semibold uppercase tracking-wide mb-2">
                     {GROUP_LABELS[group] ?? group}
+                    {debugVisible && (
+                      <span className="text-green-400 ml-2 normal-case">({groupParams.length})</span>
+                    )}
                   </p>
                   <div className="space-y-3">
                     {groupParams.map((p) => (
