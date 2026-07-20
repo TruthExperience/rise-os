@@ -56,6 +56,8 @@ export async function GET(req: NextRequest) {
       qualifying_position, finish_position,
       dnf, dnf_reason, fastest_lap,
       points_earned, penalty_points_added,
+      sprint_qualifying_position, sprint_finish_position,
+      sprint_dnf, sprint_fastest_lap, sprint_points_earned,
       created_at, round_id
     `)
     .eq('league_id', leagueId)
@@ -112,18 +114,23 @@ export async function POST(req: NextRequest) {
 
   const inserts = rows.map((r: any) => ({
     league_id,
-    driver_id:            r.driver_id,
-    season:               r.season,
-    round:                r.round,
-    round_id:             r.round_id ?? null,
-    track:                r.track ?? null,
-    qualifying_position:  r.qualifying_position ?? null,
-    finish_position:      r.finish_position ?? null,
-    dnf:                  r.dnf ?? false,
-    dnf_reason:           r.dnf_reason ?? null,
-    fastest_lap:          r.fastest_lap ?? false,
-    points_earned:        r.points_earned ?? 0,
-    penalty_points_added: r.penalty_points_added ?? 0,
+    driver_id:                  r.driver_id,
+    season:                     r.season,
+    round:                      r.round,
+    round_id:                   r.round_id ?? null,
+    track:                      r.track ?? null,
+    qualifying_position:        r.qualifying_position ?? null,
+    finish_position:            r.finish_position ?? null,
+    dnf:                        r.dnf ?? false,
+    dnf_reason:                 r.dnf_reason ?? null,
+    fastest_lap:                r.fastest_lap ?? false,
+    points_earned:              r.points_earned ?? 0,
+    penalty_points_added:       r.penalty_points_added ?? 0,
+    sprint_qualifying_position: r.sprint_qualifying_position ?? null,
+    sprint_finish_position:     r.sprint_finish_position ?? null,
+    sprint_dnf:                 r.sprint_dnf ?? false,
+    sprint_fastest_lap:         r.sprint_fastest_lap ?? false,
+    sprint_points_earned:       r.sprint_points_earned ?? 0,
   }))
 
   const { data, error } = await supabase
@@ -133,6 +140,15 @@ export async function POST(req: NextRequest) {
     .select()
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+  const { error: recomputeError } = await supabase.schema('pitboss').rpc('recompute_driver_standings')
+  if (recomputeError) {
+    return NextResponse.json(
+      { results: data, warning: `Results saved, but standings recompute failed: ${recomputeError.message}` },
+      { status: 201 }
+    )
+  }
+
   return NextResponse.json({ results: data }, { status: 201 })
 }
 
@@ -161,6 +177,8 @@ export async function PUT(req: NextRequest) {
   const allowed = [
     'finish_position', 'qualifying_position', 'dnf', 'dnf_reason',
     'fastest_lap', 'points_earned', 'penalty_points_added', 'track',
+    'sprint_qualifying_position', 'sprint_finish_position',
+    'sprint_dnf', 'sprint_fastest_lap', 'sprint_points_earned',
   ]
   const patch = Object.fromEntries(
     Object.entries(updates).filter(([k]) => allowed.includes(k))
@@ -176,5 +194,13 @@ export async function PUT(req: NextRequest) {
     .single()
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+  const { error: recomputeError } = await supabase.schema('pitboss').rpc('recompute_driver_standings')
+  if (recomputeError) {
+    return NextResponse.json(
+      { result: data, warning: `Result updated, but standings recompute failed: ${recomputeError.message}` }
+    )
+  }
+
   return NextResponse.json({ result: data })
 }
