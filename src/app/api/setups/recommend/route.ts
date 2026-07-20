@@ -16,6 +16,12 @@ import {
 } from '@/lib/pitboss/setup-engine-data';
 import { resolveDriverIdFromSession } from '@/lib/pitboss/resolveDriver';
 
+// Forces this route to opt out of Next.js's static/Data Cache handling.
+// Setup param ranges, overrides, and submissions change via direct SQL/
+// migrations rather than any revalidation path — a cached response here
+// can silently serve stale data indefinitely across deployments.
+export const dynamic = 'force-dynamic';
+
 interface RecommendRequestBody {
   league_id?:    string | null;
   car_class_id:  string;
