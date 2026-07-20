@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 interface ResultRow {
@@ -19,7 +19,7 @@ interface ResultRow {
   driver: { display_name: string | null; discord_username: string } | null;
 }
 
-export default function ResultsPage() {
+function ResultsContent() {
   const searchParams = useSearchParams();
   const leagueId = searchParams.get("league_id");
   const [season, setSeason] = useState("2026");
@@ -123,5 +123,13 @@ export default function ResultsPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function ResultsPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-black" />}>
+      <ResultsContent />
+    </Suspense>
   );
 }
