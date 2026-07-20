@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import SessionProvider from "@/components/providers/SessionProvider";
+import { SwUpdateListener } from "@/components/providers/SwUpdateListener";
 import BottomNav from "@/components/ui/BottomNav";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -55,6 +56,7 @@ export default function RootLayout({
         />
       </head>
       <body className={inter.className}>
+        <SwUpdateListener />
         <SessionProvider>
           <div className="pb-[calc(4rem+env(safe-area-inset-bottom))]">
             {children}
