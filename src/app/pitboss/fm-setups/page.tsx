@@ -8,7 +8,11 @@ import { useRouter } from 'next/navigation'
 
 type FmSetupParamKey = 'front_wing_angle' | 'rear_wing_angle' | 'anti_roll_bar' | 'tyre_camber' | 'toe_out'
 type FmBiasKey = 'oversteer' | 'braking' | 'cornering' | 'traction' | 'straights'
-type FmFeedbackValue = 'optimal' | 'great' | 'good' | 'bad' | 'bad+' | 'bad-' | 'unknown'
+// Matches the in-game feedback categories exactly — F1 Manager only ever
+// shows Optimal/Great/Good/Bad after a practice run. "Bad+"/"Bad-" aren't
+// real in-game options and the engine no longer narrows on them (see
+// fm-setup-engine.ts) — keeping them here would silently no-op.
+type FmFeedbackValue = 'optimal' | 'great' | 'good' | 'bad' | 'unknown'
 
 interface Track {
   id: string
@@ -39,16 +43,27 @@ interface CalculateResponse {
   current_feedback: Record<FmBiasKey, { value: number; feedback: FmFeedbackValue }[]>
 }
 
+interface HistoryIteration {
+  iteration_number: number
+  feedback: Record<FmBiasKey, FmFeedbackValue> | Record<string, unknown>
+  applied_deltas: Record<string, number> | null
+  created_at: string
+}
+
+interface HistoryResponse {
+  session_id: string
+  marked_optimal_at: string | null
+  iterations: HistoryIteration[]
+}
+
 const FM_BIAS_ORDER: FmBiasKey[] = ['oversteer', 'braking', 'cornering', 'traction', 'straights']
-const FEEDBACK_OPTIONS: FmFeedbackValue[] = ['optimal', 'great', 'good', 'bad', 'bad+', 'bad-']
+const FEEDBACK_OPTIONS: FmFeedbackValue[] = ['optimal', 'great', 'good', 'bad']
 
 const FEEDBACK_LABELS: Record<FmFeedbackValue, string> = {
   optimal: 'Optimal',
   great: 'Great',
   good: 'Good',
   bad: 'Bad',
-  'bad+': 'Bad+',
-  'bad-': 'Bad-',
   unknown: 'Unknown',
 }
 
@@ -73,6 +88,15 @@ function formatValue(v: number, p: ParamDef) {
   return `${rounded}${p.unit}`
 }
 
+function formatTimestamp(iso: string) {
+  return new Date(iso).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
 // ─── Per-driver lane state ──────────────────────────────────────────────
 
 interface LaneState {
@@ -85,6 +109,14 @@ interface LaneState {
   currentValues: Record<FmSetupParamKey, number> | null
   feedbackSelections: Partial<Record<FmBiasKey, FmFeedbackValue>>
   expanded: boolean
+  // History panel
+  historyOpen: boolean
+  historyLoading: boolean
+  historyError: string
+  history: HistoryResponse | null
+  // Mark-as-optimal
+  markingOptimal: boolean
+  markOptimalError: string
 }
 
 function emptyLane(slot: 1 | 2): LaneState {
@@ -98,6 +130,12 @@ function emptyLane(slot: 1 | 2): LaneState {
     currentValues: null,
     feedbackSelections: {},
     expanded: true,
+    historyOpen: false,
+    historyLoading: false,
+    historyError: '',
+    history: null,
+    markingOptimal: false,
+    markOptimalError: '',
   }
 }
 
@@ -182,6 +220,11 @@ export default function FmSetupsPage() {
         result: data,
         currentValues: rounded,
         feedbackSelections: {},
+        // A new calculation supersedes whatever history/optimal state was
+        // showing for the previous session on this lane.
+        history: null,
+        historyOpen: false,
+        markOptimalError: '',
       })
       return data as CalculateResponse
     } catch (err: any) {
@@ -227,6 +270,88 @@ export default function FmSetupsPage() {
   function resetSession() {
     setSessionStarted(false)
     setLanes([emptyLane(1), emptyLane(2)])
+  }
+
+  // ── History panel ──────────────────────────────────────────────────────
+
+  async function toggleHistory(idx: 0 | 1) {
+    const lane = lanes[idx]
+    if (!lane.result) return
+
+    // Collapsing just hides it — don't refetch on every reopen unless stale.
+    if (lane.historyOpen) {
+      updateLane(idx, { historyOpen: false })
+      return
+    }
+
+    updateLane(idx, { historyOpen: true, historyLoading: true, historyError: '' })
+    try {
+      const qs = new URLSearchParams({
+        session_id: lane.result.session_id,
+        ...(discordId() ? { discord_id: discordId() } : {}),
+      })
+      const res = await fetch(`/api/pitboss/fm/setups/history?${qs.toString()}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to load history')
+      updateLane(idx, { history: data })
+    } catch (err: any) {
+      updateLane(idx, { historyError: err.message })
+    } finally {
+      updateLane(idx, { historyLoading: false })
+    }
+  }
+
+  // ── Mark as optimal ────────────────────────────────────────────────────
+
+  async function handleMarkOptimal(idx: 0 | 1) {
+    const lane = lanes[idx]
+    if (!lane.result?.best_setup) return
+
+    const confirmed = window.confirm(
+      'Confirm this setup worked in-game? This promotes it to the verified setup for this track and conditions, overriding any previous best.'
+    )
+    if (!confirmed) return
+
+    updateLane(idx, { markingOptimal: true, markOptimalError: '' })
+    try {
+      const res = await fetch('/api/pitboss/fm/setups/mark-optimal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: lane.result.session_id,
+          discord_id: discordId(),
+          setup_values: lane.result.best_setup,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to mark setup as optimal')
+
+      // Reflect the confirmation immediately without a full refetch —
+      // if the history panel is open, its own state gets the same stamp.
+      updateLane(idx, {
+        history: lane.history
+          ? { ...lane.history, marked_optimal_at: new Date().toISOString() }
+          : lane.history,
+      })
+      // A lightweight local flag so the button swaps to a checkmark state
+      // even if the history panel was never opened this session.
+      setLanes((prev) => {
+        const next = [...prev] as [LaneState, LaneState]
+        next[idx] = {
+          ...next[idx],
+          history: next[idx].history ?? {
+            session_id: lane.result!.session_id,
+            marked_optimal_at: new Date().toISOString(),
+            iterations: [],
+          },
+        }
+        return next
+      })
+    } catch (err: any) {
+      updateLane(idx, { markOptimalError: err.message })
+    } finally {
+      updateLane(idx, { markingOptimal: false })
+    }
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -337,6 +462,7 @@ export default function FmSetupsPage() {
           <div className="grid grid-cols-1 gap-4">
             {([0, 1] as const).map((idx) => {
               const lane = lanes[idx]
+              const isMarkedOptimal = !!lane.history?.marked_optimal_at
               return (
                 <div key={idx} className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-4">
                   <button
@@ -376,7 +502,22 @@ export default function FmSetupsPage() {
 
                   {lane.expanded && lane.result?.best_setup && (
                     <div className="rounded-2xl border border-rise-red/30 bg-rise-red/5 p-4">
-                      <p className="text-white/40 text-xs uppercase tracking-widest mb-3">Recommended Setup</p>
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-white/40 text-xs uppercase tracking-widest">Recommended Setup</p>
+                        {isMarkedOptimal ? (
+                          <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1">
+                            ✓ Confirmed Optimal
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleMarkOptimal(idx)}
+                            disabled={lane.markingOptimal}
+                            className="text-[11px] font-bold uppercase tracking-wide text-rise-red disabled:opacity-40"
+                          >
+                            {lane.markingOptimal ? 'Saving…' : 'Mark as Optimal'}
+                          </button>
+                        )}
+                      </div>
                       <div className="grid grid-cols-2 gap-3">
                         {params.map((p) => (
                           <div key={p.param_key}>
@@ -387,6 +528,58 @@ export default function FmSetupsPage() {
                           </div>
                         ))}
                       </div>
+                      {lane.markOptimalError && (
+                        <p className="text-red-400 text-[11px] mt-2">{lane.markOptimalError}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {lane.expanded && lane.result && (
+                    <div>
+                      <button
+                        onClick={() => toggleHistory(idx)}
+                        className="w-full flex items-center justify-between text-white/40 text-xs uppercase tracking-widest py-1"
+                      >
+                        <span>Past Tried Setups This Session</span>
+                        <span className={`transition-transform ${lane.historyOpen ? 'rotate-180' : ''}`}>▾</span>
+                      </button>
+
+                      {lane.historyOpen && (
+                        <div className="mt-2 space-y-2">
+                          {lane.historyLoading && (
+                            <p className="text-white/30 text-xs">Loading…</p>
+                          )}
+                          {lane.historyError && (
+                            <p className="text-red-400 text-xs">{lane.historyError}</p>
+                          )}
+                          {lane.history && lane.history.iterations.length === 0 && !lane.historyLoading && (
+                            <p className="text-white/30 text-xs">No feedback submitted yet this session.</p>
+                          )}
+                          {lane.history?.iterations.map((it) => (
+                            <div
+                              key={it.iteration_number}
+                              className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2"
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <p className="text-white/50 text-[11px] font-bold">
+                                  Iteration {it.iteration_number}
+                                </p>
+                                <p className="text-white/30 text-[10px]">{formatTimestamp(it.created_at)}</p>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {Object.entries(it.feedback ?? {}).map(([bias, fb]) => (
+                                  <span
+                                    key={bias}
+                                    className="text-[10px] px-2 py-0.5 rounded-full bg-white/5 text-white/50 border border-white/10"
+                                  >
+                                    {BIAS_LABELS[bias as FmBiasKey] ?? bias}: {String(fb)}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
 
