@@ -4,8 +4,39 @@ import { useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import { DriverPicker, type DriverOption } from '@/components/pitboss/DriverPicker'
+import { supabaseBrowser } from '@/lib/supabase/browser'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+
+// Shared across every league — previously copy-pasted identically five times.
+const INCIDENT_TYPES: string[] = [
+  'Illegal Divebomb',
+  'Axle Rule Violation',
+  'Unsafe Rejoin',
+  'No Movement Under Braking Violation',
+  'Retaliation / Double-Strike',
+  'Targeting',
+  'Track Limits',
+  'Corner Cut',
+  'Dangerous Driving',
+  'Illegal Overtake',
+  'Collision / Contact',
+  'Causing a Collision',
+  'Blocking / Brake Test',
+  'Erratic Defending',
+  'Forcing Off Track',
+  'Yellow Flag Violation',
+  'Blue Flag / Impeding',
+  'Safety Car Infringement',
+  'False Start',
+  'Technical / Setup Infringement',
+  'Pit Lane Infringement',
+  'Unsportsmanlike Conduct',
+  'Chat / Voice Abuse',
+  'No-Show / Late Join',
+  'Rage Quit / DNF Avoidance',
+  'Other',
+]
 
 const LEAGUE_META: Record<string, {
   name: string
@@ -17,121 +48,31 @@ const LEAGUE_META: Record<string, {
     name: 'Truth Racing League',
     slug: 'trl',
     openToAll: false,
-    incidentTypes: [
-      'Illegal Divebomb',
-      'Axle Rule Violation',
-      'Unsafe Rejoin',
-      'No Movement Under Braking Violation',
-      'Retaliation / Double-Strike',
-      'Targeting',
-      'Track Limits',
-      'Corner Cut',
-      'Dangerous Driving',
-      'Illegal Overtake',
-      'Divebomb',
-      'Collision / Contact',
-      'Blocking / Brake Test',
-      'Pit Lane Infringement',
-      'Unsportsmanlike Conduct',
-      'No-Show / Late Join',
-      'Other',
-    ],
+    incidentTypes: INCIDENT_TYPES,
   },
   'a2fbdea9-5db9-4ca3-b5c9-981d1558120d': {
     name: 'World Series Championship',
     slug: 'wsc',
     openToAll: true,
-    incidentTypes: [
-      'Illegal Divebomb',
-      'Axle Rule Violation',
-      'Unsafe Rejoin',
-      'No Movement Under Braking Violation',
-      'Retaliation / Double-Strike',
-      'Targeting',
-      'Track Limits',
-      'Corner Cut',
-      'Dangerous Driving',
-      'Illegal Overtake',
-      'Divebomb',
-      'Collision / Contact',
-      'Blocking / Brake Test',
-      'Pit Lane Infringement',
-      'Unsportsmanlike Conduct',
-      'No-Show / Late Join',
-      'Other',
-    ],
+    incidentTypes: INCIDENT_TYPES,
   },
   'e9d9fa80-074c-4bc5-a696-f53edc0e6cdf': {
     name: 'Apex World Championship',
     slug: 'awc',
     openToAll: true,
-    incidentTypes: [
-      'Illegal Divebomb',
-      'Axle Rule Violation',
-      'Unsafe Rejoin',
-      'No Movement Under Braking Violation',
-      'Retaliation / Double-Strike',
-      'Targeting',
-      'Track Limits',
-      'Corner Cut',
-      'Dangerous Driving',
-      'Illegal Overtake',
-      'Divebomb',
-      'Collision / Contact',
-      'Blocking / Brake Test',
-      'Pit Lane Infringement',
-      'Unsportsmanlike Conduct',
-      'No-Show / Late Join',
-      'Other',
-    ],
+    incidentTypes: INCIDENT_TYPES,
   },
   '7e8a009c-99ea-4252-b7d6-e48c58fc3cfd': {
     name: 'Slipstream Racing Hub',
     slug: 'slipstream-racing-hub',
     openToAll: true,
-    incidentTypes: [
-      'Illegal Divebomb',
-      'Axle Rule Violation',
-      'Unsafe Rejoin',
-      'No Movement Under Braking Violation',
-      'Retaliation / Double-Strike',
-      'Targeting',
-      'Track Limits',
-      'Corner Cut',
-      'Dangerous Driving',
-      'Illegal Overtake',
-      'Divebomb',
-      'Collision / Contact',
-      'Blocking / Brake Test',
-      'Pit Lane Infringement',
-      'Unsportsmanlike Conduct',
-      'No-Show / Late Join',
-      'Other',
-    ],
+    incidentTypes: INCIDENT_TYPES,
   },
   'b4fb9276-cdbd-49f8-b750-fe1c966e470a': {
     name: 'Aero Aces Racing League',
     slug: 'aarl',
     openToAll: true,
-    incidentTypes: [
-      'Illegal Divebomb',
-      'Axle Rule Violation',
-      'Unsafe Rejoin',
-      'No Movement Under Braking Violation',
-      'Retaliation / Double-Strike',
-      'Targeting',
-      'Track Limits',
-      'Corner Cut',
-      'Dangerous Driving',
-      'Illegal Overtake',
-      'Divebomb',
-      'Collision / Contact',
-      'Blocking / Brake Test',
-      'Pit Lane Infringement',
-      'Unsportsmanlike Conduct',
-      'No-Show / Late Join',
-      'Other',
-    ],
+    incidentTypes: INCIDENT_TYPES,
   },
 }
 
@@ -145,13 +86,22 @@ const TYPE_ICONS: Record<string, string> = {
   'Corner Cut': '✂️',
   'Dangerous Driving': '🚨',
   'Illegal Overtake': '🔀',
-  'Divebomb': '🚀',
   'Collision / Contact': '💥',
+  'Causing a Collision': '💢',
   'Blocking / Brake Test': '🛑',
+  'Erratic Defending': '🌀',
+  'Forcing Off Track': '⤴️',
   'Track Limits': '📏',
+  'Yellow Flag Violation': '🟡',
+  'Blue Flag / Impeding': '🔵',
+  'Safety Car Infringement': '🚓',
+  'False Start': '🏁',
+  'Technical / Setup Infringement': '🔧',
   'Pit Lane Infringement': '🅿️',
   'Unsportsmanlike Conduct': '😤',
+  'Chat / Voice Abuse': '💬',
   'No-Show / Late Join': '👻',
+  'Rage Quit / DNF Avoidance': '🔌',
   'Other': '📋',
 }
 
@@ -161,6 +111,11 @@ interface LeagueMembership {
   league_id: string
   role: string
   league: { id: string; name: string; slug: string } | null
+}
+
+interface StagedFile {
+  id: string
+  file: File
 }
 
 type Screen = 'league' | 'form' | 'submitted'
@@ -232,8 +187,11 @@ export default function IncidentsPage() {
   const [useManual, setUseManual] = useState(false)
   const [accusedManual, setAccusedManual] = useState('')
   const [evidenceUrls, setEvidenceUrls] = useState<string[]>([''])
+  const [evidenceFiles, setEvidenceFiles] = useState<StagedFile[]>([])
   const [submitting, setSubmitting] = useState(false)
+  const [uploadingEvidence, setUploadingEvidence] = useState(false)
   const [submitError, setSubmitError] = useState('')
+  const [evidenceUploadWarning, setEvidenceUploadWarning] = useState('')
 
   // ── Load memberships ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -275,6 +233,57 @@ export default function IncidentsPage() {
     fetchMyIncidents(leagueId)
   }
 
+  // ── Evidence file staging ───────────────────────────────────────────────────
+  function handleFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? [])
+    if (files.length === 0) return
+    setEvidenceFiles((prev) => [
+      ...prev,
+      ...files.map((file) => ({ id: `${Date.now()}-${file.name}-${Math.random()}`, file })),
+    ])
+    e.target.value = ''
+  }
+
+  function removeStagedFile(id: string) {
+    setEvidenceFiles((prev) => prev.filter((f) => f.id !== id))
+  }
+
+  // Uploads staged files against an already-created incident. Non-fatal:
+  // the incident is already saved by this point, so a failed upload just
+  // surfaces a warning rather than blocking the "submitted" screen.
+  async function uploadStagedEvidence(incidentId: string) {
+    if (evidenceFiles.length === 0) return
+    setUploadingEvidence(true)
+    const failures: string[] = []
+    for (const { file } of evidenceFiles) {
+      try {
+        const path = `${incidentId}/reporter-${Date.now()}-${file.name}`
+        const { error: uploadError } = await supabaseBrowser.storage
+          .from('incident-evidence')
+          .upload(path, file)
+        if (uploadError) throw uploadError
+
+        const res = await fetch(`/api/pitboss/incidents/${incidentId}/evidence`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ party: 'reporter', source: 'upload', url: path, label: file.name }),
+        })
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(data.error ?? 'Failed to attach evidence')
+        }
+      } catch {
+        failures.push(file.name)
+      }
+    }
+    setUploadingEvidence(false)
+    if (failures.length > 0) {
+      setEvidenceUploadWarning(
+        `Report submitted, but ${failures.length === 1 ? 'this file' : 'these files'} failed to upload: ${failures.join(', ')}. You can add ${failures.length === 1 ? 'it' : 'them'} again from the incident page.`
+      )
+    }
+  }
+
   // ── Submit ─────────────────────────────────────────────────────────────────
   async function handleSubmit() {
     if (!incidentType) {
@@ -287,6 +296,7 @@ export default function IncidentsPage() {
     }
     setSubmitting(true)
     setSubmitError('')
+    setEvidenceUploadWarning('')
     try {
       const urls = evidenceUrls.filter((u) => u.trim().length > 0)
       const res = await fetch('/api/pitboss/incidents', {
@@ -306,6 +316,12 @@ export default function IncidentsPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Submission failed')
+
+      const incidentId = data.incident?.id ?? data.id
+      if (incidentId) {
+        await uploadStagedEvidence(incidentId)
+      }
+
       setScreen('submitted')
       fetchMyIncidents(selectedLeagueId)
     } catch (err: any) {
@@ -327,7 +343,9 @@ export default function IncidentsPage() {
     setUseManual(false)
     setAccusedManual('')
     setEvidenceUrls([''])
+    setEvidenceFiles([])
     setSubmitError('')
+    setEvidenceUploadWarning('')
   }
 
   // ── Auth guard ─────────────────────────────────────────────────────────────
@@ -435,6 +453,9 @@ export default function IncidentsPage() {
               <p className="text-gray-400 text-sm mt-1">
                 Your incident report has been filed and is pending steward review.
               </p>
+              {evidenceUploadWarning && (
+                <p className="text-yellow-400 text-xs mt-3 max-w-xs">{evidenceUploadWarning}</p>
+              )}
             </div>
             <button
               onClick={resetForm}
@@ -617,6 +638,35 @@ export default function IncidentsPage() {
               )}
             </div>
 
+            <div>
+              <p className="text-gray-400 text-xs uppercase tracking-widest mb-1">Evidence Files</p>
+              <p className="text-gray-600 text-xs mb-3">
+                Upload clips directly instead of (or alongside) a link. Uploaded once the report is submitted.
+              </p>
+              <label className="flex items-center justify-center gap-2 bg-gray-800 border border-dashed border-gray-700 rounded-xl px-4 py-4 cursor-pointer text-gray-400 text-sm">
+                📹 Choose video file(s)
+                <input
+                  type="file"
+                  accept="video/*"
+                  multiple
+                  onChange={handleFilesSelected}
+                  className="hidden"
+                />
+              </label>
+              {evidenceFiles.length > 0 && (
+                <div className="space-y-2 mt-2">
+                  {evidenceFiles.map(({ id, file }) => (
+                    <div key={id} className="flex items-center gap-2 bg-gray-800 rounded-xl px-4 py-2.5">
+                      <span className="text-gray-300 text-xs flex-1 truncate">{file.name}</span>
+                      <button onClick={() => removeStagedFile(id)} className="text-gray-600 text-lg px-2">
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="bg-[#E8284A]/5 border border-[#E8284A]/20 rounded-xl px-4 py-3">
               <p className="text-gray-400 text-xs leading-relaxed">
                 By submitting this report you confirm the information provided is accurate to the best
@@ -635,10 +685,10 @@ export default function IncidentsPage() {
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={submitting || !description.trim() || !incidentType}
+                disabled={submitting || uploadingEvidence || !description.trim() || !incidentType}
                 className="flex-1 bg-[#E8284A] disabled:opacity-40 text-white font-bold py-3 rounded-xl text-sm"
               >
-                {submitting ? 'Submitting…' : 'Submit Report'}
+                {uploadingEvidence ? 'Uploading evidence…' : submitting ? 'Submitting…' : 'Submit Report'}
               </button>
             </div>
           </div>
