@@ -341,11 +341,19 @@ const TEAM_TRAIT_PARAM_MAP: Record<keyof TeamTraits, ParamWeightMap> = {
   },
   reliability: { brake_pressure: 0.03 },
   drag_efficiency: { front_wing_aero: 0.05, rear_wing_aero: 0.05 },
+  // FIXED — this used to point at front_tyre_pressure/rear_tyre_pressure,
+  // which were retired when tyre pressure moved from a 2-param (front/rear)
+  // model to 4 per-corner params. accumulateWeightedDeltas silently drops
+  // any param_key it can't find in paramRanges, so this map went dead
+  // (zero effect, no error) the moment that migration ran. Fixed to the
+  // 4 real keys.
   tyre_wear_management: {
     front_camber: -0.05,
     rear_camber: -0.05,
-    front_tyre_pressure: -0.03,
-    rear_tyre_pressure: -0.03,
+    front_left_tyre_pressure: -0.03,
+    front_right_tyre_pressure: -0.03,
+    rear_left_tyre_pressure: -0.03,
+    rear_right_tyre_pressure: -0.03,
   },
 };
 
@@ -455,7 +463,7 @@ export function applyTeamAndDriverBias(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Session-type bias (deterministic) — NEW
+// Session-type bias (deterministic)
 // ---------------------------------------------------------------------------
 //
 // Reuses the same accumulateWeightedDeltas/applyDeltas core as team/driver
@@ -554,7 +562,7 @@ export function applySessionBias(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Driver style / car feel bias (deterministic) — NEW
+// Driver style / car feel bias (deterministic)
 // ---------------------------------------------------------------------------
 //
 // Reuses the same accumulateWeightedDeltas/applyDeltas core as team/driver
@@ -564,7 +572,13 @@ export function applySessionBias(params: {
 // it's modeled as a single always-on source (normalizedValue: 1) whose
 // weight map already encodes the full desired shift for that preference.
 // "balanced" is intentionally an empty map: no bias, same baseline everyone
-// else gets.
+// else gets — that opt-out semantics is deliberate and preserved here.
+
+// CHANGED — was 0.15, tied to the same ceiling as inferred team/driver-stat
+// bias. Car feel preference is a direct driver self-report (higher signal
+// than inferred traits) and is meant to shape the setup meaningfully from
+// the first generation, not just nudge it. Raised to 0.22.
+const MAX_STYLE_DELTA_FRACTION = 0.22;
 
 export type CarFeelPreference =
   | "loose_oversteer"
@@ -573,20 +587,33 @@ export type CarFeelPreference =
   | "aggressive_rotation"
   | "stable_predictable";
 
-const MAX_STYLE_DELTA_FRACTION = 0.15;
-
 const CAR_FEEL_PARAM_MAP: Record<CarFeelPreference, ParamWeightMap> = {
   loose_oversteer: {
     rear_wing_aero: -0.06,
     rear_arb: -0.06,
     rear_ride_height: -0.04,
     diff_adjustment_on_throttle: 0.06,
+    // ADDED — higher rear pressure shrinks the rear contact patch (less
+    // rear mechanical grip, promotes rotation); lower front pressure grows
+    // the front patch (more front bite). Both push toward the requested
+    // oversteer-on-demand feel. First-pass coefficient, not yet validated
+    // against real driver feedback — same caveat as tyre_wear_management.
+    rear_left_tyre_pressure: 0.03,
+    rear_right_tyre_pressure: 0.03,
+    front_left_tyre_pressure: -0.02,
+    front_right_tyre_pressure: -0.02,
   },
   planted_understeer: {
     front_wing_aero: 0.06,
     front_arb: 0.05,
     rear_wing_aero: 0.03,
     diff_adjustment_on_throttle: -0.04,
+    // ADDED — mirror of loose_oversteer: firm up the front contact patch,
+    // soften the rear, both favoring a planted, understeer-biased car.
+    front_left_tyre_pressure: 0.02,
+    front_right_tyre_pressure: 0.02,
+    rear_left_tyre_pressure: -0.03,
+    rear_right_tyre_pressure: -0.03,
   },
   balanced: {},
   aggressive_rotation: {
@@ -595,6 +622,12 @@ const CAR_FEEL_PARAM_MAP: Record<CarFeelPreference, ParamWeightMap> = {
     rear_ride_height: -0.06,
     diff_adjustment_on_throttle: 0.10,
     rear_toe_in: -0.03,
+    // ADDED — largest pressure delta of the five preferences, matching how
+    // much further this preference already pushes every other rear param.
+    rear_left_tyre_pressure: 0.05,
+    rear_right_tyre_pressure: 0.05,
+    front_left_tyre_pressure: -0.03,
+    front_right_tyre_pressure: -0.03,
   },
   stable_predictable: {
     front_wing_aero: 0.05,
@@ -602,6 +635,13 @@ const CAR_FEEL_PARAM_MAP: Record<CarFeelPreference, ParamWeightMap> = {
     front_arb: -0.03,
     rear_arb: -0.03,
     diff_adjustment_on_throttle: -0.05,
+    // ADDED — small, even pressure bump front and rear (bigger contact
+    // patch all around) favors predictability over outright rotation,
+    // consistent with the rest of this preference's map.
+    front_left_tyre_pressure: 0.02,
+    front_right_tyre_pressure: 0.02,
+    rear_left_tyre_pressure: 0.02,
+    rear_right_tyre_pressure: 0.02,
   },
 };
 
