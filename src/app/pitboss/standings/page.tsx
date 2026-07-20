@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 interface StandingRow {
@@ -15,7 +15,7 @@ interface StandingRow {
   points: number;
 }
 
-export default function StandingsPage() {
+function StandingsContent() {
   const searchParams = useSearchParams();
   const leagueId = searchParams.get("league_id");
   const [season, setSeason] = useState("2026");
@@ -48,10 +48,6 @@ export default function StandingsPage() {
 
   return (
     <div className="relative min-h-screen bg-black text-white">
-      {/* Full-bleed league logo background, dark overlay for readability.
-          Falls back to a plain dark background if the league has no logo
-          uploaded yet (currently: Apex World Championship, Aero Aces
-          Racing League, Slipstream Racing Hub). */}
       {logoUrl && (
         <div
           className="fixed inset-0 bg-cover bg-center"
@@ -110,5 +106,13 @@ export default function StandingsPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function StandingsPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-black" />}>
+      <StandingsContent />
+    </Suspense>
   );
 }
