@@ -64,6 +64,19 @@ const withPWA = require("@ducanh2912/next-pwa").default({
         urlPattern: /^https?:\/\/[^/]+\/franchises\/.*/i,
         handler: "NetworkOnly",
       },
+      {
+        // Same issue as rules/drivers/setups/franchises above: the league
+        // detail page (/league/[id]) renders the logo upload button and
+        // fetches league data client-side, but cacheOnFrontEndNav +
+        // aggressiveFrontEndNavCaching could replay a stale page
+        // shell/RSC payload — and a stale bundle here can mean a stale
+        // handleLogoUpload closure too, e.g. an old direct-to-storage
+        // upload path that predates the current PUT /api/leagues/[id]
+        // flow. Force NetworkOnly so every visit re-fetches the live page
+        // and the live client bundle.
+        urlPattern: /^https?:\/\/[^/]+\/league\/[^/]+$/i,
+        handler: "NetworkOnly",
+      },
     ],
   },
 });
