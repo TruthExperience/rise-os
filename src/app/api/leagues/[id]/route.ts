@@ -1,38 +1,3 @@
-import { createClient } from "@supabase/supabase-js";
-import { NextResponse } from "next/server";
-
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { db: { schema: "rise_os" } }
-);
-
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  const { data, error } = await supabaseAdmin
-    .from("leagues")
-    .select("*")
-    .eq("id", params.id)
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json(data);
-}
-
-export async function PATCH(req: Request, { params }: { params: { id: string } }) {
-  const body = await req.json();
-
-  const { data, error } = await supabaseAdmin
-    .from("leagues")
-    .update(body)
-    .eq("id", params.id)
-    .select()
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
-}
-
 export async function PUT(req: Request, { params }: { params: { id: string } }) {
   const formData = await req.formData();
   const file = formData.get("file") as File;
@@ -65,5 +30,23 @@ export async function PUT(req: Request, { params }: { params: { id: string } }) 
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // PitBoss keeps its own separate leagues table (pre-dating the merge into
+  // Rise OS). If this league also has a pitboss.leagues row, keep its
+  // logo_url in sync too — otherwise PitBoss-side pages (Standings,
+  // Results, etc.) silently keep showing the old/broken logo after every
+  // future upload here, exactly like the 7/20 incident.
+  const pitbossClient = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { db: { schema: "pitboss" } }
+  );
+  await pitbossClient
+    .from("leagues")
+    .update({ logo_url: publicUrl })
+    .eq("id", params.id);
+  // Intentionally not failing the request if this errors/no-ops (e.g. no
+  // matching pitboss row) — the rise_os update above already succeeded.
+
   return NextResponse.json(data);
 }
