@@ -56,7 +56,14 @@ function StandingsContent() {
       .then((res) => res.json())
       .then((data) => {
         if (cancelled) return;
-        const leagues: LeagueSummary[] = data.leagues ?? [];
+        // Driver standings only make sense for racing leagues — a CFB
+        // dynasty league has no driver championship to show, it'd just be
+        // an error/empty state one tap deeper. Filter those out here so
+        // the picker (and single-membership auto-redirect) only ever
+        // offers leagues this page can actually render.
+        const leagues: LeagueSummary[] = (data.leagues ?? []).filter(
+          (l: LeagueSummary) => l.sport === "sim_racing"
+        );
         if (leagues.length === 1) {
           // Only one membership — no ambiguity, just go straight there.
           router.replace(`/pitboss/standings?league_id=${leagues[0].league_id}`);
@@ -128,7 +135,7 @@ function StandingsContent() {
         {!urlLeagueId && !resolvingLeague && memberships && memberships.length === 0 && (
           <div className="flex flex-col items-start gap-3">
             <p className="text-neutral-500 text-sm">
-              You're not a member of any leagues yet.
+              You're not a member of any racing leagues yet — standings only apply to those.
             </p>
             <Link
               href="/leagues/join"
