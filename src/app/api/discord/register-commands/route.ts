@@ -89,4 +89,160 @@ export async function GET() {
         },
         {
           type: 1,
-          name: "status
+          name: "status",
+          description: "Show open incidents for this league",
+        },
+        {
+          type: 1,
+          name: "close",
+          description: "Close this incident ticket and save a transcript (run inside the ticket)",
+        },
+        {
+          type: 1,
+          name: "transcript",
+          description: "Show the transcript for this incident ticket (run inside the ticket)",
+        },
+        {
+          type: 1,
+          name: "delete",
+          description: "Delete this incident ticket channel (must be closed first)",
+        },
+        {
+          type: 1,
+          name: "respond",
+          description: "Submit your defense if you've been named in an incident (run inside the ticket)",
+          options: [
+            {
+              type: 3, // STRING
+              name: "response",
+              description: "Your side of what happened",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "evidence",
+              description: "Link to your own POV clip / evidence",
+              required: false,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "kb",
+      description: "Look up league rulebook articles",
+      options: [
+        {
+          type: 1, // SUB_COMMAND
+          name: "search",
+          description: "Search the rulebook",
+          options: [
+            {
+              type: 3, // STRING
+              name: "query",
+              description: "What to search for",
+              required: true,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "roster",
+      description: "Manage league team rosters",
+      options: [
+        {
+          type: 1, // SUB_COMMAND
+          name: "view",
+          description: "View the current roster",
+          options: [
+            {
+              type: 3, // STRING
+              name: "tier",
+              description: "Filter by tier",
+              required: false,
+              choices: tierChoices,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "assign",
+          description: "Assign a driver to a team",
+          options: [
+            {
+              type: 6, // USER
+              name: "driver",
+              description: "Driver to assign",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "team",
+              description: "Team",
+              required: true,
+              choices: teamChoices,
+            },
+            {
+              type: 3,
+              name: "tier",
+              description: "Tier",
+              required: true,
+              choices: tierChoices,
+            },
+            {
+              type: 5, // BOOLEAN
+              name: "principal",
+              description: "Assign as Team Principal?",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "season",
+              description: "Season code (defaults to S2)",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "remove",
+          description: "Remove a driver from the roster",
+          options: [
+            {
+              type: 6,
+              name: "driver",
+              description: "Driver to remove",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "season",
+              description: "Season code (defaults to S2)",
+              required: false,
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const res = await fetch(
+    `https://discord.com/api/v10/applications/${appId}/commands`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(commands),
+    }
+  );
+
+  const body = await res.json();
+
+  return NextResponse.json(
+    { status: res.status, ok: res.ok, body },
+    { status: res.ok ? 200 : 502 }
+  );
+}
