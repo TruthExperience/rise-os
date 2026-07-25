@@ -1,5 +1,5 @@
 import { registerCommand } from "./router";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 
 // All four racing leagues (TRL/WSC/SRH/AARL) share the F1_2026 car
