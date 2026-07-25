@@ -1,4 +1,4 @@
-import { createAdminClient } from "@/lib/supabase/admin"; // reuse existing server-side admin client pattern
+import { createAdminClient } from "@/lib/supabase/server"; // reuse existing server-side admin client pattern
 
 /**
  * Permission flags as they exist on pitboss.driver_leagues.
