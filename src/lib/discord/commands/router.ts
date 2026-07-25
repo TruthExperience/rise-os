@@ -1,37 +1,17 @@
 import { InteractionResponseType } from "discord-interactions";
 import { resolveLeagueFromGuild } from "../league-resolver";
+import {
+  commandRegistry,
+  registerCommand,
+  type ResolvedDiscordUser,
+} from "./registry";
 
-export interface ResolvedDiscordUser {
-  id: string;
-  username: string;
-}
-
-export interface CommandContext {
-  guildId: string;
-  leagueId: string;
-  leagueSlug: string;
-  discordUserId: string;
-  options: Record<string, unknown>;
-  resolvedUsers: Record<string, ResolvedDiscordUser>;
-}
-
-export type CommandHandler = (ctx: CommandContext) => Promise<CommandResponse>;
-
-export interface CommandResponse {
-  content: string;
-  ephemeral?: boolean;
-}
-
-const commandRegistry = new Map<string, CommandHandler>();
-
-commandRegistry.set("ping", async () => ({
+registerCommand("ping", async () => ({
   content: "Pong. AARL/TRL/WSC/SRH bot is alive.",
   ephemeral: true,
 }));
 
-export function registerCommand(name: string, handler: CommandHandler) {
-  commandRegistry.set(name, handler);
-}
+export { registerCommand };
 
 /**
  * Handles an APPLICATION_COMMAND interaction. Supports both flat
@@ -47,8 +27,6 @@ export async function routeCommand(interaction: any) {
   let commandKey = topLevelName;
   let rawOptions: any[] = interaction.data?.options ?? [];
 
-  // SUB_COMMAND type is 1. If the first option is a subcommand,
-  // dispatch on "<command>_<subcommand>" and use its nested options.
   if (rawOptions.length === 1 && rawOptions[0].type === 1) {
     commandKey = `${topLevelName}_${rawOptions[0].name}`;
     rawOptions = rawOptions[0].options ?? [];
@@ -72,8 +50,6 @@ export async function routeCommand(interaction: any) {
     options[opt.name] = opt.value;
   }
 
-  // USER-type options resolve to a Discord snowflake in `options`,
-  // with the actual user object available in `interaction.data.resolved.users`.
   const resolvedUsers: Record<string, ResolvedDiscordUser> = {};
   const rawResolvedUsers = interaction.data?.resolved?.users ?? {};
   for (const [id, user] of Object.entries(rawResolvedUsers) as [string, any][]) {
@@ -109,5 +85,5 @@ function respond(content: string, ephemeral = false) {
   };
 }
 
-// Side-effect imports: each of these calls registerCommand() when loaded.
+// Side-effect import: registers the roster_* commands.
 import "./roster";
