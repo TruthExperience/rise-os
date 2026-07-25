@@ -25,7 +25,10 @@ const EDITOR_FLAGS = [
   "is_co_owner",
   "is_commissioner",
   "is_team_principal",
+  "is_head_steward",
+  "is_steward",
 ] as const;
+
 
 registerCommand("roster_view", async (ctx) => {
   const supabase = createAdminClient();
