@@ -2,6 +2,10 @@ import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 
+// All four racing leagues (TRL/WSC/SRH/AARL) share the F1_2026 car
+// class/team set as of July 2026. If a league later runs a
+// different game/season, this needs to become a per-league lookup
+// instead of a constant.
 const F1_2026_CAR_CLASS_ID = "3cbbd45c-7a2e-4501-8f51-a6b5f6b33326";
 
 async function getTeamId(teamName: string): Promise<string | null> {
@@ -39,7 +43,11 @@ registerCommand("roster_view", async (ctx) => {
 
   const { data, error } = await query;
   if (error || !data) {
-    return { content: "Couldn't load the roster right now.", ephemeral: true };
+    console.error("[roster_view] query failed:", error);
+    return {
+      content: `Couldn't load the roster right now: ${error?.message ?? "unknown error"}`,
+      ephemeral: true,
+    };
   }
   if (data.length === 0) {
     return {
@@ -110,15 +118,16 @@ registerCommand("roster_assign", async (ctx) => {
       .select("id")
       .single();
     if (createError || !created) {
+      console.error("[roster_assign] driver creation failed:", createError);
       return {
-        content: "Couldn't create a driver record for that user.",
+        content: `Couldn't create a driver record for that user: ${createError?.message ?? "unknown error"}`,
         ephemeral: true,
       };
     }
     driver = created;
   }
 
-  await supabase
+  const { error: membershipError } = await supabase
     .schema("pitboss")
     .from("driver_leagues")
     .upsert(
@@ -130,6 +139,14 @@ registerCommand("roster_assign", async (ctx) => {
       },
       { onConflict: "driver_id,league_id" }
     );
+
+  if (membershipError) {
+    console.error("[roster_assign] driver_leagues upsert failed:", membershipError);
+    return {
+      content: `Something went wrong linking the driver to this league: ${membershipError.message}`,
+      ephemeral: true,
+    };
+  }
 
   const { error: rosterError } = await supabase
     .schema("pitboss")
@@ -147,8 +164,9 @@ registerCommand("roster_assign", async (ctx) => {
     );
 
   if (rosterError) {
+    console.error("[roster_assign] team_rosters upsert failed:", rosterError);
     return {
-      content: "Something went wrong saving the roster assignment.",
+      content: `Something went wrong saving the roster assignment: ${rosterError.message}`,
       ephemeral: true,
     };
   }
@@ -194,8 +212,9 @@ registerCommand("roster_remove", async (ctx) => {
     .eq("season", season);
 
   if (error) {
+    console.error("[roster_remove] delete failed:", error);
     return {
-      content: "Something went wrong removing that driver from the roster.",
+      content: `Something went wrong removing that driver from the roster: ${error.message}`,
       ephemeral: true,
     };
   }
