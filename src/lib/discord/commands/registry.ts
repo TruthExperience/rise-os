@@ -5,6 +5,7 @@ export interface ResolvedDiscordUser {
 
 export interface CommandContext {
   guildId: string;
+  channelId: string;
   leagueId: string;
   leagueSlug: string;
   discordUserId: string;
