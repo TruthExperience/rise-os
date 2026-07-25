@@ -90,3 +90,6 @@ import "./roster";
 
 // Side-effect import: registers the kb_* commands.
 import "./kb";
+
+// Side-effect import: registers the steward_* commands.
+import "./steward";
