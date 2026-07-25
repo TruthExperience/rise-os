@@ -6,6 +6,7 @@ import {
   lockTicketChannel,
   deleteTicketChannel,
   postTicketMessage,
+  sendDirectMessage,
 } from "../tickets";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 
@@ -117,47 +118,58 @@ registerCommand("steward_report", async (ctx) => {
     .eq("id", ctx.leagueId)
     .maybeSingle();
 
+  let channelId: string | null = null;
+  let ticketNote: string;
+
   if (
     !leagueConfig?.discord_ticket_category_id ||
     !leagueConfig?.discord_steward_role_id
   ) {
-    return {
-      content: `Incident **${shortId}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status with \`/steward status\`.`,
-      ephemeral: true,
-    };
+    ticketNote = `Incident **${shortId}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status with \`/steward status\`.`;
+  } else {
+    channelId = await createIncidentTicket({
+      guildId: ctx.guildId,
+      categoryId: leagueConfig.discord_ticket_category_id,
+      stewardRoleId: leagueConfig.discord_steward_role_id,
+      reporterDiscordId: ctx.discordUserId,
+      accusedDiscordId: accusedDiscordId ?? null,
+      shortId,
+      incidentType,
+      description,
+      lap,
+      round,
+      evidenceUrl,
+    });
+
+    if (channelId) {
+      await supabase
+        .schema("pitboss")
+        .from("incidents")
+        .update({ ticket_channel_id: channelId })
+        .eq("id", data.id);
+      ticketNote = `Incident **${shortId}** filed — see <#${channelId}> for the ticket.`;
+    } else {
+      ticketNote = `Incident **${shortId}** filed (${incidentType}), but I couldn't open a ticket channel for it. Stewards can still see it via \`/steward status\`.`;
+    }
   }
 
-  const channelId = await createIncidentTicket({
-    guildId: ctx.guildId,
-    categoryId: leagueConfig.discord_ticket_category_id,
-    stewardRoleId: leagueConfig.discord_steward_role_id,
-    reporterDiscordId: ctx.discordUserId,
-    accusedDiscordId: accusedDiscordId ?? null,
-    shortId,
-    incidentType,
-    description,
-    lap,
-    round,
-    evidenceUrl,
-  });
-
-  if (!channelId) {
-    return {
-      content: `Incident **${shortId}** filed (${incidentType}), but I couldn't open a ticket channel for it. Stewards can still see it via \`/steward status\`.`,
-      ephemeral: true,
-    };
+  // Notify the accused driver directly, showing them the evidence
+  // they're accused with and how to submit a defense. Sent
+  // regardless of whether a ticket channel was opened — a failed DM
+  // (e.g. DMs disabled) doesn't block filing the report.
+  if (accusedDiscordId) {
+    const dmLines = [
+      `You've been named in an incident report — **${shortId}** (${incidentType}) — filed against you.`,
+      `\n${description}`,
+      evidenceUrl ? `\nEvidence submitted against you: ${evidenceUrl}` : null,
+      channelId
+        ? `\nRespond with your side in <#${channelId}> using \`/steward respond\` — you can include your own POV link.`
+        : `\nA steward will follow up with a ticket channel shortly. Once it's open, use \`/steward respond\` there to give your side, including your own POV link if you have one.`,
+    ].filter(Boolean);
+    await sendDirectMessage(accusedDiscordId, dmLines.join("\n"));
   }
 
-  await supabase
-    .schema("pitboss")
-    .from("incidents")
-    .update({ ticket_channel_id: channelId })
-    .eq("id", data.id);
-
-  return {
-    content: `Incident **${shortId}** filed — see <#${channelId}> for the ticket.`,
-    ephemeral: true,
-  };
+  return { content: ticketNote, ephemeral: true };
 });
 
 registerCommand("steward_status", async (ctx) => {
@@ -211,7 +223,7 @@ async function findIncidentByChannel(leagueId: string, channelId: string) {
     .schema("pitboss")
     .from("incidents")
     .select(
-      "id, status, ticket_closed_at, reported_by, accused_driver_id, drivers!incidents_reported_by_fkey(discord_id)"
+      "id, status, ticket_closed_at, ticket_transcript, reported_by, accused_driver_id, drivers!incidents_reported_by_fkey(discord_id)"
     )
     .eq("league_id", leagueId)
     .eq("ticket_channel_id", channelId)
@@ -345,4 +357,76 @@ registerCommand("steward_delete", async (ctx) => {
   // The channel is gone by the time this reply renders, but the
   // interaction response still needs non-empty content.
   return { content: "🗑️ Ticket deleted.", ephemeral: true };
+});
+
+registerCommand("steward_respond", async (ctx) => {
+  const responseText = ctx.options.response as string;
+  const evidenceUrl = ctx.options.evidence as string | undefined;
+
+  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  if (!incident) {
+    return {
+      content: "This channel isn't linked to an incident ticket.",
+      ephemeral: true,
+    };
+  }
+
+  // Only the accused driver can submit a defense on their own
+  // incident — this is deliberately not gated by STEWARD_FLAGS.
+  const supabase = createAdminClient();
+  let accusedDiscordId: string | undefined;
+  if (incident.accused_driver_id) {
+    const { data: accusedDriver } = await supabase
+      .schema("pitboss")
+      .from("drivers")
+      .select("discord_id")
+      .eq("id", incident.accused_driver_id)
+      .maybeSingle();
+    accusedDiscordId = accusedDriver?.discord_id;
+  }
+
+  if (!accusedDiscordId || accusedDiscordId !== ctx.discordUserId) {
+    return {
+      content: "Only the driver named in this incident can submit a defense.",
+      ephemeral: true,
+    };
+  }
+
+  if (incident.ticket_closed_at) {
+    return {
+      content: "This ticket is already closed — ask a steward to reopen it if you still need to respond.",
+      ephemeral: true,
+    };
+  }
+
+  const { error } = await supabase
+    .schema("pitboss")
+    .from("incidents")
+    .update({
+      accused_response: responseText,
+      accused_response_at: new Date().toISOString(),
+      accused_evidence_urls: evidenceUrl ? [evidenceUrl] : null,
+    })
+    .eq("id", incident.id);
+
+  if (error) {
+    console.error("[steward_respond] update failed:", error);
+    return {
+      content: `Couldn't save your response: ${error.message}`,
+      ephemeral: true,
+    };
+  }
+
+  await postTicketMessage(
+    ctx.channelId,
+    [
+      `**Defense submitted by <@${ctx.discordUserId}>:**`,
+      responseText,
+      evidenceUrl ? `POV: ${evidenceUrl}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+
+  return { content: "Your response has been recorded.", ephemeral: true };
 });
