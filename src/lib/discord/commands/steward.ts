@@ -1,5 +1,6 @@
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
+import { createIncidentTicket } from "../tickets";
 
 // Same driver-lookup/auto-create pattern as roster.ts's getTeamId
 // section — a reporter (or accused party) may not have a `drivers`
@@ -90,8 +91,47 @@ registerCommand("steward_report", async (ctx) => {
   }
 
   const shortId = data.id.slice(0, 8);
+
+  const { data: leagueConfig } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("discord_ticket_category_id, discord_steward_role_id")
+    .eq("id", ctx.leagueId)
+    .maybeSingle();
+
+  if (
+    !leagueConfig?.discord_ticket_category_id ||
+    !leagueConfig?.discord_steward_role_id
+  ) {
+    return {
+      content: `Incident **${shortId}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status with \`/steward status\`.`,
+      ephemeral: true,
+    };
+  }
+
+  const channelId = await createIncidentTicket({
+    guildId: ctx.guildId,
+    categoryId: leagueConfig.discord_ticket_category_id,
+    stewardRoleId: leagueConfig.discord_steward_role_id,
+    reporterDiscordId: ctx.discordUserId,
+    accusedDiscordId: accusedDiscordId ?? null,
+    shortId,
+    incidentType,
+    description,
+    lap,
+    round,
+    evidenceUrl,
+  });
+
+  if (!channelId) {
+    return {
+      content: `Incident **${shortId}** filed (${incidentType}), but I couldn't open a ticket channel for it. Stewards can still see it via \`/steward status\`.`,
+      ephemeral: true,
+    };
+  }
+
   return {
-    content: `Incident **${shortId}** filed (${incidentType}). Stewards will review it — check status with \`/steward status\`.`,
+    content: `Incident **${shortId}** filed — see <#${channelId}> for the ticket.`,
     ephemeral: true,
   };
 });
