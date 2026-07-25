@@ -41,6 +41,25 @@ export async function GET() {
       description: "Check that the PitBoss bot is alive for this league",
     },
     {
+      name: "kb",
+      description: "Look up league rulebook articles",
+      options: [
+        {
+          type: 1, // SUB_COMMAND
+          name: "search",
+          description: "Search the rulebook",
+          options: [
+            {
+              type: 3, // STRING
+              name: "query",
+              description: "What to search for",
+              required: true,
+            },
+          ],
+        },
+      ],
+    },
+    {
       name: "roster",
       description: "Manage league team rosters",
       options: [
