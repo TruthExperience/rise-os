@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 
 /**
  * One-time-use endpoint to register Discord slash commands.
- * Visit this URL once in a browser to register commands with Discord.
  * DELETE THIS FILE after confirming it worked.
  */
 export async function GET() {
@@ -41,50 +40,69 @@ export async function GET() {
       description: "Check that the PitBoss bot is alive for this league",
     },
     {
+      name: "roster",
+      description: "Manage league team rosters",
+      options: [
+        {
+          type: 1,
+          name: "view",
+          description: "View the current roster",
+          options: [
+            { type: 3, name: "tier", description: "Filter by tier", choices: tierChoices },
+          ],
+        },
+        {
+          type: 1,
+          name: "assign",
+          description: "Assign a driver to a team",
+          options: [
+            { type: 6, name: "driver", description: "Driver to assign", required: true },
+            { type: 3, name: "team", description: "Team", required: true, choices: teamChoices },
+            { type: 3, name: "tier", description: "Tier", required: true, choices: tierChoices },
+            { type: 5, name: "principal", description: "Assign as Team Principal?" },
+            { type: 3, name: "season", description: "Season code (defaults to S2)" },
+          ],
+        },
+        {
+          type: 1,
+          name: "remove",
+          description: "Remove a driver from the roster",
+          options: [
+            { type: 6, name: "driver", description: "Driver to remove", required: true },
+            { type: 3, name: "season", description: "Season code (defaults to S2)" },
+          ],
+        },
+      ],
+    },
+    {
+      name: "kb",
+      description: "Look up league rulebook articles",
+      options: [
+        {
+          type: 1,
+          name: "search",
+          description: "Search the rulebook",
+          options: [
+            { type: 3, name: "query", description: "What to search for", required: true },
+          ],
+        },
+      ],
+    },
+    {
       name: "steward",
       description: "Report and check race incidents",
       options: [
         {
-          type: 1, // SUB_COMMAND
+          type: 1,
           name: "report",
           description: "File an incident report",
           options: [
-            {
-              type: 3, // STRING
-              name: "type",
-              description: "Incident type (e.g. Collision / Contact, Track Limits)",
-              required: true,
-            },
-            {
-              type: 3,
-              name: "description",
-              description: "What happened",
-              required: true,
-            },
-            {
-              type: 6, // USER
-              name: "accused",
-              description: "Driver the report is against",
-              required: false,
-            },
-            {
-              type: 4, // INTEGER
-              name: "lap",
-              description: "Lap number",
-              required: false,
-            },
-            {
-              type: 4,
-              name: "round",
-              description: "Round number",
-              required: false,
-            },
-            {
-              type: 3,
-              name: "evidence",
-              description: "Link to POV clip / evidence",
-              required: false,
-            },
+            { type: 3, name: "type", description: "Incident type (e.g. Collision / Contact, Track Limits)", required: true },
+            { type: 3, name: "description", description: "What happened", required: true },
+            { type: 6, name: "accused", description: "Driver the report is against" },
+            { type: 4, name: "lap", description: "Lap number" },
+            { type: 4, name: "round", description: "Round number" },
+            { type: 3, name: "evidence", description: "Link to POV clip / evidence" },
           ],
         },
         {
@@ -112,115 +130,25 @@ export async function GET() {
           name: "respond",
           description: "Submit your defense if you've been named in an incident (run inside the ticket)",
           options: [
-            {
-              type: 3, // STRING
-              name: "response",
-              description: "Your side of what happened",
-              required: true,
-            },
-            {
-              type: 3,
-              name: "evidence",
-              description: "Link to your own POV clip / evidence",
-              required: false,
-            },
-          ],
-        },
-      ],
-    },
-    {
-      name: "kb",
-      description: "Look up league rulebook articles",
-      options: [
-        {
-          type: 1, // SUB_COMMAND
-          name: "search",
-          description: "Search the rulebook",
-          options: [
-            {
-              type: 3, // STRING
-              name: "query",
-              description: "What to search for",
-              required: true,
-            },
-          ],
-        },
-      ],
-    },
-    {
-      name: "roster",
-      description: "Manage league team rosters",
-      options: [
-        {
-          type: 1, // SUB_COMMAND
-          name: "view",
-          description: "View the current roster",
-          options: [
-            {
-              type: 3, // STRING
-              name: "tier",
-              description: "Filter by tier",
-              required: false,
-              choices: tierChoices,
-            },
+            { type: 3, name: "response", description: "Your side of what happened", required: true },
+            { type: 3, name: "evidence", description: "Link to your own POV clip / evidence" },
           ],
         },
         {
           type: 1,
-          name: "assign",
-          description: "Assign a driver to a team",
-          options: [
-            {
-              type: 6, // USER
-              name: "driver",
-              description: "Driver to assign",
-              required: true,
-            },
-            {
-              type: 3,
-              name: "team",
-              description: "Team",
-              required: true,
-              choices: teamChoices,
-            },
-            {
-              type: 3,
-              name: "tier",
-              description: "Tier",
-              required: true,
-              choices: tierChoices,
-            },
-            {
-              type: 5, // BOOLEAN
-              name: "principal",
-              description: "Assign as Team Principal?",
-              required: false,
-            },
-            {
-              type: 3,
-              name: "season",
-              description: "Season code (defaults to S2)",
-              required: false,
-            },
-          ],
+          name: "analyse",
+          description: "Run AI steward analysis on this incident (run inside the ticket)",
         },
         {
           type: 1,
-          name: "remove",
-          description: "Remove a driver from the roster",
+          name: "verdict",
+          description: "Submit the final ruling on this incident (run inside the ticket)",
           options: [
-            {
-              type: 6,
-              name: "driver",
-              description: "Driver to remove",
-              required: true,
-            },
-            {
-              type: 3,
-              name: "season",
-              description: "Season code (defaults to S2)",
-              required: false,
-            },
+            { type: 3, name: "verdict", description: "The verdict (e.g. Guilty, No Further Action)", required: true },
+            { type: 3, name: "penalty", description: "Penalty description (e.g. 5s time penalty)" },
+            { type: 4, name: "points", description: "Penalty points to add to the driver's ledger" },
+            { type: 3, name: "notes", description: "Steward notes" },
+            { type: 3, name: "override_reason", description: "Reason for overriding the AI suggestion, if applicable" },
           ],
         },
       ],
