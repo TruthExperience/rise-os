@@ -41,6 +41,60 @@ export async function GET() {
       description: "Check that the PitBoss bot is alive for this league",
     },
     {
+      name: "steward",
+      description: "Report and check race incidents",
+      options: [
+        {
+          type: 1, // SUB_COMMAND
+          name: "report",
+          description: "File an incident report",
+          options: [
+            {
+              type: 3, // STRING
+              name: "type",
+              description: "Incident type (e.g. Collision / Contact, Track Limits)",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "description",
+              description: "What happened",
+              required: true,
+            },
+            {
+              type: 6, // USER
+              name: "accused",
+              description: "Driver the report is against",
+              required: false,
+            },
+            {
+              type: 4, // INTEGER
+              name: "lap",
+              description: "Lap number",
+              required: false,
+            },
+            {
+              type: 4,
+              name: "round",
+              description: "Round number",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "evidence",
+              description: "Link to POV clip / evidence",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "status",
+          description: "Show open incidents for this league",
+        },
+      ],
+    },
+    {
       name: "kb",
       description: "Look up league rulebook articles",
       options: [
