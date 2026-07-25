@@ -1,12 +1,18 @@
 import { InteractionResponseType } from "discord-interactions";
 import { resolveLeagueFromGuild } from "../league-resolver";
 
+export interface ResolvedDiscordUser {
+  id: string;
+  username: string;
+}
+
 export interface CommandContext {
   guildId: string;
   leagueId: string;
   leagueSlug: string;
   discordUserId: string;
   options: Record<string, unknown>;
+  resolvedUsers: Record<string, ResolvedDiscordUser>;
 }
 
 export type CommandHandler = (ctx: CommandContext) => Promise<CommandResponse>;
@@ -16,8 +22,6 @@ export interface CommandResponse {
   ephemeral?: boolean;
 }
 
-// Phase 1: just /ping, to prove the round trip end-to-end.
-// Later phases register /roster, /register, /standings, /incident, /cert here.
 const commandRegistry = new Map<string, CommandHandler>();
 
 commandRegistry.set("ping", async () => ({
@@ -30,20 +34,29 @@ export function registerCommand(name: string, handler: CommandHandler) {
 }
 
 /**
- * Handles an APPLICATION_COMMAND interaction: resolves the league
- * from the guild, extracts options, dispatches to the matching
- * handler, and shapes the result into a Discord interaction
- * response body.
+ * Handles an APPLICATION_COMMAND interaction. Supports both flat
+ * commands (/ping) and one level of subcommand (/roster view) by
+ * building a dispatch key of "<command>" or "<command>_<subcommand>".
  */
 export async function routeCommand(interaction: any) {
-  const commandName: string = interaction.data?.name;
+  const topLevelName: string = interaction.data?.name;
   const guildId: string = interaction.guild_id;
   const discordUserId: string =
     interaction.member?.user?.id ?? interaction.user?.id;
 
-  const handler = commandRegistry.get(commandName);
+  let commandKey = topLevelName;
+  let rawOptions: any[] = interaction.data?.options ?? [];
+
+  // SUB_COMMAND type is 1. If the first option is a subcommand,
+  // dispatch on "<command>_<subcommand>" and use its nested options.
+  if (rawOptions.length === 1 && rawOptions[0].type === 1) {
+    commandKey = `${topLevelName}_${rawOptions[0].name}`;
+    rawOptions = rawOptions[0].options ?? [];
+  }
+
+  const handler = commandRegistry.get(commandKey);
   if (!handler) {
-    return respond(`Unknown command: /${commandName}`, true);
+    return respond(`Unknown command: /${topLevelName}`, true);
   }
 
   const league = await resolveLeagueFromGuild(guildId);
@@ -55,8 +68,16 @@ export async function routeCommand(interaction: any) {
   }
 
   const options: Record<string, unknown> = {};
-  for (const opt of interaction.data?.options ?? []) {
+  for (const opt of rawOptions) {
     options[opt.name] = opt.value;
+  }
+
+  // USER-type options resolve to a Discord snowflake in `options`,
+  // with the actual user object available in `interaction.data.resolved.users`.
+  const resolvedUsers: Record<string, ResolvedDiscordUser> = {};
+  const rawResolvedUsers = interaction.data?.resolved?.users ?? {};
+  for (const [id, user] of Object.entries(rawResolvedUsers) as [string, any][]) {
+    resolvedUsers[id] = { id, username: user.username };
   }
 
   try {
@@ -66,10 +87,11 @@ export async function routeCommand(interaction: any) {
       leagueSlug: league.slug,
       discordUserId,
       options,
+      resolvedUsers,
     });
     return respond(result.content, result.ephemeral);
   } catch (err) {
-    console.error(`[discord] /${commandName} failed:`, err);
+    console.error(`[discord] /${commandKey} failed:`, err);
     return respond(
       "Something went wrong running that command. Try again, or ping the commissioner if it keeps failing.",
       true
@@ -82,7 +104,10 @@ function respond(content: string, ephemeral = false) {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: {
       content,
-      flags: ephemeral ? 64 : undefined, // 64 = EPHEMERAL
+      flags: ephemeral ? 64 : undefined,
     },
   };
 }
+
+// Side-effect imports: each of these calls registerCommand() when loaded.
+import "./roster";
