@@ -1,11 +1,7 @@
-import { registerCommand } from "./router";
+import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 
-// All four racing leagues (TRL/WSC/SRH/AARL) share the F1_2026 car
-// class/team set as of July 2026. If a league later runs a
-// different game/season, this needs to become a per-league lookup
-// instead of a constant.
 const F1_2026_CAR_CLASS_ID = "3cbbd45c-7a2e-4501-8f51-a6b5f6b33326";
 
 async function getTeamId(teamName: string): Promise<string | null> {
