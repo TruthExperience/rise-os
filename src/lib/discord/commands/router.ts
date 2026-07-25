@@ -21,6 +21,7 @@ export { registerCommand };
 export async function routeCommand(interaction: any) {
   const topLevelName: string = interaction.data?.name;
   const guildId: string = interaction.guild_id;
+  const channelId: string = interaction.channel_id;
   const discordUserId: string =
     interaction.member?.user?.id ?? interaction.user?.id;
 
@@ -59,6 +60,7 @@ export async function routeCommand(interaction: any) {
   try {
     const result = await handler({
       guildId,
+      channelId,
       leagueId: league.id,
       leagueSlug: league.slug,
       discordUserId,
