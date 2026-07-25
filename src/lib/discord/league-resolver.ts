@@ -1,4 +1,4 @@
-import { createAdminClient } from "@/lib/supabase/admin";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 
 /**
  * Maps a Discord guild (server) to its PitBoss league via
@@ -8,9 +8,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export async function resolveLeagueFromGuild(
   guildId: string
 ): Promise<{ id: string; name: string; slug: string } | null> {
-  const supabase = createAdminClient();
-
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .schema("rise_os")
     .from("leagues")
     .select("id, name, slug")
