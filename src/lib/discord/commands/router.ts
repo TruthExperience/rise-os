@@ -87,3 +87,6 @@ function respond(content: string, ephemeral = false) {
 
 // Side-effect import: registers the roster_* commands.
 import "./roster";
+
+// Side-effect import: registers the kb_* commands.
+import "./kb";
