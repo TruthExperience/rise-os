@@ -282,3 +282,65 @@ export async function deleteTicketChannel(channelId: string): Promise<boolean> {
   }
   return true;
 }
+
+/**
+ * Sends a direct message to a Discord user. Requires opening (or
+ * reusing) a DM channel first — Discord bots can't post to a user
+ * directly without one. Returns false if the user has DMs disabled
+ * for this server/bot, which is a normal, expected outcome (not a
+ * bug) — callers should treat it as "couldn't notify them" and
+ * continue, not as a failure to surface loudly.
+ */
+export async function sendDirectMessage(
+  discordUserId: string,
+  content: string
+): Promise<boolean> {
+  const token = process.env.DISCORD_BOT_TOKEN;
+  if (!token) {
+    console.error("[tickets] DISCORD_BOT_TOKEN not set");
+    return false;
+  }
+
+  const dmChannelRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ recipient_id: discordUserId }),
+  });
+
+  if (!dmChannelRes.ok) {
+    console.error(
+      "[tickets] DM channel creation failed:",
+      dmChannelRes.status,
+      await dmChannelRes.text()
+    );
+    return false;
+  }
+
+  const dmChannel = await dmChannelRes.json();
+
+  const msgRes = await fetch(
+    `https://discord.com/api/v10/channels/${dmChannel.id}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ content }),
+    }
+  );
+
+  if (!msgRes.ok) {
+    console.error(
+      "[tickets] DM send failed (user may have DMs disabled):",
+      msgRes.status,
+      await msgRes.text()
+    );
+    return false;
+  }
+
+  return true;
+}
