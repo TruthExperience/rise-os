@@ -46,6 +46,16 @@ export type RuleArticle = {
   rule_book_id:   string;
 };
 
+// ADDED — per-request metadata about the vision pre-pass in /steward,
+// so callers can log/audit which model produced an image description
+// without having to guess from the general `model`/`usage` fields
+// (those describe the verdict-writing call, not the vision call).
+export type ImageAnalysisMeta = {
+  model:       string;
+  usage:       { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
+  image_count: number;
+};
+
 export type PbStewardResult = {
   suggestion: {
     verdict:             string;
@@ -59,6 +69,7 @@ export type PbStewardResult = {
     steward_notes:       string;
     parse_error?:        boolean;
   };
+  image_analysis: ImageAnalysisMeta | null; // ADDED
   model:      string;
   provider:   string;
   league:     string;
