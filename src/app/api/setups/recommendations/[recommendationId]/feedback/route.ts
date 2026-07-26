@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/admin';
+import { createAdminClient } from '@/lib/supabase/server';
 import { pbSetupFeedback } from '@/lib/pitboss-llm';
 import { applyFeedbackAdjustments, type FeedbackAdjustment, type GeneratedRecommendation } from '@/lib/pitboss/setup-engine';
 import { fetchParamRanges, fetchOverrides } from '@/lib/pitboss/setup-engine-data';
+
+export const dynamic = 'force-dynamic';
 
 interface FeedbackRequestBody {
   feedback_text: string;
@@ -13,6 +15,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { recommendationId: string } }
 ) {
+  const supabaseAdmin = createAdminClient();
   const { recommendationId } = params;
 
   let body: FeedbackRequestBody;
