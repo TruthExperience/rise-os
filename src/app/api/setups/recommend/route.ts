@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/admin';
+import { createAdminClient } from '@/lib/supabase/server';
 import {
   buildRecommendation,
   applyTeamAndDriverBias,
@@ -49,6 +49,7 @@ interface RecommendRequestBody {
 }
 
 export async function POST(req: NextRequest) {
+  const supabaseAdmin = createAdminClient();
   let body: RecommendRequestBody;
   try {
     body = await req.json();
