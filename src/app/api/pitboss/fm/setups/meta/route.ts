@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET() {
   const supabase = createAdminClient()
-
   const [{ data: tracks, error: tracksError }, { data: params, error: paramsError }] =
     await Promise.all([
       supabase
@@ -17,14 +18,12 @@ export async function GET() {
         .select('param_key, label, characteristic, min_value, max_value, step, unit, value_format, display_order')
         .order('display_order', { ascending: true }),
     ])
-
   if (tracksError) {
     return NextResponse.json({ error: tracksError.message }, { status: 500 })
   }
   if (paramsError) {
     return NextResponse.json({ error: paramsError.message }, { status: 500 })
   }
-
   return NextResponse.json({
     tracks: tracks ?? [],
     params: (params ?? []).map((p) => ({
