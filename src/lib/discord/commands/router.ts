@@ -1,5 +1,5 @@
 import { InteractionResponseType } from "discord-interactions";
-import { after } from "next/server";
+import { waitUntil } from "@vercel/functions";
 import { resolveLeagueFromGuild } from "../league-resolver";
 import {
   commandRegistry,
@@ -73,12 +73,24 @@ export async function routeCommand(interaction: any) {
     });
 
     // A handler can opt into deferral instead of answering inline (see
-    // steward_analyse). We ACK Discord immediately with type 5, then
-    // run the slow work via after() and PATCH the real result into the
+    // steward_analyse). We ACK Discord immediately with type 5, then run
+    // the slow work via waitUntil() and PATCH the real result into the
     // original response once it resolves.
+    //
+    // Note: this uses waitUntil from @vercel/functions, NOT after() from
+    // next/server. after() only exists from Next.js 15.1+ (experimental
+    // as unstable_after in 15.0) — this project is on 14.2.3, which has
+    // neither API at all. waitUntil is a Vercel-platform-level primitive
+    // that works on any Next.js version (and any framework) on Vercel,
+    // and does the same job: it extends the serverless function's
+    // lifetime until the given promise settles, without blocking the
+    // response that's already been sent.
     if ("defer" in result && result.defer) {
       const backgroundFn = result.background;
-      after(async () => {
+
+      // waitUntil takes a Promise, not a callback — invoke the async
+      // function immediately to get that promise, then hand it off.
+      const backgroundWork = (async () => {
         let final: { content: string };
         try {
           final = await backgroundFn();
@@ -92,7 +104,9 @@ export async function routeCommand(interaction: any) {
           };
         }
         await patchOriginalResponse(applicationId, interactionToken, final.content);
-      });
+      })();
+
+      waitUntil(backgroundWork);
 
       return {
         type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
