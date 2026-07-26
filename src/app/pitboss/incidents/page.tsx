@@ -4,7 +4,13 @@ import { useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import { DriverPicker, type DriverOption } from '@/components/pitboss/DriverPicker'
-import { supabaseBrowser } from '@/lib/supabase/browser'
+import { getSupabaseBrowser } from '@/lib/supabase/browser'
+
+// This page is fully session-gated and shows live, per-user data (incident
+// history, league memberships) — there's nothing to statically prerender.
+// Forcing dynamic rendering also sidesteps the class of build-time crash
+// that hit this page when a module it imports touched env vars eagerly.
+export const dynamic = 'force-dynamic'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -258,7 +264,7 @@ export default function IncidentsPage() {
     for (const { file } of evidenceFiles) {
       try {
         const path = `${incidentId}/reporter-${Date.now()}-${file.name}`
-        const { error: uploadError } = await supabaseBrowser.storage
+        const { error: uploadError } = await getSupabaseBrowser().storage
           .from('incident-evidence')
           .upload(path, file)
         if (uploadError) throw uploadError
