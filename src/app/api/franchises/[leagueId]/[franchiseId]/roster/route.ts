@@ -1,16 +1,16 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { db: { schema: "rise_os" } }
-);
-
 export async function GET(
   _req: Request,
   { params }: { params: { leagueId: string; franchiseId: string } }
 ) {
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { db: { schema: "rise_os" } }
+  );
+
   const { data, error } = await supabaseAdmin
     .from("players")
     .select(
