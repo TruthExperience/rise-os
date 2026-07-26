@@ -78,6 +78,18 @@ const PAID_FALLBACK = [
   { model: 'openai/gpt-4o-mini',          key: 'OPENAI_KEY'    },
 ];
 
+// ─── Evidence-image helpers ───────────────────────────────────────────────────
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)(\?.*)?$/i;
+
+function isLikelyImageUrl(url: string): boolean {
+  return IMAGE_EXT_RE.test(url.split('?')[0]);
+}
+
+// Evidence images add real latency/cost per request, and free vision
+// models have modest limits — cap how many go in as image blocks.
+const MAX_EVIDENCE_IMAGES = 4;
+
 // ─── Mode → pool mapping ──────────────────────────────────────────────────────
 
 type Mode = 'fast' | 'primary' | 'reasoning' | 'certgen' | 'quick' | 'steward' | 'coding' | 'vision';
@@ -174,6 +186,61 @@ app.post('/infer', async (c) => {
   return inferWithWaterfall(pool, inferBody, c.env.OPENROUTER_KEY);
 });
 
+// ─── Image-description pass (used by /steward) ───────────────────────────────
+
+type ImageDescriptionResult = {
+  description: string;
+  model: string;
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
+};
+
+// Pass 1: ask a vision model to describe what's visible in each image,
+// purely factually — no verdict, no rule interpretation. Keeps the
+// vision model in its lane and hands the reasoning model clean text
+// it can actually reason well over.
+async function describeEvidenceImages(
+  imageUrls: string[],
+  incidentContext: string,
+  openrouterKey: string
+): Promise<ImageDescriptionResult | null> {
+  const system = `You are a factual image-description assistant for motorsport incident evidence.
+Describe ONLY what is visibly happening in the image(s) — car positions, contact, track position, timing/HUD overlays if visible, any visible damage.
+Do NOT render a verdict, cite rules, or speculate about intent. Stick to what's observable.
+If an image fails to load or is unrelated to racing, say so plainly instead of guessing.`;
+
+  const prompt = `INCIDENT CONTEXT (for reference only, not for you to judge): ${incidentContext}
+
+Describe what's visible in the attached image(s), in order.`;
+
+  const res = await inferWithWaterfall(
+    MODELS.vision,
+    {
+      messages: [
+        { role: 'system', content: system },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url } })),
+          ],
+        },
+      ],
+      max_tokens: 700,
+      temperature: 0.1,
+    },
+    openrouterKey
+  );
+
+  const data: any = await res.json();
+  if (data.error) return null; // caller falls back to text-only reasoning
+
+  return {
+    description: data.response as string,
+    model: data.model as string,
+    usage: data.usage ?? null,
+  };
+}
+
 // ─── /steward endpoint ────────────────────────────────────────────────────────
 
 app.post('/steward', async (c) => {
@@ -183,14 +250,66 @@ app.post('/steward', async (c) => {
     ? regulations.map((r: any) => `Article ${r.article_number} — ${r.title}:\n${r.body}`).join('\n\n')
     : 'No specific regulations provided. Apply standard racing conduct rules.';
 
+  const reporterEvidence: string[] = incident.reporter_evidence_urls ?? [];
+  const accusedEvidence: string[] = incident.accused_evidence_urls ?? [];
+  const imageUrls = [...reporterEvidence, ...accusedEvidence]
+    .filter(isLikelyImageUrl)
+    .slice(0, MAX_EVIDENCE_IMAGES);
+
+  // Pass 1 — describe images, if any. A failure here (bad URL, expired
+  // Discord CDN link, vision pool down) just means the verdict pass
+  // proceeds without image context rather than failing the whole request.
+  let imageAnalysis: ImageDescriptionResult | null = null;
+  if (imageUrls.length > 0) {
+    imageAnalysis = await describeEvidenceImages(
+      imageUrls,
+      `${incident.incident_type} incident, lap ${incident.lap ?? '?'}`,
+      c.env.OPENROUTER_KEY
+    );
+  }
+
   const system = `You are an impartial racing steward AI for ${league}.
 Return ONLY valid JSON — no markdown, no preamble.
-Shape: { "verdict": "guilty"|"not_guilty"|"inconclusive", "confidence": "high"|"medium"|"low", "reasoning": string, "cited_articles": string[], "pp_recommendation": {"min": number, "max": number}, "mitigating_factors": string[], "aggravating_factors": string[], "steward_notes": string }`;
+Shape: { "verdict": "guilty"|"not_guilty"|"inconclusive", "confidence": "high"|"medium"|"low", "reasoning": string, "cited_articles": string[], "pp_recommendation": {"min": number, "max": number}, "mitigating_factors": string[], "aggravating_factors": string[], "steward_notes": string }
+Base your verdict on ALL evidence provided — the reporter's account, the accused driver's defense (if any), evidence links, the full ticket conversation transcript if included, and the image description if provided. The image description was produced by a separate vision pass and reflects only what is visibly observable — treat it as a factual account, not a verdict.`;
 
-  const prompt = `INCIDENT: ${incident.incident_type} | TRACK: ${incident.track ?? 'Unknown'} | LAP: ${incident.lap ?? '?'}
-ACCUSED: ${incident.accused_username ?? 'Unknown'}
-DESCRIPTION: ${incident.description}
-REGULATIONS:\n${regsBlock}`;
+  // Build the prompt incrementally so sections with no data (no defense
+  // yet, no transcript yet, no evidence) are simply omitted rather than
+  // sent as "undefined" or empty noise.
+  const promptParts = [
+    `INCIDENT: ${incident.incident_type} | TRACK: ${incident.track ?? 'Unknown'} | LAP: ${incident.lap ?? '?'}`,
+    `ACCUSED: ${incident.accused_username ?? 'Unknown'}`,
+    `REPORTER DESCRIPTION: ${incident.description}`,
+  ];
+
+  if (reporterEvidence.length > 0) {
+    promptParts.push(`REPORTER EVIDENCE LINKS:\n${reporterEvidence.map((u: string) => `- ${u}`).join('\n')}`);
+  }
+
+  if (incident.accused_response) {
+    promptParts.push(`ACCUSED DRIVER'S DEFENSE: ${incident.accused_response}`);
+  }
+
+  if (accusedEvidence.length > 0) {
+    promptParts.push(`ACCUSED EVIDENCE LINKS:\n${accusedEvidence.map((u: string) => `- ${u}`).join('\n')}`);
+  }
+
+  if (imageAnalysis) {
+    promptParts.push(`IMAGE EVIDENCE DESCRIPTION (from vision pass):\n${imageAnalysis.description}`);
+  } else if (imageUrls.length > 0) {
+    promptParts.push(`Note: ${imageUrls.length} evidence image(s) were submitted but could not be analyzed (link may have expired or failed to load).`);
+  }
+
+  if (incident.ticket_transcript) {
+    // Cap this — a long back-and-forth shouldn't crowd out the
+    // regulations block or blow the model's context budget.
+    const transcript = String(incident.ticket_transcript).slice(0, 6000);
+    promptParts.push(`FULL TICKET CONVERSATION TRANSCRIPT:\n${transcript}`);
+  }
+
+  promptParts.push(`REGULATIONS:\n${regsBlock}`);
+
+  const prompt = promptParts.join('\n\n');
 
   const res = await inferWithWaterfall(
     MODELS.reasoning,
@@ -208,6 +327,10 @@ REGULATIONS:\n${regsBlock}`;
   const data: any = await res.json();
   if (data.error) return Response.json(data, { status: 503 });
 
+  const imageAnalysisMeta = imageAnalysis
+    ? { model: imageAnalysis.model, usage: imageAnalysis.usage, image_count: imageUrls.length }
+    : null;
+
   try {
     const raw = data.response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     const suggestion = JSON.parse(raw);
@@ -215,6 +338,7 @@ REGULATIONS:\n${regsBlock}`;
       ...data,
       league,
       suggestion,
+      image_analysis: imageAnalysisMeta,
       disclaimer: 'AI suggestion only. Human steward decision required.',
     });
   } catch {
@@ -222,6 +346,7 @@ REGULATIONS:\n${regsBlock}`;
       ...data,
       league,
       suggestion: { verdict: 'inconclusive', confidence: 'low', parse_error: true, raw: data.response },
+      image_analysis: imageAnalysisMeta,
       disclaimer: 'AI suggestion only. Human steward decision required.',
     });
   }
