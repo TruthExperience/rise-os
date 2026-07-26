@@ -11,9 +11,6 @@ import {
 } from "../tickets";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 
-// Same posture as roster.ts's EDITOR_FLAGS, but for moderation
-// actions on tickets — team principals can edit rosters, but closing
-// or deleting an incident ticket is a stewarding action.
 const STEWARD_FLAGS = [
   "is_owner",
   "is_co_owner",
@@ -22,9 +19,6 @@ const STEWARD_FLAGS = [
   "is_steward",
 ] as const;
 
-// NEXT_PUBLIC_APP_URL should be set on the Vercel project, but if it's
-// ever missing or unset for a given environment, fall back to Vercel's
-// own system env vars rather than silently building "undefined/..." URLs.
 function resolveAppBaseUrl(): string | null {
   const explicit = process.env.NEXT_PUBLIC_APP_URL;
   if (explicit) {
@@ -43,9 +37,6 @@ function resolveAppBaseUrl(): string | null {
   return null;
 }
 
-// Same driver-lookup/auto-create pattern as roster.ts's getTeamId
-// section — a reporter (or accused party) may not have a `drivers`
-// row yet if they've never touched roster/cert commands before.
 async function getOrCreateDriverId(
   discordId: string,
   username?: string
@@ -175,10 +166,6 @@ registerCommand("steward_report", async (ctx) => {
     }
   }
 
-  // Notify the accused driver directly, showing them the evidence
-  // they're accused with and how to submit a defense. Sent
-  // regardless of whether a ticket channel was opened — a failed DM
-  // (e.g. DMs disabled) doesn't block filing the report.
   if (accusedDiscordId) {
     const dmLines = [
       `You've been named in an incident report — **${shortId}** (${incidentType}) — filed against you.`,
@@ -253,13 +240,7 @@ async function findIncidentByChannel(leagueId: string, channelId: string) {
   return data;
 }
 
-// Evidence can arrive two ways: legacy flat arrays on `incidents`
-// (evidence_urls / accused_evidence_urls), or rows in incident_evidence
-// (added via the /steward respond command, the web incident form, or a
-// steward attaching something on someone's behalf). Uploads store a raw
-// Storage path since the bucket is private — those need a signed URL
-// before anything (model or human) can actually view them.
-const EVIDENCE_SIGNED_URL_EXPIRY_SECONDS = 60 * 60 * 3; // 3h — plenty for one analysis pass
+const EVIDENCE_SIGNED_URL_EXPIRY_SECONDS = 60 * 60 * 3;
 
 type EvidenceItem = {
   url: string;
@@ -294,9 +275,6 @@ async function getIncidentEvidence(
           url = data.signedUrl;
         } else {
           console.error("[steward_analyse] failed to sign evidence url:", signError);
-          // Falls through with the raw storage path — won't be viewable,
-          // but keeps the item (with its label) visible in the prompt
-          // rather than silently disappearing.
         }
       }
       return {
@@ -316,6 +294,44 @@ async function getIncidentEvidence(
   ];
 
   return { reporter, accused };
+}
+
+// Shared by /steward close and /steward transcript — both need to
+// push the full transcript to the league's archive channel as a file
+// (a chat message caps at ~2000 chars; a file attachment doesn't).
+async function archiveTranscriptToChannel(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  ticketChannelId: string,
+  incidentId: string,
+  transcript: string | null
+): Promise<string | null> {
+  if (!transcript) return null;
+
+  const { data: leagueConfig } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("discord_transcript_channel_id")
+    .eq("id", leagueId)
+    .maybeSingle();
+
+  if (!leagueConfig?.discord_transcript_channel_id) return null;
+
+  const shortId = incidentId.slice(0, 8);
+  const sent = await postTicketFile(
+    leagueConfig.discord_transcript_channel_id,
+    `incident-${shortId}-transcript.txt`,
+    transcript,
+    `**Incident ${shortId}** — transcript archived from <#${ticketChannelId}>`
+  );
+
+  if (!sent) {
+    console.error(
+      `[steward] failed to archive transcript for incident ${incidentId} to configured channel`
+    );
+    return " ⚠️ Couldn't archive the transcript to the configured channel — check the bot's permissions there.";
+  }
+  return null;
 }
 
 registerCommand("steward_close", async (ctx) => {
@@ -380,38 +396,13 @@ registerCommand("steward_close", async (ctx) => {
     "🔒 This ticket has been closed by a steward. A transcript has been saved. Use `/steward delete` to remove this channel once you're done reviewing it."
   );
 
-  // If this league has a configured transcript archive channel, send
-  // the full transcript there as a file attachment — unlike the inline
-  // /steward transcript preview, this isn't truncated at ~1800 chars,
-  // since it's a file rather than a chat message.
-  let archiveWarning: string | null = null;
-  if (transcript) {
-    const { data: leagueConfig } = await supabase
-      .schema("rise_os")
-      .from("leagues")
-      .select("discord_transcript_channel_id")
-      .eq("id", ctx.leagueId)
-      .maybeSingle();
-
-    if (leagueConfig?.discord_transcript_channel_id) {
-      const shortId = incident.id.slice(0, 8);
-      const sent = await postTicketFile(
-        leagueConfig.discord_transcript_channel_id,
-        `incident-${shortId}-transcript.txt`,
-        transcript,
-        `**Incident ${shortId}** — transcript archived from <#${ctx.channelId}>`
-      );
-      if (!sent) {
-        console.error(
-          `[steward_close] failed to archive transcript for incident ${incident.id} to configured channel`
-        );
-        // Non-fatal — the transcript is already saved to the DB and
-        // the ticket is already closed; archival to Discord is a
-        // convenience layer on top, not the source of truth.
-        archiveWarning = " ⚠️ Couldn't archive the transcript to the configured channel — check the bot's permissions there.";
-      }
-    }
-  }
+  const archiveWarning = await archiveTranscriptToChannel(
+    supabase,
+    ctx.leagueId,
+    ctx.channelId,
+    incident.id,
+    transcript
+  );
 
   return {
     content: `Ticket closed and transcript saved.${archiveWarning ?? ""}`,
@@ -438,15 +429,22 @@ registerCommand("steward_transcript", async (ctx) => {
     return { content: "Couldn't build a transcript for this ticket.", ephemeral: true };
   }
 
-  // Discord messages cap at ~2000 chars — truncate for the reply and
-  // note the full version is on file if it's longer than that.
+  const supabase = createAdminClient();
+  const archiveWarning = await archiveTranscriptToChannel(
+    supabase,
+    ctx.leagueId,
+    ctx.channelId,
+    incident.id,
+    transcript
+  );
+
   const preview =
     transcript.length > 1800
       ? `${transcript.slice(0, 1800)}\n… (truncated — full transcript is saved on the incident record)`
       : transcript;
 
   return {
-    content: `\`\`\`\n${preview}\n\`\`\``,
+    content: `\`\`\`\n${preview}\n\`\`\`${archiveWarning ?? ""}`,
     ephemeral: true,
   };
 });
@@ -474,8 +472,6 @@ registerCommand("steward_delete", async (ctx) => {
     return { content: "Couldn't delete the channel — check my permissions.", ephemeral: true };
   }
 
-  // The channel is gone by the time this reply renders, but the
-  // interaction response still needs non-empty content.
   return { content: "🗑️ Ticket deleted.", ephemeral: true };
 });
 
@@ -491,8 +487,6 @@ registerCommand("steward_respond", async (ctx) => {
     };
   }
 
-  // Only the accused driver can submit a defense on their own
-  // incident — this is deliberately not gated by STEWARD_FLAGS.
   const supabase = createAdminClient();
   let accusedDiscordId: string | undefined;
   if (incident.accused_driver_id) {
@@ -581,9 +575,6 @@ registerCommand("steward_analyse", async (ctx) => {
     };
   }
 
-  // Pulls both legacy flat-array evidence and incident_evidence rows
-  // (uploads + links added via the web form or /steward respond),
-  // resolving upload paths into short-lived signed URLs along the way.
   const { reporter: reporterEvidence, accused: accusedEvidence } =
     await getIncidentEvidence(
       supabase,
@@ -634,10 +625,6 @@ registerCommand("steward_analyse", async (ctx) => {
   const ai = await llmRes.json();
   const suggestion = ai.suggestion ?? {};
 
-  // Same conversion the web app uses at
-  // /api/pitboss/incidents/[id]/route.ts — pbSteward returns a
-  // qualitative confidence label, not a score, and ai_confidence is
-  // a numeric column.
   const confidenceMap: Record<string, number> = {
     high: 0.9,
     medium: 0.6,
