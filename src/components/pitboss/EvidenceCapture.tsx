@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { supabaseBrowser } from '@/lib/supabase/browser'
+import { getSupabaseBrowser } from '@/lib/supabase/browser'
 
 interface EvidenceItem {
   id: string
@@ -40,7 +40,7 @@ export function EvidenceCapture({ incidentId, party, onAdded, compact = false }:
     setError('')
     try {
       const path = `${incidentId}/${party}-${Date.now()}-${file.name}`
-      const { error: uploadError } = await supabaseBrowser.storage
+      const { error: uploadError } = await getSupabaseBrowser().storage
         .from('incident-evidence')
         .upload(path, file)
       if (uploadError) throw uploadError
