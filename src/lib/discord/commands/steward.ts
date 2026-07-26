@@ -476,139 +476,149 @@ registerCommand("steward_analyse", async (ctx) => {
     defer: true,
     ephemeral: false,
     background: async () => {
-      const supabase = createAdminClient();
+      // Everything below is wrapped so that any thrown exception —
+      // network failure, bad JSON from the LLM proxy, a Supabase client
+      // throw — still resolves to a content string. Without this, an
+      // uncaught rejection here leaves the Discord interaction stuck on
+      // "thinking..." until Discord's own 15-minute followup window
+      // lapses, since nothing would ever PATCH @original.
+      try {
+        const supabase = createAdminClient();
 
-      // Pull everything relevant to the case, not just the original
-      // report fields — evidence links from both sides, the accused
-      // driver's defense, and the saved transcript if the ticket's
-      // already closed.
-      const { data: fullIncident, error: fetchErr } = await supabase
-        .schema("pitboss")
-        .from("incidents")
-        .select(
-          "incident_type, description, season, round, lap, league_id, evidence_urls, accused_response, accused_evidence_urls, ticket_transcript"
-        )
-        .eq("id", incident.id)
-        .single();
+        // Pull everything relevant to the case, not just the original
+        // report fields — evidence links from both sides, the accused
+        // driver's defense, and the saved transcript if the ticket's
+        // already closed.
+        const { data: fullIncident, error: fetchErr } = await supabase
+          .schema("pitboss")
+          .from("incidents")
+          .select(
+            "incident_type, description, season, round, lap, league_id, evidence_urls, accused_response, accused_evidence_urls, ticket_transcript"
+          )
+          .eq("id", incident.id)
+          .single();
 
-      if (fetchErr || !fullIncident) {
+        if (fetchErr || !fullIncident) {
+          return {
+            content: "Couldn't load the incident details for analysis.",
+          };
+        }
+
+        // If the ticket isn't closed yet, ticket_transcript won't be
+        // saved to the DB — pull it live from the channel instead so the
+        // AI still sees whatever's been discussed so far.
+        const transcript =
+          fullIncident.ticket_transcript ?? (await buildTicketTranscript(ctx.channelId));
+
+        const appBaseUrl = resolveAppBaseUrl();
+        if (!appBaseUrl) {
+          return {
+            content:
+              "AI analysis is unavailable right now — the app URL isn't configured on this deployment. Ping the commissioner.",
+          };
+        }
+
+        const llmRes = await fetch(`${appBaseUrl}/api/pitboss/llm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "steward",
+            league: fullIncident.league_id,
+            fetch_regulations: true,
+            incident: {
+              incident_type: fullIncident.incident_type,
+              description: fullIncident.description,
+              season: fullIncident.season,
+              round: fullIncident.round,
+              lap: fullIncident.lap,
+              league_id: fullIncident.league_id,
+              reporter_evidence_urls: fullIncident.evidence_urls ?? [],
+              accused_response: fullIncident.accused_response ?? null,
+              accused_evidence_urls: fullIncident.accused_evidence_urls ?? [],
+              ticket_transcript: transcript ?? null,
+            },
+          }),
+        });
+
+        if (!llmRes.ok) {
+          console.error("[steward_analyse] LLM call failed:", llmRes.status, await llmRes.text());
+          return { content: "AI analysis failed — try again shortly." };
+        }
+
+        const ai = await llmRes.json();
+        const suggestion = ai.suggestion ?? {};
+
+        // Same conversion the web app uses at
+        // /api/pitboss/incidents/[id]/route.ts — pbSteward returns a
+        // qualitative confidence label, not a score, and ai_confidence is
+        // a numeric column.
+        const confidenceMap: Record<string, number> = {
+          high: 0.9,
+          medium: 0.6,
+          low: 0.3,
+        };
+
+        const pointsMin = suggestion.pp_recommendation?.min ?? 0;
+        const pointsMax = suggestion.pp_recommendation?.max ?? pointsMin;
+        const confidenceLabel: string = suggestion.confidence ?? "unknown";
+        const confidenceScore = confidenceMap[confidenceLabel] ?? 0.5;
+
+        const { error: updateErr } = await supabase
+          .schema("pitboss")
+          .from("incidents")
+          .update({
+            ai_verdict: suggestion.verdict ?? null,
+            ai_penalty: suggestion.steward_notes ?? null,
+            ai_points: pointsMin,
+            ai_reasoning: suggestion.reasoning ?? null,
+            ai_confidence: confidenceScore,
+            ai_articles: suggestion.cited_articles ?? [],
+            ai_model: ai.model ?? "unknown",
+            ai_analysed_at: new Date().toISOString(),
+          })
+          .eq("id", incident.id);
+
+        if (updateErr) {
+          console.error("[steward_analyse] update failed:", updateErr);
+          return {
+            content: `AI analysis ran, but saving the result failed: ${updateErr.message}`,
+          };
+        }
+
+        const verdict = suggestion.verdict ?? "No verdict returned";
+        const stewardNotes = suggestion.steward_notes ?? "None provided";
+        const reasoning = suggestion.reasoning ?? "No reasoning provided";
+        const articles: string[] = suggestion.cited_articles ?? [];
+        const pointsRange =
+          pointsMin === pointsMax ? `${pointsMin}` : `${pointsMin}–${pointsMax}`;
+
+        // ai.image_analysis is set when evidence images were included —
+        // surface that an image pass ran so stewards know images were
+        // actually looked at, without cluttering the reply with raw
+        // model/usage metadata.
+        const imageNote = ai.image_analysis
+          ? `\n_${ai.image_analysis.image_count} evidence image(s) reviewed._`
+          : null;
+
+        const lines = [
+          `**AI Steward Analysis**`,
+          `Verdict: ${verdict}`,
+          `Suggested penalty points: ${pointsRange}`,
+          `Confidence: ${confidenceLabel} (${Math.round(confidenceScore * 100)}%)`,
+          articles.length ? `Articles: ${articles.join(", ")}` : null,
+          `\n${stewardNotes}`,
+          `\n${reasoning}`,
+          imageNote,
+          `\nUse \`/steward verdict\` to submit the final ruling.`,
+        ].filter(Boolean);
+
+        return { content: lines.join("\n") };
+      } catch (err) {
+        console.error("[steward_analyse] background crashed:", err);
         return {
-          content: "Couldn't load the incident details for analysis.",
-          ephemeral: true,
+          content: "AI analysis crashed unexpectedly — try again or ping the commissioner.",
         };
       }
-
-      // If the ticket isn't closed yet, ticket_transcript won't be
-      // saved to the DB — pull it live from the channel instead so the
-      // AI still sees whatever's been discussed so far.
-      const transcript =
-        fullIncident.ticket_transcript ?? (await buildTicketTranscript(ctx.channelId));
-
-      const appBaseUrl = resolveAppBaseUrl();
-      if (!appBaseUrl) {
-        return {
-          content:
-            "AI analysis is unavailable right now — the app URL isn't configured on this deployment. Ping the commissioner.",
-          ephemeral: true,
-        };
-      }
-
-      const llmRes = await fetch(`${appBaseUrl}/api/pitboss/llm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "steward",
-          league: fullIncident.league_id,
-          fetch_regulations: true,
-          incident: {
-            incident_type: fullIncident.incident_type,
-            description: fullIncident.description,
-            season: fullIncident.season,
-            round: fullIncident.round,
-            lap: fullIncident.lap,
-            league_id: fullIncident.league_id,
-            reporter_evidence_urls: fullIncident.evidence_urls ?? [],
-            accused_response: fullIncident.accused_response ?? null,
-            accused_evidence_urls: fullIncident.accused_evidence_urls ?? [],
-            ticket_transcript: transcript ?? null,
-          },
-        }),
-      });
-
-      if (!llmRes.ok) {
-        console.error("[steward_analyse] LLM call failed:", llmRes.status, await llmRes.text());
-        return { content: "AI analysis failed — try again shortly.", ephemeral: true };
-      }
-
-      const ai = await llmRes.json();
-      const suggestion = ai.suggestion ?? {};
-
-      // Same conversion the web app uses at
-      // /api/pitboss/incidents/[id]/route.ts — pbSteward returns a
-      // qualitative confidence label, not a score, and ai_confidence is
-      // a numeric column.
-      const confidenceMap: Record<string, number> = {
-        high: 0.9,
-        medium: 0.6,
-        low: 0.3,
-      };
-
-      const pointsMin = suggestion.pp_recommendation?.min ?? 0;
-      const pointsMax = suggestion.pp_recommendation?.max ?? pointsMin;
-      const confidenceLabel: string = suggestion.confidence ?? "unknown";
-      const confidenceScore = confidenceMap[confidenceLabel] ?? 0.5;
-
-      const { error: updateErr } = await supabase
-        .schema("pitboss")
-        .from("incidents")
-        .update({
-          ai_verdict: suggestion.verdict ?? null,
-          ai_penalty: suggestion.steward_notes ?? null,
-          ai_points: pointsMin,
-          ai_reasoning: suggestion.reasoning ?? null,
-          ai_confidence: confidenceScore,
-          ai_articles: suggestion.cited_articles ?? [],
-          ai_model: ai.model ?? "unknown",
-          ai_analysed_at: new Date().toISOString(),
-        })
-        .eq("id", incident.id);
-
-      if (updateErr) {
-        console.error("[steward_analyse] update failed:", updateErr);
-        return {
-          content: `AI analysis ran, but saving the result failed: ${updateErr.message}`,
-          ephemeral: true,
-        };
-      }
-
-      const verdict = suggestion.verdict ?? "No verdict returned";
-      const stewardNotes = suggestion.steward_notes ?? "None provided";
-      const reasoning = suggestion.reasoning ?? "No reasoning provided";
-      const articles: string[] = suggestion.cited_articles ?? [];
-      const pointsRange =
-        pointsMin === pointsMax ? `${pointsMin}` : `${pointsMin}–${pointsMax}`;
-
-      // ai.image_analysis is set when evidence images were included —
-      // surface that an image pass ran so stewards know images were
-      // actually looked at, without cluttering the reply with raw
-      // model/usage metadata.
-      const imageNote = ai.image_analysis
-        ? `\n_${ai.image_analysis.image_count} evidence image(s) reviewed._`
-        : null;
-
-      const lines = [
-        `**AI Steward Analysis**`,
-        `Verdict: ${verdict}`,
-        `Suggested penalty points: ${pointsRange}`,
-        `Confidence: ${confidenceLabel} (${Math.round(confidenceScore * 100)}%)`,
-        articles.length ? `Articles: ${articles.join(", ")}` : null,
-        `\n${stewardNotes}`,
-        `\n${reasoning}`,
-        imageNote,
-        `\nUse \`/steward verdict\` to submit the final ruling.`,
-      ].filter(Boolean);
-
-      return { content: lines.join("\n"), ephemeral: false };
     },
   };
 });
