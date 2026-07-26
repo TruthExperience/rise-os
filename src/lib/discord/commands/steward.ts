@@ -652,3 +652,4 @@ registerCommand("steward_verdict", async (ctx) => {
 
   return { content: "Verdict recorded and posted to the ticket.", ephemeral: false };
 });
+
