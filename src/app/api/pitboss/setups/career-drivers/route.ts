@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/admin';
+import { createAdminClient } from '@/lib/supabase/server';
+
+export const dynamic = 'force-dynamic';
 
 // Pace weighted heaviest, mirroring EA's F1 25 Driver Career overall calc.
 // Focus added at .1, matching the weighting previously used client-side in
@@ -17,19 +19,17 @@ function computeOverall(
 }
 
 export async function GET(req: NextRequest) {
+  const supabaseAdmin = createAdminClient();
   const search = req.nextUrl.searchParams.get('q')?.trim() ?? '';
-
   let query = supabaseAdmin
     .schema('pitboss')
     .from('career_mode_drivers')
     .select('id, driver_name, pace, racecraft, awareness, experience, focus, overall')
     .order('driver_name', { ascending: true })
     .limit(50);
-
   if (search) {
     query = query.ilike('driver_name', `%${search}%`);
   }
-
   const { data, error } = await query;
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -47,15 +47,14 @@ interface CreateBody {
 }
 
 export async function POST(req: NextRequest) {
+  const supabaseAdmin = createAdminClient();
   let body: CreateBody;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
-
   const { driver_name, pace, racecraft, awareness, experience, focus } = body;
-
   if (!driver_name?.trim()) {
     return NextResponse.json({ error: 'driver_name is required' }, { status: 400 });
   }
@@ -64,19 +63,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `${label} must be a number between 0 and 99` }, { status: 400 });
     }
   }
-
   const overall = computeOverall(pace, racecraft, awareness, experience, focus);
-
   const { data, error } = await supabaseAdmin
     .schema('pitboss')
     .from('career_mode_drivers')
     .insert({ driver_name: driver_name.trim(), pace, racecraft, awareness, experience, focus, overall })
     .select('id, driver_name, pace, racecraft, awareness, experience, focus, overall')
     .single();
-
   if (error || !data) {
     return NextResponse.json({ error: error?.message ?? 'Failed to create career driver' }, { status: 500 });
   }
-
   return NextResponse.json(data, { status: 201 });
 }
