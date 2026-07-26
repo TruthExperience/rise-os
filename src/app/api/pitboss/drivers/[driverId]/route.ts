@@ -2,10 +2,14 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
 
 type Params = { params: { driverId: string } }
 
@@ -15,6 +19,7 @@ const VALID_SUPER_STATUSES = ['active', 'review', 'suspended', 'revoked'] as con
 // ─── GET — full driver profile ────────────────────────────────────────────────
 
 export async function GET(_req: NextRequest, { params }: Params) {
+  const supabase = getSupabase()
   const { driverId } = params
 
   // Verify driver exists before running parallel queries
@@ -202,6 +207,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
 // ─── PATCH — update driver fields ─────────────────────────────────────────────
 
 export async function PATCH(req: NextRequest, { params }: Params) {
+  const supabase = getSupabase()
   const { driverId } = params
   const body = await req.json()
   const { display_name, tier, super_licence_status, era_endorsements, pp_total } = body
