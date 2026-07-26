@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 const MAX_LOGO_BYTES = 5 * 1024 * 1024;
@@ -6,8 +6,8 @@ const MAX_LOGO_BYTES = 5 * 1024 * 1024;
 // Lazy singleton — constructed on first use inside a handler, not at
 // module load. Avoids "supabaseUrl is required" during Next.js's
 // build-time page-data collection.
-let _supabaseAdmin: ReturnType<typeof createClient> | null = null;
-function getSupabaseAdmin() {
+let _supabaseAdmin: SupabaseClient | null = null;
+function getSupabaseAdmin(): SupabaseClient {
   if (!_supabaseAdmin) {
     _supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
