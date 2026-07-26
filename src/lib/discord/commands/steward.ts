@@ -1,4 +1,3 @@
-// BUILD-MARKER: confidenceMap-fix-v2
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import {
@@ -148,7 +147,6 @@ registerCommand("steward_report", async (ctx) => {
     !leagueConfig?.discord_steward_role_id
   ) {
     ticketNote = `Incident **${shortId}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status with \`/steward status\`.`;
-
   } else {
     channelId = await createIncidentTicket({
       guildId: ctx.guildId,
@@ -468,10 +466,15 @@ registerCommand("steward_analyse", async (ctx) => {
 
   const supabase = createAdminClient();
 
+  // Pull everything relevant to the case, not just the original report
+  // fields — evidence links from both sides, the accused driver's
+  // defense, and the saved transcript if the ticket's already closed.
   const { data: fullIncident, error: fetchErr } = await supabase
     .schema("pitboss")
     .from("incidents")
-    .select("incident_type, description, season, round, lap, league_id")
+    .select(
+      "incident_type, description, season, round, lap, league_id, evidence_urls, accused_response, accused_evidence_urls, ticket_transcript"
+    )
     .eq("id", incident.id)
     .single();
 
@@ -481,6 +484,12 @@ registerCommand("steward_analyse", async (ctx) => {
       ephemeral: true,
     };
   }
+
+  // If the ticket isn't closed yet, ticket_transcript won't be saved
+  // to the DB — pull it live from the channel instead so the AI still
+  // sees whatever's been discussed so far.
+  const transcript =
+    fullIncident.ticket_transcript ?? (await buildTicketTranscript(ctx.channelId));
 
   const appBaseUrl = resolveAppBaseUrl();
   if (!appBaseUrl) {
@@ -505,6 +514,10 @@ registerCommand("steward_analyse", async (ctx) => {
         round: fullIncident.round,
         lap: fullIncident.lap,
         league_id: fullIncident.league_id,
+        reporter_evidence_urls: fullIncident.evidence_urls ?? [],
+        accused_response: fullIncident.accused_response ?? null,
+        accused_evidence_urls: fullIncident.accused_evidence_urls ?? [],
+        ticket_transcript: transcript ?? null,
       },
     }),
   });
@@ -562,6 +575,13 @@ registerCommand("steward_analyse", async (ctx) => {
   const pointsRange =
     pointsMin === pointsMax ? `${pointsMin}` : `${pointsMin}–${pointsMax}`;
 
+  // ai.image_analysis is set when evidence images were included — surface
+  // that an image pass ran so stewards know images were actually looked
+  // at, without cluttering the reply with raw model/usage metadata.
+  const imageNote = ai.image_analysis
+    ? `\n_${ai.image_analysis.image_count} evidence image(s) reviewed._`
+    : null;
+
   const lines = [
     `**AI Steward Analysis**`,
     `Verdict: ${verdict}`,
@@ -570,6 +590,7 @@ registerCommand("steward_analyse", async (ctx) => {
     articles.length ? `Articles: ${articles.join(", ")}` : null,
     `\n${stewardNotes}`,
     `\n${reasoning}`,
+    imageNote,
     `\nUse \`/steward verdict\` to submit the final ruling.`,
   ].filter(Boolean);
 
@@ -653,4 +674,3 @@ registerCommand("steward_verdict", async (ctx) => {
 
   return { content: "Verdict recorded and posted to the ticket.", ephemeral: false };
 });
-
