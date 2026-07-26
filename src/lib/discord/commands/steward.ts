@@ -147,7 +147,8 @@ registerCommand("steward_report", async (ctx) => {
     !leagueConfig?.discord_ticket_category_id ||
     !leagueConfig?.discord_steward_role_id
   ) {
-    ticketNote = `Incident **${shortId}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status w[...]
+    ticketNote = `Incident **${shortId}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status with \`/steward status\`.`;
+
   } else {
     channelId = await createIncidentTicket({
       guildId: ctx.guildId,
