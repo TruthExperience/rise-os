@@ -12,8 +12,7 @@
 //
 // Use this helper anywhere you need a pitboss.drivers.id from a session,
 // instead of comparing session.user.id directly against a drivers.id.
-
-import { supabaseAdmin } from '@/lib/supabase/admin'
+import { createAdminClient } from '@/lib/supabase/server'
 
 /**
  * Resolve a pitboss.drivers.id from a Discord snowflake (session.user.discordId
@@ -25,19 +24,17 @@ export async function resolveDriverIdFromSession(
   discordId: string | undefined | null
 ): Promise<string | null> {
   if (!discordId) return null
-
+  const supabaseAdmin = createAdminClient()
   const { data, error } = await supabaseAdmin
     .schema('pitboss')
     .from('drivers')
     .select('id')
     .eq('discord_id', discordId)
     .maybeSingle()
-
   if (error) {
     console.error('resolveDriverIdFromSession: supabase error', error.message)
     return null
   }
-
   return data?.id ?? null
 }
 
@@ -50,18 +47,16 @@ export async function resolveDriverFromSession(
   discordId: string | undefined | null
 ) {
   if (!discordId) return null
-
+  const supabaseAdmin = createAdminClient()
   const { data, error } = await supabaseAdmin
     .schema('pitboss')
     .from('drivers')
     .select('*')
     .eq('discord_id', discordId)
     .maybeSingle()
-
   if (error) {
     console.error('resolveDriverFromSession: supabase error', error.message)
     return null
   }
-
   return data
 }
