@@ -1,15 +1,26 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { db: { schema: "rise_os" } }
-);
-
 const MAX_LOGO_BYTES = 5 * 1024 * 1024;
 
+// Lazy singleton — constructed on first use inside a handler, not at
+// module load. Avoids "supabaseUrl is required" during Next.js's
+// build-time page-data collection.
+let _supabaseAdmin: ReturnType<typeof createClient> | null = null;
+function getSupabaseAdmin() {
+  if (!_supabaseAdmin) {
+    _supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      { db: { schema: "rise_os" } }
+    );
+  }
+  return _supabaseAdmin;
+}
+
 export async function GET(_req: Request, { params }: { params: { leagueId: string; franchiseId: string } }) {
+  const supabaseAdmin = getSupabaseAdmin();
+
   const { data, error } = await supabaseAdmin
     .from("franchises")
     .select("*")
@@ -23,6 +34,7 @@ export async function GET(_req: Request, { params }: { params: { leagueId: strin
 }
 
 export async function PATCH(req: Request, { params }: { params: { leagueId: string; franchiseId: string } }) {
+  const supabaseAdmin = getSupabaseAdmin();
   const body = await req.json();
 
   const { data, error } = await supabaseAdmin
@@ -39,10 +51,11 @@ export async function PATCH(req: Request, { params }: { params: { leagueId: stri
 }
 
 export async function PUT(req: Request, { params }: { params: { leagueId: string; franchiseId: string } }) {
+  const supabaseAdmin = getSupabaseAdmin();
+
   const formData = await req.formData();
   const file = formData.get("file") as File;
   if (!file) return NextResponse.json({ error: "No file" }, { status: 400 });
-
   if (file.size > MAX_LOGO_BYTES) {
     return NextResponse.json({ error: "File too large (max 5MB)" }, { status: 400 });
   }
@@ -51,6 +64,9 @@ export async function PUT(req: Request, { params }: { params: { leagueId: string
   const path = `${params.franchiseId}/logo.${ext}`;
   const buffer = Buffer.from(await file.arrayBuffer());
 
+  // Separate client for storage — no schema restriction needed here since
+  // this only touches the storage API, not postgrest tables. Already
+  // constructed inside the handler, so this one was never part of the bug.
   const storageClient = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
