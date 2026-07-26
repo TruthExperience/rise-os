@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/admin';
+import { createAdminClient } from '@/lib/supabase/server';
+
+export const dynamic = 'force-dynamic';
 
 // Pace weighted heaviest, mirroring EA's F1 25 Driver Career overall calc.
 // Kept identical to the weighting in the parent GET/POST route — duplicated
@@ -36,26 +38,23 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const supabaseAdmin = createAdminClient();
   const { id } = await params;
-
   let body: PatchBody;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
-
   const { data: existing, error: fetchError } = await supabaseAdmin
     .schema('pitboss')
     .from('career_mode_drivers')
     .select('id, pace, racecraft, awareness, experience, focus')
     .eq('id', id)
     .single();
-
   if (fetchError || !existing) {
     return NextResponse.json({ error: 'Career driver not found' }, { status: 404 });
   }
-
   const statFields = ['pace', 'racecraft', 'awareness', 'experience', 'focus'] as const;
   for (const field of statFields) {
     const val = body[field];
@@ -63,7 +62,6 @@ export async function PATCH(
       return NextResponse.json({ error: `${field} must be a number between 0 and 99` }, { status: 400 });
     }
   }
-
   const merged = {
     pace: body.pace ?? existing.pace,
     racecraft: body.racecraft ?? existing.racecraft,
@@ -71,23 +69,19 @@ export async function PATCH(
     experience: body.experience ?? existing.experience,
     focus: body.focus ?? existing.focus,
   };
-
   const updatePayload: Record<string, unknown> = {
     ...merged,
     overall: computeOverall(merged.pace, merged.racecraft, merged.awareness, merged.experience, merged.focus),
   };
-
   if (body.driver_name !== undefined) {
     if (!body.driver_name.trim()) {
       return NextResponse.json({ error: 'driver_name cannot be empty' }, { status: 400 });
     }
     updatePayload.driver_name = body.driver_name.trim();
   }
-
   if (body.notes !== undefined) {
     updatePayload.notes = body.notes;
   }
-
   const { data, error } = await supabaseAdmin
     .schema('pitboss')
     .from('career_mode_drivers')
@@ -95,10 +89,8 @@ export async function PATCH(
     .eq('id', id)
     .select('id, driver_name, pace, racecraft, awareness, experience, focus, overall, notes, updated_at')
     .single();
-
   if (error || !data) {
     return NextResponse.json({ error: error?.message ?? 'Failed to update career driver' }, { status: 500 });
   }
-
   return NextResponse.json(data);
 }
