@@ -21,6 +21,22 @@ const STEWARD_FLAGS = [
   "is_steward",
 ] as const;
 
+// NEXT_PUBLIC_APP_URL should be set on the Vercel project, but if it's
+// ever missing or unset for a given environment, fall back to Vercel's
+// own system env vars rather than silently building "undefined/..." URLs.
+function resolveAppBaseUrl(): string | null {
+  const explicit = process.env.NEXT_PUBLIC_APP_URL;
+  if (explicit) return explicit.replace(/\/$/, "");
+
+  const prodUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  if (prodUrl) return `https://${prodUrl}`;
+
+  const deploymentUrl = process.env.VERCEL_URL;
+  if (deploymentUrl) return `https://${deploymentUrl}`;
+
+  return null;
+}
+
 // Same driver-lookup/auto-create pattern as roster.ts's getTeamId
 // section — a reporter (or accused party) may not have a `drivers`
 // row yet if they've never touched roster/cert commands before.
@@ -459,7 +475,16 @@ registerCommand("steward_analyse", async (ctx) => {
     };
   }
 
-  const llmRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/pitboss/llm`, {
+  const appBaseUrl = resolveAppBaseUrl();
+  if (!appBaseUrl) {
+    return {
+      content:
+        "AI analysis is unavailable right now — the app URL isn't configured on this deployment. Ping the commissioner.",
+      ephemeral: true,
+    };
+  }
+
+  const llmRes = await fetch(`${appBaseUrl}/api/pitboss/llm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
