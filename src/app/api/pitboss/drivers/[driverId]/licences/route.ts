@@ -2,15 +2,25 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// Lazy singleton — constructed on first use inside a handler, not at
+// module load. Avoids "supabaseUrl is required" during Next.js's
+// build-time page-data collection.
+let _supabase: any = null
+function getSupabase() {
+  if (!_supabase) {
+    _supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
+  }
+  return _supabase
+}
 
 type Params = { params: { driverId: string } }
 
 // GET — all licences held by this driver, across all leagues
 export async function GET(req: NextRequest, { params }: Params) {
+  const supabase = getSupabase()
   const { driverId } = params
   const { searchParams } = req.nextUrl
   const league_id = searchParams.get('league_id')
@@ -117,6 +127,7 @@ export async function GET(req: NextRequest, { params }: Params) {
 
 // POST — issue a new licence for this driver
 export async function POST(req: NextRequest, { params }: Params) {
+  const supabase = getSupabase()
   const { driverId } = params
   const body = await req.json()
   const { league_id, role_code, title, tier, era_endorsements, expires_at, photo_url } = body
