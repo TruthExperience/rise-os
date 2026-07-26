@@ -1,18 +1,38 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { db: { schema: "rise_os" } }
-);
+// Lazy singletons — constructed on first use inside a handler, not at
+// module load. Avoids "supabaseUrl is required" during Next.js's
+// build-time page-data collection. Untyped deliberately: SupabaseClient's
+// schema generic defaults to "public", which would reject the rise_os-scoped
+// client at compile time if annotated explicitly.
+let _supabaseAdmin: any = null;
+function getSupabaseAdmin() {
+  if (!_supabaseAdmin) {
+    _supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      { db: { schema: "rise_os" } }
+    );
+  }
+  return _supabaseAdmin;
+}
 
-const publicAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+let _publicAdmin: any = null;
+function getPublicAdmin() {
+  if (!_publicAdmin) {
+    _publicAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+  }
+  return _publicAdmin;
+}
 
 export async function GET(_req: Request, { params }: { params: { leagueId: string } }) {
+  const supabaseAdmin = getSupabaseAdmin();
+  const publicAdmin = getPublicAdmin();
+
   const { data, error } = await supabaseAdmin
     .from("franchises")
     .select("*")
@@ -40,6 +60,7 @@ export async function GET(_req: Request, { params }: { params: { leagueId: strin
 }
 
 export async function POST(req: Request, { params }: { params: { leagueId: string } }) {
+  const supabaseAdmin = getSupabaseAdmin();
   const body = await req.json();
   const { name, abbreviation, primary_color, secondary_color } = body;
 
