@@ -267,6 +267,84 @@ export async function GET() {
         },
       ],
     },
+    {
+      name: "appeal",
+      description: "File or review an appeal on a resolved incident",
+      options: [
+        {
+          type: 1, // SUB_COMMAND
+          name: "file",
+          description: "File an appeal on a resolved or dismissed incident",
+          options: [
+            {
+              type: 3, // STRING
+              name: "incident",
+              description: "Incident short ID",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "reason",
+              description: "Why you're appealing this incident",
+              required: true,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "status",
+          description: "List open appeals for this league",
+        },
+        {
+          type: 1,
+          name: "review",
+          description: "Steward: rule on an open appeal",
+          options: [
+            {
+              type: 3, // STRING
+              name: "incident",
+              description: "Incident short ID",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "decision",
+              description: "Appeal decision",
+              required: true,
+              choices: [
+                { name: "Upheld", value: "upheld" },
+                { name: "Overturned", value: "overturned" },
+                { name: "Dismissed", value: "dismissed" },
+              ],
+            },
+            {
+              type: 3,
+              name: "new_verdict",
+              description: "Revised verdict (if overturned)",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "new_penalty",
+              description: "Revised penalty (if overturned)",
+              required: false,
+            },
+            {
+              type: 4, // INTEGER
+              name: "new_points",
+              description: "Revised penalty points (if overturned)",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "notes",
+              description: "Steward notes on the decision",
+              required: false,
+            },
+          ],
+        },
+      ],
+    },
   ];
 
   const res = await fetch(
