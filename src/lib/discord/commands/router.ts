@@ -164,3 +164,4 @@ import "./roster";
 import "./kb";
 // Side-effect import: registers the steward_* commands.
 import "./steward";
+import "./appeal";
