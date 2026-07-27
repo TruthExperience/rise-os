@@ -1,6 +1,6 @@
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
-import { postTicketMessage, sendDirectMessage } from "../tickets";
+import { postTicketMessage, sendDirectMessage, createAppealTicket } from "../tickets";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 
 const STEWARD_FLAGS = [
@@ -69,7 +69,7 @@ async function findIncidentByShortId(leagueId: string, shortId: string) {
     .schema("pitboss")
     .from("incidents")
     .select(
-      "id, status, verdict, penalty, penalty_points, accused_driver_id, drivers!incidents_reported_by_fkey(discord_id)"
+      "id, status, verdict, penalty, penalty_points, accused_driver_id, evidence_urls, accused_evidence_urls, drivers!incidents_reported_by_fkey(discord_id)"
     )
     .eq("league_id", leagueId);
 
@@ -79,6 +79,43 @@ async function findIncidentByShortId(leagueId: string, shortId: string) {
   }
 
   return data.find((inc) => inc.id.startsWith(shortId)) ?? null;
+}
+
+// Merges the legacy flat evidence arrays on incidents with the newer
+// per-row incident_evidence table — per pitboss-platform notes, the
+// table supersedes the arrays going forward but the arrays are kept
+// for backward compatibility on older incidents, so both need to be
+// checked for a complete picture.
+async function gatherIncidentEvidence(
+  incidentId: string,
+  reporterEvidenceUrls: unknown,
+  accusedEvidenceUrls: unknown
+): Promise<{ url: string; label?: string | null; party: string }[]> {
+  const supabase = createAdminClient();
+  const evidence: { url: string; label?: string | null; party: string }[] = [];
+
+  for (const url of (reporterEvidenceUrls as string[] | null) ?? []) {
+    evidence.push({ url, label: null, party: "reporter" });
+  }
+  for (const url of (accusedEvidenceUrls as string[] | null) ?? []) {
+    evidence.push({ url, label: null, party: "accused" });
+  }
+
+  const { data: evidenceRows, error } = await supabase
+    .schema("pitboss")
+    .from("incident_evidence")
+    .select("url, label, party")
+    .eq("incident_id", incidentId);
+
+  if (error) {
+    console.error("[appeal] incident_evidence fetch failed:", error);
+  } else if (evidenceRows) {
+    for (const row of evidenceRows) {
+      evidence.push({ url: row.url, label: row.label, party: row.party });
+    }
+  }
+
+  return evidence;
 }
 
 registerCommand("appeal_file", async (ctx) => {
@@ -152,7 +189,7 @@ registerCommand("appeal_file", async (ctx) => {
     };
   }
 
-  const { error } = await supabase
+  const { data: appeal, error } = await supabase
     .schema("pitboss")
     .from("incident_appeals")
     .insert({
@@ -163,12 +200,14 @@ registerCommand("appeal_file", async (ctx) => {
       original_verdict: incident.verdict,
       original_penalty: incident.penalty,
       original_penalty_points: incident.penalty_points,
-    });
+    })
+    .select("id")
+    .single();
 
-  if (error) {
+  if (error || !appeal) {
     console.error("[appeal_file] insert failed:", error);
     return {
-      content: `Something went wrong filing the appeal: ${error.message}`,
+      content: `Something went wrong filing the appeal: ${error?.message ?? "unknown error"}`,
       ephemeral: true,
     };
   }
@@ -183,27 +222,67 @@ registerCommand("appeal_file", async (ctx) => {
     console.error("[appeal_file] incident status update failed:", statusError);
   }
 
-  // Ping the steward role in the league's general incident channel
-  // (not the ticket channel — that may be gone by now).
   const { data: leagueConfig } = await supabase
     .schema("rise_os")
     .from("leagues")
-    .select("discord_incident_channel_id, discord_steward_role_id")
+    .select("discord_ticket_category_id, discord_steward_role_id, discord_incident_channel_id")
     .eq("id", ctx.leagueId)
     .maybeSingle();
 
+  let ticketChannelId: string | null = null;
+
+  if (leagueConfig?.discord_ticket_category_id && leagueConfig?.discord_steward_role_id) {
+    const evidence = await gatherIncidentEvidence(
+      incident.id,
+      incident.evidence_urls,
+      incident.accused_evidence_urls
+    );
+
+    ticketChannelId = await createAppealTicket({
+      guildId: ctx.guildId,
+      categoryId: leagueConfig.discord_ticket_category_id,
+      stewardRoleId: leagueConfig.discord_steward_role_id,
+      appellantDiscordId: ctx.discordUserId,
+      shortId,
+      appealReason: reason,
+      originalVerdict: incident.verdict,
+      originalPenalty: incident.penalty,
+      originalPenaltyPoints: incident.penalty_points,
+      evidence,
+    });
+
+    if (ticketChannelId) {
+      const { error: channelSaveError } = await supabase
+        .schema("pitboss")
+        .from("incident_appeals")
+        .update({ ticket_channel_id: ticketChannelId })
+        .eq("id", appeal.id);
+      if (channelSaveError) {
+        console.error("[appeal_file] ticket_channel_id save failed:", channelSaveError);
+      }
+    }
+  }
+
+  // Ping the steward role in the league's general incident channel
+  // too (not just the new ticket) — mirrors steward_report's pattern
+  // of a discoverable public pointer plus a private working channel.
   if (leagueConfig?.discord_incident_channel_id) {
     const pingRole = leagueConfig.discord_steward_role_id
       ? `<@&${leagueConfig.discord_steward_role_id}> — `
       : "";
+    const pointer = ticketChannelId
+      ? `see <#${ticketChannelId}> for the appeal ticket.`
+      : `Use \`/appeal review\` to rule on it.`;
     await postTicketMessage(
       leagueConfig.discord_incident_channel_id,
-      `${pingRole}**Appeal filed** on incident **${shortId}** by <@${ctx.discordUserId}>.\n${reason}\nUse \`/appeal review\` to rule on it.`
+      `${pingRole}**Appeal filed** on incident **${shortId}** by <@${ctx.discordUserId}>.\n${reason}\n${pointer}`
     );
   }
 
   return {
-    content: `Appeal filed on incident **${shortId}**. A steward will review it.`,
+    content: ticketChannelId
+      ? `Appeal filed on incident **${shortId}** — see <#${ticketChannelId}> for the ticket.`
+      : `Appeal filed on incident **${shortId}**, but I couldn't open a ticket channel for it. A steward will still see it via \`/appeal status\`.`,
     ephemeral: true,
   };
 });
@@ -262,7 +341,7 @@ registerCommand("appeal_review", async (ctx) => {
   const { data: appeal, error: appealFetchError } = await supabase
     .schema("pitboss")
     .from("incident_appeals")
-    .select("id")
+    .select("id, ticket_channel_id")
     .eq("incident_id", incident.id)
     .eq("status", "open")
     .maybeSingle();
@@ -363,17 +442,25 @@ registerCommand("appeal_review", async (ctx) => {
   const appellantDiscordId = (appealRow as any)?.drivers?.discord_id as
     | string
     | undefined;
+
+  const decisionLines = [
+    `Your appeal on incident **${shortId}** has been reviewed: **${decision}**.`,
+    decision === "overturned"
+      ? `New verdict: ${newVerdict ?? "—"}${newPenalty ? ` — ${newPenalty}` : ""}${
+          newPoints !== undefined ? ` (${newPoints} pts)` : ""
+        }`
+      : null,
+    notes ? `Steward notes: ${notes}` : null,
+  ].filter(Boolean);
+
   if (appellantDiscordId) {
-    const dmLines = [
-      `Your appeal on incident **${shortId}** has been reviewed: **${decision}**.`,
-      decision === "overturned"
-        ? `New verdict: ${newVerdict ?? "—"}${newPenalty ? ` — ${newPenalty}` : ""}${
-            newPoints !== undefined ? ` (${newPoints} pts)` : ""
-          }`
-        : null,
-      notes ? `Steward notes: ${notes}` : null,
-    ].filter(Boolean);
-    await sendDirectMessage(appellantDiscordId, dmLines.join("\n"));
+    await sendDirectMessage(appellantDiscordId, decisionLines.join("\n"));
+  }
+
+  // Also post the outcome into the appeal ticket channel itself, if
+  // one was created — otherwise that channel never hears the result.
+  if (appeal.ticket_channel_id) {
+    await postTicketMessage(appeal.ticket_channel_id, decisionLines.join("\n"));
   }
 
   return {
