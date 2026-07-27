@@ -429,6 +429,50 @@ export async function postTicketMessage(
   return true;
 }
 
+/**
+ * Posts a message with a file attachment to a channel — used for
+ * archiving transcripts, which can easily exceed Discord's ~2000 char
+ * message content limit. Requires multipart/form-data rather than a
+ * plain JSON body: a `payload_json` part carries the message content,
+ * and a `files[0]` part carries the file bytes. `fetch` sets the
+ * multipart boundary automatically from the FormData instance — do
+ * NOT set a Content-Type header manually here, or the boundary will
+ * be missing and Discord will reject the request.
+ */
+export async function postTicketFile(
+  channelId: string,
+  filename: string,
+  fileContent: string,
+  messageContent?: string
+): Promise<boolean> {
+  const token = process.env.DISCORD_BOT_TOKEN;
+  if (!token) {
+    console.error("[tickets] DISCORD_BOT_TOKEN not set");
+    return false;
+  }
+
+  const form = new FormData();
+  form.append(
+    "payload_json",
+    JSON.stringify({ content: messageContent ?? "" })
+  );
+  form.append("files[0]", new Blob([fileContent], { type: "text/plain" }), filename);
+
+  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${token}`,
+    },
+    body: form,
+  });
+
+  if (!res.ok) {
+    console.error("[tickets] postTicketFile failed:", res.status, await res.text());
+    return false;
+  }
+  return true;
+}
+
 export async function deleteTicketChannel(channelId: string): Promise<boolean> {
   const token = process.env.DISCORD_BOT_TOKEN;
   if (!token) {
