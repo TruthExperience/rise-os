@@ -557,143 +557,145 @@ registerCommand("steward_analyse", async (ctx) => {
     };
   }
 
-  const supabase = createAdminClient();
+  // Everything below is slow (LLM waterfall via pitboss-proxy can involve
+  // up to 14 sequential model calls) -- defer so Discord gets an immediate
+  // ACK, and PATCH the real result in once background() resolves.
+  return {
+    defer: true,
+    ephemeral: false,
+    background: async () => {
+      const supabase = createAdminClient();
 
-  const { data: fullIncident, error: fetchErr } = await supabase
-    .schema("pitboss")
-    .from("incidents")
-    .select(
-      "incident_type, description, season, round, lap, league_id, evidence_urls, accused_response, accused_evidence_urls, ticket_transcript"
-    )
-    .eq("id", incident.id)
-    .single();
+      const { data: fullIncident, error: fetchErr } = await supabase
+        .schema("pitboss")
+        .from("incidents")
+        .select(
+          "incident_type, description, season, round, lap, league_id, evidence_urls, accused_response, accused_evidence_urls, ticket_transcript"
+        )
+        .eq("id", incident.id)
+        .single();
 
-  if (fetchErr || !fullIncident) {
-    return {
-      content: "Couldn't load the incident details for analysis.",
-      ephemeral: true,
-    };
-  }
+      if (fetchErr || !fullIncident) {
+        return { content: "Couldn't load the incident details for analysis." };
+      }
 
-  const { reporter: reporterEvidence, accused: accusedEvidence } =
-    await getIncidentEvidence(
-      supabase,
-      incident.id,
-      fullIncident.evidence_urls ?? [],
-      fullIncident.accused_evidence_urls ?? []
-    );
+      const { reporter: reporterEvidence, accused: accusedEvidence } =
+        await getIncidentEvidence(
+          supabase,
+          incident.id,
+          fullIncident.evidence_urls ?? [],
+          fullIncident.accused_evidence_urls ?? []
+        );
 
-  const transcript =
-    fullIncident.ticket_transcript ?? (await buildTicketTranscript(ctx.channelId));
+      const transcript =
+        fullIncident.ticket_transcript ?? (await buildTicketTranscript(ctx.channelId));
 
-  const appBaseUrl = resolveAppBaseUrl();
-  if (!appBaseUrl) {
-    return {
-      content:
-        "AI analysis is unavailable right now — the app URL isn't configured on this deployment. Ping the commissioner.",
-      ephemeral: true,
-    };
-  }
+      const appBaseUrl = resolveAppBaseUrl();
+      if (!appBaseUrl) {
+        return {
+          content:
+            "AI analysis is unavailable right now — the app URL isn't configured on this deployment. Ping the commissioner.",
+        };
+      }
 
-  const llmRes = await fetch(`${appBaseUrl}/api/pitboss/llm`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "steward",
-      league: fullIncident.league_id,
-      fetch_regulations: true,
-      incident: {
-        incident_type: fullIncident.incident_type,
-        description: fullIncident.description,
-        season: fullIncident.season,
-        round: fullIncident.round,
-        lap: fullIncident.lap,
-        league_id: fullIncident.league_id,
-        reporter_evidence: reporterEvidence,
-        accused_response: fullIncident.accused_response ?? null,
-        accused_evidence: accusedEvidence,
-        ticket_transcript: transcript ?? null,
-      },
-    }),
-  });
+      const llmRes = await fetch(`${appBaseUrl}/api/pitboss/llm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "steward",
+          league: fullIncident.league_id,
+          fetch_regulations: true,
+          incident: {
+            incident_type: fullIncident.incident_type,
+            description: fullIncident.description,
+            season: fullIncident.season,
+            round: fullIncident.round,
+            lap: fullIncident.lap,
+            league_id: fullIncident.league_id,
+            reporter_evidence: reporterEvidence,
+            accused_response: fullIncident.accused_response ?? null,
+            accused_evidence: accusedEvidence,
+            ticket_transcript: transcript ?? null,
+          },
+        }),
+      });
 
-  if (!llmRes.ok) {
-    console.error("[steward_analyse] LLM call failed:", llmRes.status, await llmRes.text());
-    return { content: "AI analysis failed — try again shortly.", ephemeral: true };
-  }
+      if (!llmRes.ok) {
+        console.error("[steward_analyse] LLM call failed:", llmRes.status, await llmRes.text());
+        return { content: "AI analysis failed — try again shortly." };
+      }
 
-  const ai = await llmRes.json();
-  const suggestion = ai.suggestion ?? {};
+      const ai = await llmRes.json();
+      const suggestion = ai.suggestion ?? {};
 
-  const confidenceMap: Record<string, number> = {
-    high: 0.9,
-    medium: 0.6,
-    low: 0.3,
+      const confidenceMap: Record<string, number> = {
+        high: 0.9,
+        medium: 0.6,
+        low: 0.3,
+      };
+
+      const pointsMin = suggestion.pp_recommendation?.min ?? 0;
+      const pointsMax = suggestion.pp_recommendation?.max ?? pointsMin;
+      const confidenceLabel: string = suggestion.confidence ?? "unknown";
+      const confidenceScore = confidenceMap[confidenceLabel] ?? 0.5;
+
+      const { error: updateErr } = await supabase
+        .schema("pitboss")
+        .from("incidents")
+        .update({
+          ai_verdict: suggestion.verdict ?? null,
+          ai_penalty: suggestion.steward_notes ?? null,
+          ai_points: pointsMin,
+          ai_reasoning: suggestion.reasoning ?? null,
+          ai_confidence: confidenceScore,
+          ai_articles: suggestion.cited_articles ?? [],
+          ai_model: ai.model ?? "unknown",
+          ai_analysed_at: new Date().toISOString(),
+        })
+        .eq("id", incident.id);
+
+      if (updateErr) {
+        console.error("[steward_analyse] update failed:", updateErr);
+        return { content: `AI analysis ran, but saving the result failed: ${updateErr.message}` };
+      }
+
+      const verdict = suggestion.verdict ?? "No verdict returned";
+      const stewardNotes = suggestion.steward_notes ?? "None provided";
+      const reasoning = suggestion.reasoning ?? "No reasoning provided";
+      const articles: string[] = suggestion.cited_articles ?? [];
+      const pointsRange =
+        pointsMin === pointsMax ? `${pointsMin}` : `${pointsMin}–${pointsMax}`;
+
+      const imageNote = ai.image_analysis
+        ? `\n_${ai.image_analysis.image_count} evidence image(s) reviewed._`
+        : null;
+
+      const totalEvidenceCount = reporterEvidence.length + accusedEvidence.length;
+      const videoCount = [...reporterEvidence, ...accusedEvidence].filter(
+        (e) => !/\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(e.url.split("?")[0])
+      ).length;
+      const videoNote =
+        videoCount > 0
+          ? `\n_${videoCount} video/link evidence item(s) noted but not visually analyzed — only still images go through AI vision review right now._`
+          : null;
+
+      const lines = [
+        `**AI Steward Analysis**`,
+        `Verdict: ${verdict}`,
+        `Suggested penalty points: ${pointsRange}`,
+        `Confidence: ${confidenceLabel} (${Math.round(confidenceScore * 100)}%)`,
+        articles.length ? `Articles: ${articles.join(", ")}` : null,
+        totalEvidenceCount > 0 ? `Evidence items considered: ${totalEvidenceCount}` : null,
+        `\n${stewardNotes}`,
+        `\n${reasoning}`,
+        imageNote,
+        videoNote,
+        `\nUse \`/steward verdict\` to submit the final ruling.`,
+      ].filter(Boolean);
+
+      return { content: lines.join("\n") };
+    },
   };
-
-  const pointsMin = suggestion.pp_recommendation?.min ?? 0;
-  const pointsMax = suggestion.pp_recommendation?.max ?? pointsMin;
-  const confidenceLabel: string = suggestion.confidence ?? "unknown";
-  const confidenceScore = confidenceMap[confidenceLabel] ?? 0.5;
-
-  const { error: updateErr } = await supabase
-    .schema("pitboss")
-    .from("incidents")
-    .update({
-      ai_verdict: suggestion.verdict ?? null,
-      ai_penalty: suggestion.steward_notes ?? null,
-      ai_points: pointsMin,
-      ai_reasoning: suggestion.reasoning ?? null,
-      ai_confidence: confidenceScore,
-      ai_articles: suggestion.cited_articles ?? [],
-      ai_model: ai.model ?? "unknown",
-      ai_analysed_at: new Date().toISOString(),
-    })
-    .eq("id", incident.id);
-
-  if (updateErr) {
-    console.error("[steward_analyse] update failed:", updateErr);
-    return {
-      content: `AI analysis ran, but saving the result failed: ${updateErr.message}`,
-      ephemeral: true,
-    };
-  }
-
-  const verdict = suggestion.verdict ?? "No verdict returned";
-  const stewardNotes = suggestion.steward_notes ?? "None provided";
-  const reasoning = suggestion.reasoning ?? "No reasoning provided";
-  const articles: string[] = suggestion.cited_articles ?? [];
-  const pointsRange =
-    pointsMin === pointsMax ? `${pointsMin}` : `${pointsMin}–${pointsMax}`;
-
-  const imageNote = ai.image_analysis
-    ? `\n_${ai.image_analysis.image_count} evidence image(s) reviewed._`
-    : null;
-
-  const totalEvidenceCount = reporterEvidence.length + accusedEvidence.length;
-  const videoCount = [...reporterEvidence, ...accusedEvidence].filter(
-    (e) => !/\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(e.url.split("?")[0])
-  ).length;
-  const videoNote =
-    videoCount > 0
-      ? `\n_${videoCount} video/link evidence item(s) noted but not visually analyzed — only still images go through AI vision review right now._`
-      : null;
-
-  const lines = [
-    `**AI Steward Analysis**`,
-    `Verdict: ${verdict}`,
-    `Suggested penalty points: ${pointsRange}`,
-    `Confidence: ${confidenceLabel} (${Math.round(confidenceScore * 100)}%)`,
-    articles.length ? `Articles: ${articles.join(", ")}` : null,
-    totalEvidenceCount > 0 ? `Evidence items considered: ${totalEvidenceCount}` : null,
-    `\n${stewardNotes}`,
-    `\n${reasoning}`,
-    imageNote,
-    videoNote,
-    `\nUse \`/steward verdict\` to submit the final ruling.`,
-  ].filter(Boolean);
-
-  return { content: lines.join("\n"), ephemeral: false };
 });
 
 registerCommand("steward_verdict", async (ctx) => {
