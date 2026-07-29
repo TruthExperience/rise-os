@@ -1,5 +1,4 @@
 import { InteractionResponseType } from "discord-interactions";
-import { waitUntil } from "@vercel/functions";
 import { resolveLeagueFromGuild } from "../league-resolver";
 import {
   commandRegistry,
@@ -14,8 +13,6 @@ registerCommand("ping", async () => ({
 
 export { registerCommand };
 
-const DISCORD_API_BASE = "https://discord.com/api/v10";
-
 /**
  * Handles an APPLICATION_COMMAND interaction. Supports both flat
  * commands (/ping) and one level of subcommand (/roster view) by
@@ -27,11 +24,10 @@ export async function routeCommand(interaction: any) {
   const channelId: string = interaction.channel_id;
   const discordUserId: string =
     interaction.member?.user?.id ?? interaction.user?.id;
-  const applicationId: string = interaction.application_id;
-  const interactionToken: string = interaction.token;
 
   let commandKey = topLevelName;
   let rawOptions: any[] = interaction.data?.options ?? [];
+
   if (rawOptions.length === 1 && rawOptions[0].type === 1) {
     commandKey = `${topLevelName}_${rawOptions[0].name}`;
     rawOptions = rawOptions[0].options ?? [];
@@ -71,51 +67,6 @@ export async function routeCommand(interaction: any) {
       options,
       resolvedUsers,
     });
-
-    // A handler can opt into deferral instead of answering inline (see
-    // steward_analyse). We ACK Discord immediately with type 5, then run
-    // the slow work via waitUntil() and PATCH the real result into the
-    // original response once it resolves.
-    //
-    // Note: this uses waitUntil from @vercel/functions, NOT after() from
-    // next/server. after() only exists from Next.js 15.1+ (experimental
-    // as unstable_after in 15.0) — this project is on 14.2.3, which has
-    // neither API at all. waitUntil is a Vercel-platform-level primitive
-    // that works on any Next.js version (and any framework) on Vercel,
-    // and does the same job: it extends the serverless function's
-    // lifetime until the given promise settles, without blocking the
-    // response that's already been sent.
-    if ("defer" in result && result.defer) {
-      const backgroundFn = result.background;
-
-      // waitUntil takes a Promise, not a callback — invoke the async
-      // function immediately to get that promise, then hand it off.
-      const backgroundWork = (async () => {
-        let final: { content: string };
-        try {
-          final = await backgroundFn();
-        } catch (err) {
-          // Catches both a thrown exception inside background() and
-          // a bad/missing content field on whatever it returned.
-          console.error(`[discord] /${commandKey} background failed:`, err);
-          final = {
-            content:
-              "Something went wrong finishing that up. Try running the command again.",
-          };
-        }
-        await patchOriginalResponse(applicationId, interactionToken, final.content);
-      })();
-
-      waitUntil(backgroundWork);
-
-      return {
-        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          flags: result.ephemeral ? 64 : undefined,
-        },
-      };
-    }
-
     return respond(result.content, result.ephemeral);
   } catch (err) {
     console.error(`[discord] /${commandKey} failed:`, err);
@@ -126,42 +77,24 @@ export async function routeCommand(interaction: any) {
   }
 }
 
-async function patchOriginalResponse(
-  applicationId: string,
-  interactionToken: string,
-  content: string
-) {
-  // Discord gives followup webhooks up to 15 minutes, but the PATCH
-  // itself can still fail (network blip, Discord-side 5xx). There's no
-  // interaction left to respond to at that point, so this can only log.
-  try {
-    const res = await fetch(
-      `${DISCORD_API_BASE}/webhooks/${applicationId}/${interactionToken}/messages/@original`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
-      }
-    );
-    if (!res.ok) {
-      console.error("[discord] followup PATCH failed:", res.status, await res.text());
-    }
-  } catch (err) {
-    console.error("[discord] followup PATCH threw:", err);
-  }
-}
-
 function respond(content: string, ephemeral = false) {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: { content, flags: ephemeral ? 64 : undefined },
+    data: {
+      content,
+      flags: ephemeral ? 64 : undefined,
+    },
   };
 }
 
 // Side-effect import: registers the roster_* commands.
 import "./roster";
+
 // Side-effect import: registers the kb_* commands.
 import "./kb";
+
 // Side-effect import: registers the steward_* commands.
 import "./steward";
-import "./appeal";
+
+// Side-effect import: registers the kick/ban/lockdown/endlockdown commands.
+import "./moderation";
