@@ -2,7 +2,7 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-rise-black px-6">
       {/* Logo Area */}
-      <div className="mb-8 flex flex-col items-center gap-2">
+      <div className="mb-12 flex flex-col items-center gap-2">
         <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-rise-red">
           <span className="text-3xl font-black text-white">R</span>
         </div>
@@ -14,21 +14,14 @@ export default function Home() {
         </p>
       </div>
 
-      {/* Status */}
-      <div className="mb-12 rounded-full border border-rise-red/30 bg-rise-red/10 px-4 py-2">
-        <p className="text-xs text-rise-red font-medium tracking-wide uppercase">
-          System Initializing
-        </p>
-      </div>
-
       {/* Module Grid */}
       <div className="grid grid-cols-2 gap-3 w-full max-w-sm">
         {[
-          { name: "Governance", status: "Coming Soon" },
-          { name: "Franchise", status: "Coming Soon" },
-          { name: "Season Ops", status: "Coming Soon" },
+          { name: "Governance", status: "In Progress" },
+          { name: "Franchise", status: "In Progress" },
+          { name: "Season Ops", status: "In Progress" },
           { name: "Draft", status: "Coming Soon" },
-          { name: "Discord", status: "Coming Soon" },
+          { name: "Discord", status: "Live" },
           { name: "Coaching", status: "Coming Soon" },
         ].map((module) => (
           <div
@@ -43,7 +36,7 @@ export default function Home() {
 
       {/* Footer */}
       <p className="mt-12 text-xs text-white/20">
-        TOPS Ecosystem · Rise OS v0.1
+        TOPS Ecosystem · Rise OS v1.0-beta
       </p>
     </main>
   );
