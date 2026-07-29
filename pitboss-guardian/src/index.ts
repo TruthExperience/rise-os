@@ -297,7 +297,7 @@ export class GuildGuardian implements DurableObject {
           token: this.env.DISCORD_BOT_TOKEN?.trim(),
           intents:
             (1 << 1) | // GUILD_MEMBERS (required for GUILD_MEMBER_ADD)
-            (1 << 7), // GUILD_MODERATION (ban add/remove events; audit-log-adjacent)
+            (1 << 2), // GUILD_MODERATION (ban add/remove events; audit-log-adjacent)
           properties: {
             os: "cloudflare-workers",
             browser: "pitboss-guardian",
