@@ -32,7 +32,8 @@ export default {
     // Durable Objects don't self-start on deploy — something has to
     // make the first request to wake one up.
     if (url.pathname === "/start") {
-      if (req.headers.get("X-Guardian-Key") !== env.DISCORD_BOT_TOKEN) {
+      const provided = req.headers.get("X-Guardian-Key")?.trim();
+      if (provided !== env.DISCORD_BOT_TOKEN?.trim()) {
         return new Response("Unauthorized", { status: 401 });
       }
       return stub.fetch(req);
