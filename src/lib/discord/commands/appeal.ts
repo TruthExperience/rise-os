@@ -225,7 +225,9 @@ registerCommand("appeal_file", async (ctx) => {
   const { data: leagueConfig } = await supabase
     .schema("rise_os")
     .from("leagues")
-    .select("discord_ticket_category_id, discord_steward_role_id, discord_incident_channel_id")
+    .select(
+      "discord_ticket_category_id, discord_steward_role_id, discord_incident_channel_id, discord_appeals_channel_id"
+    )
     .eq("id", ctx.leagueId)
     .maybeSingle();
 
@@ -263,18 +265,23 @@ registerCommand("appeal_file", async (ctx) => {
     }
   }
 
-  // Ping the steward role in the league's general incident channel
-  // too (not just the new ticket) — mirrors steward_report's pattern
-  // of a discoverable public pointer plus a private working channel.
-  if (leagueConfig?.discord_incident_channel_id) {
-    const pingRole = leagueConfig.discord_steward_role_id
+  // Ping the steward role somewhere durable and discoverable, not just
+  // the new per-appeal ticket. Prefer the dedicated appeals channel if
+  // this league has one configured; fall back to the general incident
+  // channel for leagues that haven't set one up yet (e.g. TRL, WSC,
+  // AWC as of this writing).
+  const appealsPointerChannel =
+    leagueConfig?.discord_appeals_channel_id ?? leagueConfig?.discord_incident_channel_id;
+
+  if (appealsPointerChannel) {
+    const pingRole = leagueConfig?.discord_steward_role_id
       ? `<@&${leagueConfig.discord_steward_role_id}> — `
       : "";
     const pointer = ticketChannelId
       ? `see <#${ticketChannelId}> for the appeal ticket.`
       : `Use \`/appeal review\` to rule on it.`;
     await postTicketMessage(
-      leagueConfig.discord_incident_channel_id,
+      appealsPointerChannel,
       `${pingRole}**Appeal filed** on incident **${shortId}** by <@${ctx.discordUserId}>.\n${reason}\n${pointer}`
     );
   }
@@ -461,6 +468,25 @@ registerCommand("appeal_review", async (ctx) => {
   // one was created — otherwise that channel never hears the result.
   if (appeal.ticket_channel_id) {
     await postTicketMessage(appeal.ticket_channel_id, decisionLines.join("\n"));
+  }
+
+  // And post it into the league's dedicated appeals channel too, if
+  // configured — this is the one place a decision is guaranteed to be
+  // visible even after a per-appeal ticket channel gets deleted, and
+  // it's where /appeal_file's "filed" pointer already goes, so the
+  // full filed → decided history lives in one place.
+  const { data: leagueConfig } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("discord_appeals_channel_id")
+    .eq("id", ctx.leagueId)
+    .maybeSingle();
+
+  if (leagueConfig?.discord_appeals_channel_id) {
+    await postTicketMessage(
+      leagueConfig.discord_appeals_channel_id,
+      `**Appeal decided** — incident **${shortId}**: **${decision}**.\n${decisionLines.slice(1).join("\n")}`
+    );
   }
 
   return {
