@@ -145,12 +145,27 @@ export class GuildGuardian implements DurableObject {
     }
 
     if (url.pathname === "/status") {
+      const token = this.env.DISCORD_BOT_TOKEN ?? "";
       return Response.json({
         connected: this.ws?.readyState === WebSocket.READY_STATE_OPEN,
         sessionId: this.sessionId,
         sequence: this.sequence,
         raidScoreWindowSize: this.raidScores.length,
         nukeActorsTracked: this.nukeActionsByActor.size,
+        // TEMPORARY diagnostic — remove once the Gateway connection is
+        // confirmed stable. Never logs the full token, only enough to
+        // confirm the secret's shape matches what's expected (length,
+        // whether it accidentally includes a "Bot " prefix, and a
+        // masked first/last few characters for visual comparison
+        // against the Discord Developer Portal).
+        tokenDiagnostic: {
+          length: token.length,
+          startsWithBotPrefix: token.startsWith("Bot "),
+          hasLeadingOrTrailingWhitespace: token !== token.trim(),
+          preview: token.length > 10
+            ? `${token.slice(0, 6)}...${token.slice(-4)}`
+            : "(too short to preview)",
+        },
       });
     }
 
