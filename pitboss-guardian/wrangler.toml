@@ -1,0 +1,26 @@
+name = "pitboss-guardian"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+[[durable_objects.bindings]]
+name = "GUARDIAN"
+class_name = "GuildGuardian"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GuildGuardian"]
+
+# Bind a single named instance so the Worker and any manual admin
+# calls always reach the same running Durable Object, rather than
+# needing to know an ID up front.
+
+# Cron Trigger: self-healing kick to /start every 5 minutes.
+# Harmless no-op if the Gateway connection is already alive.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Secrets (set via `wrangler secret put <NAME>`, not in this file):
+#   DISCORD_BOT_TOKEN
+#   DISCORD_APP_ID
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY
