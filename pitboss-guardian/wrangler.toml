@@ -19,6 +19,25 @@ new_sqlite_classes = ["GuildGuardian"]
 [triggers]
 crons = ["*/5 * * * *"]
 
+# Explicit observability config — Cloudflare flagged dashboard settings
+# drifting from this file. Logs are on and persisted (useful for
+# debugging the Gateway connection); traces are off since this Worker
+# doesn't need request tracing for its current scope.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
 # Secrets (set via `wrangler secret put <NAME>`, not in this file):
 #   DISCORD_BOT_TOKEN
 #   DISCORD_APP_ID
