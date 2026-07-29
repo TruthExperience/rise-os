@@ -21,7 +21,7 @@ export default function Home() {
           { name: "Franchise", status: "In Progress" },
           { name: "Season Ops", status: "In Progress" },
           { name: "Draft", status: "Coming Soon" },
-          { name: "Discord", status: "Live" },
+          { name: "Discord", status: "Live (PitBoss)" },
           { name: "Coaching", status: "Coming Soon" },
         ].map((module) => (
           <div
