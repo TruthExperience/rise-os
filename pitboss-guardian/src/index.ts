@@ -234,7 +234,7 @@ export class GuildGuardian implements DurableObject {
       JSON.stringify({
         op: 2,
         d: {
-          token: this.env.DISCORD_BOT_TOKEN,
+          token: this.env.DISCORD_BOT_TOKEN?.trim(),
           intents:
             (1 << 1) | // GUILD_MEMBERS (required for GUILD_MEMBER_ADD)
             (1 << 7), // GUILD_MODERATION (ban add/remove events; audit-log-adjacent)
@@ -253,7 +253,7 @@ export class GuildGuardian implements DurableObject {
       JSON.stringify({
         op: 6,
         d: {
-          token: this.env.DISCORD_BOT_TOKEN,
+          token: this.env.DISCORD_BOT_TOKEN?.trim(),
           session_id: this.sessionId,
           seq: this.sequence,
         },
@@ -500,7 +500,7 @@ export class GuildGuardian implements DurableObject {
         {
           method: "PUT",
           headers: {
-            Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}`,
+            Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -525,7 +525,7 @@ export class GuildGuardian implements DurableObject {
       await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}`, {
         method: "PATCH",
         headers: {
-          Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}`,
+          Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ verification_level: 4 }), // VERY_HIGH
@@ -533,7 +533,7 @@ export class GuildGuardian implements DurableObject {
 
       const invitesRes = await fetch(
         `https://discord.com/api/v10/guilds/${GUILD_ID}/invites`,
-        { headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}` } }
+        { headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` } }
       );
       if (invitesRes.ok) {
         const invites: any[] = await invitesRes.json();
@@ -541,7 +541,7 @@ export class GuildGuardian implements DurableObject {
           invites.map((inv) =>
             fetch(`https://discord.com/api/v10/invites/${inv.code}`, {
               method: "DELETE",
-              headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}` },
+              headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` },
             })
           )
         );
@@ -561,7 +561,7 @@ export class GuildGuardian implements DurableObject {
               {
                 method: "PATCH",
                 headers: {
-                  Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}`,
+                  Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
                   "Content-Type": "application/json",
                 },
                 body: JSON.stringify({ permissions: permsChange.old_value }),
@@ -595,7 +595,7 @@ export class GuildGuardian implements DurableObject {
     await fetch(`https://discord.com/api/v10/channels/${ALERTS_CHANNEL_ID}/messages`, {
       method: "POST",
       headers: {
-        Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN}`,
+        Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ content: lines.join("\n") }),
