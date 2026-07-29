@@ -345,6 +345,51 @@ export async function GET() {
         },
       ],
     },
+    {
+      name: "kick",
+      description: "Kick a member from the server (owner/co-owner only)",
+      // Discord native KICK_MEMBERS permission bit -- hides this command
+      // from the picker for anyone without kick permission in the guild.
+      // Narrower than the in-app owner/co-owner check in moderation.ts,
+      // which further restricts among members who DO have this permission.
+      default_member_permissions: "2",
+      dm_permission: false,
+      options: [
+        {
+          type: 6, // USER
+          name: "user",
+          description: "Member to kick",
+          required: true,
+        },
+        {
+          type: 3, // STRING
+          name: "reason",
+          description: "Reason for the kick",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "ban",
+      description: "Ban a member from the server (owner/co-owner only)",
+      // Discord native BAN_MEMBERS permission bit.
+      default_member_permissions: "4",
+      dm_permission: false,
+      options: [
+        {
+          type: 6, // USER
+          name: "user",
+          description: "Member to ban",
+          required: true,
+        },
+        {
+          type: 3, // STRING
+          name: "reason",
+          description: "Reason for the ban",
+          required: false,
+        },
+      ],
+    },
   ];
 
   const res = await fetch(
