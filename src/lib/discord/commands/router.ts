@@ -1,4 +1,5 @@
 import { InteractionResponseType } from "discord-interactions";
+import { waitUntil } from "@vercel/functions";
 import { resolveLeagueFromGuild } from "../league-resolver";
 import {
   commandRegistry,
@@ -13,6 +14,8 @@ registerCommand("ping", async () => ({
 
 export { registerCommand };
 
+const DISCORD_API_BASE = "https://discord.com/api/v10";
+
 /**
  * Handles an APPLICATION_COMMAND interaction. Supports both flat
  * commands (/ping) and one level of subcommand (/roster view) by
@@ -24,10 +27,11 @@ export async function routeCommand(interaction: any) {
   const channelId: string = interaction.channel_id;
   const discordUserId: string =
     interaction.member?.user?.id ?? interaction.user?.id;
+  const applicationId: string = interaction.application_id;
+  const interactionToken: string = interaction.token;
 
   let commandKey = topLevelName;
   let rawOptions: any[] = interaction.data?.options ?? [];
-
   if (rawOptions.length === 1 && rawOptions[0].type === 1) {
     commandKey = `${topLevelName}_${rawOptions[0].name}`;
     rawOptions = rawOptions[0].options ?? [];
@@ -67,6 +71,40 @@ export async function routeCommand(interaction: any) {
       options,
       resolvedUsers,
     });
+
+    // A handler can opt into deferral instead of answering inline (see
+    // steward_analyse). We ACK Discord immediately with type 5, then run
+    // the slow work via waitUntil() and PATCH the real result into the
+    // original response once it resolves. waitUntil (from
+    // @vercel/functions, not next/server's after()) is used because
+    // after() only exists from Next.js 15.1+ — this project is on 14.2.3.
+    if ("defer" in result && result.defer) {
+      const backgroundFn = result.background;
+
+      const backgroundWork = (async () => {
+        let final: { content: string };
+        try {
+          final = await backgroundFn();
+        } catch (err) {
+          console.error(`[discord] /${commandKey} background failed:`, err);
+          final = {
+            content:
+              "Something went wrong finishing that up. Try running the command again.",
+          };
+        }
+        await patchOriginalResponse(applicationId, interactionToken, final.content);
+      })();
+
+      waitUntil(backgroundWork);
+
+      return {
+        type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          flags: result.ephemeral ? 64 : undefined,
+        },
+      };
+    }
+
     return respond(result.content, result.ephemeral);
   } catch (err) {
     console.error(`[discord] /${commandKey} failed:`, err);
@@ -77,24 +115,42 @@ export async function routeCommand(interaction: any) {
   }
 }
 
+async function patchOriginalResponse(
+  applicationId: string,
+  interactionToken: string,
+  content: string
+) {
+  try {
+    const res = await fetch(
+      `${DISCORD_API_BASE}/webhooks/${applicationId}/${interactionToken}/messages/@original`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      }
+    );
+    if (!res.ok) {
+      console.error("[discord] followup PATCH failed:", res.status, await res.text());
+    }
+  } catch (err) {
+    console.error("[discord] followup PATCH threw:", err);
+  }
+}
+
 function respond(content: string, ephemeral = false) {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: {
-      content,
-      flags: ephemeral ? 64 : undefined,
-    },
+    data: { content, flags: ephemeral ? 64 : undefined },
   };
 }
 
 // Side-effect import: registers the roster_* commands.
 import "./roster";
-
 // Side-effect import: registers the kb_* commands.
 import "./kb";
-
 // Side-effect import: registers the steward_* commands.
 import "./steward";
-
+// Side-effect import: registers the appeal_* commands.
+import "./appeal";
 // Side-effect import: registers the kick/ban/lockdown/endlockdown commands.
 import "./moderation";
