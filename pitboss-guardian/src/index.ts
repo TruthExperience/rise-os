@@ -71,24 +71,68 @@ const TICKET_CATEGORY_ID = "1530534575829422110";
 const STEWARD_ROLE_ID = "1516542505443659946";
 const ALERTS_CHANNEL_ID = "1531851227611140196"; // #security-alerts
 
+// Actions by these Discord user IDs are never scored as raid/nuke
+// triggers — meant for commissioners/head stewards who legitimately
+// do bulk moderation (mass bans, role cleanups) that would otherwise
+// look identical to a nuke. Does NOT exempt them from the bot
+// self-removal protection below — that check runs first and applies
+// regardless of whitelist status.
+const WHITELISTED_ACTOR_IDS: string[] = [
+  "1047084061027471480", // truthexperience (owner)
+  "1401841577478848603", // _colapintolover (co-owner)
+  "1248351138302922883", // yello_y (co-owner)
+];
+
+// Direct-message fallback recipients if posting to ALERTS_CHANNEL_ID
+// fails — most likely because the channel itself was a casualty of
+// the nuke.
+const BACKUP_ALERT_DISCORD_IDS: string[] = [
+  "1047084061027471480", // truthexperience (owner)
+  "1401841577478848603", // _colapintolover (co-owner)
+  "1248351138302922883", // yello_y (co-owner)
+];
+
+// Only this account may remove PitBoss from the guild. Co-owners are
+// whitelisted for everything else above, but NOT for this — see the
+// self-protection check at the top of scoreAuditEntry, which runs
+// before the whitelist bypass. Note this is detection/alert only, not
+// prevention: Discord processes a kick/ban before any Gateway event
+// reaches us, so if it succeeds we lose guild access entirely (only
+// the DM-to-backup-contacts and Supabase logging still work
+// afterward, since neither needs guild access). The actual preventive
+// control is Discord's own role hierarchy — keep PitBoss's role
+// positioned ABOVE both co-owner roles in Server Settings > Roles;
+// only the true guild owner can kick/ban a member whose top role
+// outranks their own, regardless of KICK_MEMBERS/BAN_MEMBERS perms.
+const OWNER_DISCORD_ID = "1047084061027471480"; // truthexperience
+
 // ─── Scoring thresholds ────────────────────────────────────────────────────────
 
 const RAID_WINDOW_MS = 60_000;
 const RAID_SCORE_THRESHOLD = 10;
+const RAID_JOIN_COUNT_THRESHOLD = 8; // raw joins in-window, independent of score
+const AVATAR_HASH_SHARE_THRESHOLD = 3; // distinct users sharing one avatar hash
 
 const NUKE_WINDOW_MS = 30_000;
 const NUKE_DELETE_THRESHOLD = 3; // channel/role deletions by one actor
 const NUKE_BAN_KICK_THRESHOLD = 5; // bans/kicks by one actor
+const NUKE_CREATE_THRESHOLD = 5; // channel/role creations by one actor (spam)
+const NUKE_ROLE_GRANT_THRESHOLD = 5; // role additions to members by one actor
 
 // Discord audit log action types relevant here.
 // https://discord.com/developers/docs/resources/audit-log#audit-log-entry-object-audit-log-events
 const AUDIT_ACTION = {
+  GUILD_UPDATE: 1,
+  CHANNEL_CREATE: 10,
   CHANNEL_DELETE: 12,
-  ROLE_DELETE: 32,
-  MEMBER_BAN_ADD: 22,
   MEMBER_KICK: 20,
-  WEBHOOK_CREATE: 50,
+  MEMBER_BAN_ADD: 22,
+  MEMBER_ROLE_UPDATE: 25,
+  BOT_ADD: 28,
+  ROLE_CREATE: 30,
   ROLE_UPDATE: 31,
+  ROLE_DELETE: 32,
+  WEBHOOK_CREATE: 50,
 } as const;
 
 const DANGEROUS_PERMISSIONS = {
@@ -104,6 +148,7 @@ interface RaidScoreEntry {
   timestamp: number;
   score: number;
   discordUserId: string;
+  avatarHash: string | null;
   reasons: string[];
 }
 
@@ -152,12 +197,12 @@ export class GuildGuardian implements DurableObject {
         sequence: this.sequence,
         raidScoreWindowSize: this.raidScores.length,
         nukeActorsTracked: this.nukeActionsByActor.size,
-        // TEMPORARY diagnostic — remove once the Gateway connection is
-        // confirmed stable. Never logs the full token, only enough to
-        // confirm the secret's shape matches what's expected (length,
-        // whether it accidentally includes a "Bot " prefix, and a
-        // masked first/last few characters for visual comparison
-        // against the Discord Developer Portal).
+        // TEMPORARY diagnostic — kept intentionally for now. Never
+        // logs the full token, only enough to confirm the secret's
+        // shape matches what's expected (length, whether it
+        // accidentally includes a "Bot " prefix, and a masked
+        // first/last few characters for visual comparison against
+        // the Discord Developer Portal).
         tokenDiagnostic: {
           length: token.length,
           startsWithBotPrefix: token.startsWith("Bot "),
@@ -369,18 +414,59 @@ export class GuildGuardian implements DurableObject {
       reasons.push("generic digit-heavy username");
     }
 
-    this.raidScores.push({ timestamp: now, score, discordUserId: user.id, reasons });
+    this.raidScores.push({
+      timestamp: now,
+      score,
+      discordUserId: user.id,
+      avatarHash: user.avatar ?? null,
+      reasons,
+    });
     this.pruneRaidScores(now);
 
     const windowTotal = this.raidScores.reduce((sum, e) => sum + e.score, 0);
+    const rawJoinCount = this.raidScores.length;
 
-    if (windowTotal >= RAID_SCORE_THRESHOLD) {
+    // Shared avatar hash — a strong bot-generator tell: distinct users
+    // joining with byte-identical avatar hashes in the same window.
+    // Only non-null hashes count; a shared "no avatar" default isn't
+    // meaningful since huge numbers of legitimate users have none.
+    const avatarHashCounts = new Map<string, number>();
+    for (const e of this.raidScores) {
+      if (!e.avatarHash) continue;
+      avatarHashCounts.set(e.avatarHash, (avatarHashCounts.get(e.avatarHash) ?? 0) + 1);
+    }
+    const sharedAvatarHash = [...avatarHashCounts.entries()].find(
+      ([, count]) => count >= AVATAR_HASH_SHARE_THRESHOLD
+    );
+
+    // Three independent triggers, ORed together — a raid using
+    // older/normal-looking accounts might never build a high score,
+    // but a raw join-velocity spike or reused-avatar cluster still
+    // gives it away.
+    if (
+      windowTotal >= RAID_SCORE_THRESHOLD ||
+      rawJoinCount >= RAID_JOIN_COUNT_THRESHOLD ||
+      sharedAvatarHash
+    ) {
+      const reasons: string[] = [];
+      if (windowTotal >= RAID_SCORE_THRESHOLD) {
+        reasons.push(`raid score ${windowTotal} reached in ${RAID_WINDOW_MS / 1000}s window`);
+      }
+      if (rawJoinCount >= RAID_JOIN_COUNT_THRESHOLD) {
+        reasons.push(`${rawJoinCount} raw joins in ${RAID_WINDOW_MS / 1000}s window`);
+      }
+      if (sharedAvatarHash) {
+        reasons.push(
+          `${sharedAvatarHash[1]} joiners sharing avatar hash ${sharedAvatarHash[0].slice(0, 8)}...`
+        );
+      }
+
       await this.respondToThreat("raid", {
-        reason: `Raid score ${windowTotal} reached in ${RAID_WINDOW_MS / 1000}s window (${this.raidScores.length} joins scored)`,
+        reason: reasons.join("; "),
         score: windowTotal,
-        // Ban every account that contributed to this window's score,
-        // not just the one that tipped it over — they're all part of
-        // the same burst.
+        // Ban every account that contributed to this window, not just
+        // the one that tipped it over — they're all part of the same
+        // burst.
         actorIds: this.raidScores.map((e) => e.discordUserId),
         detail: { joins: this.raidScores },
       });
@@ -395,10 +481,34 @@ export class GuildGuardian implements DurableObject {
   // ─── Nuke scoring ────────────────────────────────────────────────────────────
 
   private async scoreAuditEntry(entry: any) {
+    // Bot self-removal protection — only OWNER_DISCORD_ID may remove
+    // PitBoss from this guild. Runs before self-exclusion and the
+    // whitelist bypass below, since a whitelisted co-owner attempting
+    // this must still be caught. Detection/alert only, not
+    // prevention — see the note on OWNER_DISCORD_ID above regarding
+    // Discord role hierarchy being the actual blocking control.
+    if (
+      (entry.action_type === AUDIT_ACTION.MEMBER_KICK ||
+        entry.action_type === AUDIT_ACTION.MEMBER_BAN_ADD) &&
+      entry.target_id === this.env.DISCORD_APP_ID &&
+      entry.user_id !== OWNER_DISCORD_ID
+    ) {
+      await this.respondToThreat("nuke", {
+        reason: `Unauthorized attempt to remove PitBoss from the guild by <@${entry.user_id}> — only the owner may do this`,
+        actorIds: [entry.user_id],
+        detail: { entry },
+      });
+      return;
+    }
+
     // Hard self-exclusion — PitBoss's own bot user must never be
     // scored against its own detector. This is checked before any
     // other logic runs, not configured as an editable whitelist entry.
     if (entry.user_id === this.env.DISCORD_APP_ID) return;
+
+    // Trusted staff exclusion — legitimate bulk moderation by a
+    // commissioner/head steward shouldn't look identical to a nuke.
+    if (WHITELISTED_ACTOR_IDS.includes(entry.user_id)) return;
 
     const now = Date.now();
     const actorId = entry.user_id as string;
@@ -412,6 +522,27 @@ export class GuildGuardian implements DurableObject {
         detail: { entry },
       });
       return;
+    }
+
+    if (actionType === AUDIT_ACTION.BOT_ADD) {
+      await this.respondToThreat("nuke", {
+        reason: `Bot/integration added by non-whitelisted actor`,
+        actorIds: [actorId],
+        detail: { entry },
+      });
+      return;
+    }
+
+    if (actionType === AUDIT_ACTION.GUILD_UPDATE) {
+      const dangerous = this.guildUpdateIsDangerous(entry);
+      if (dangerous) {
+        await this.respondToThreat("nuke", {
+          reason: dangerous,
+          actorIds: [actorId],
+          detail: { entry },
+        });
+        return;
+      }
     }
 
     if (actionType === AUDIT_ACTION.ROLE_UPDATE) {
@@ -431,7 +562,10 @@ export class GuildGuardian implements DurableObject {
       actionType === AUDIT_ACTION.CHANNEL_DELETE ||
       actionType === AUDIT_ACTION.ROLE_DELETE ||
       actionType === AUDIT_ACTION.MEMBER_BAN_ADD ||
-      actionType === AUDIT_ACTION.MEMBER_KICK
+      actionType === AUDIT_ACTION.MEMBER_KICK ||
+      actionType === AUDIT_ACTION.CHANNEL_CREATE ||
+      actionType === AUDIT_ACTION.ROLE_CREATE ||
+      actionType === AUDIT_ACTION.MEMBER_ROLE_UPDATE
     ) {
       const existing = this.nukeActionsByActor.get(actorId) ?? [];
       existing.push({ timestamp: now, actionType });
@@ -443,6 +577,12 @@ export class GuildGuardian implements DurableObject {
       ).length;
       const banKickCount = pruned.filter(
         (e) => e.actionType === AUDIT_ACTION.MEMBER_BAN_ADD || e.actionType === AUDIT_ACTION.MEMBER_KICK
+      ).length;
+      const createCount = pruned.filter(
+        (e) => e.actionType === AUDIT_ACTION.CHANNEL_CREATE || e.actionType === AUDIT_ACTION.ROLE_CREATE
+      ).length;
+      const roleGrantCount = pruned.filter(
+        (e) => e.actionType === AUDIT_ACTION.MEMBER_ROLE_UPDATE
       ).length;
 
       if (deleteCount >= NUKE_DELETE_THRESHOLD) {
@@ -461,8 +601,45 @@ export class GuildGuardian implements DurableObject {
           detail: { entries: pruned },
         });
         this.nukeActionsByActor.delete(actorId);
+      } else if (createCount >= NUKE_CREATE_THRESHOLD) {
+        await this.respondToThreat("nuke", {
+          reason: `${createCount} channel/role creations by one actor in ${NUKE_WINDOW_MS / 1000}s (spam)`,
+          score: createCount,
+          actorIds: [actorId],
+          detail: { entries: pruned },
+        });
+        this.nukeActionsByActor.delete(actorId);
+      } else if (roleGrantCount >= NUKE_ROLE_GRANT_THRESHOLD) {
+        await this.respondToThreat("nuke", {
+          reason: `${roleGrantCount} role grants to members by one actor in ${NUKE_WINDOW_MS / 1000}s`,
+          score: roleGrantCount,
+          actorIds: [actorId],
+          detail: { entries: pruned },
+        });
+        this.nukeActionsByActor.delete(actorId);
       }
     }
+  }
+
+  private guildUpdateIsDangerous(entry: any): string | null {
+    const changes = entry.changes ?? [];
+
+    const verificationChange = changes.find((c: any) => c.key === "verification_level");
+    if (
+      verificationChange &&
+      typeof verificationChange.new_value === "number" &&
+      typeof verificationChange.old_value === "number" &&
+      verificationChange.new_value < verificationChange.old_value
+    ) {
+      return `Verification level lowered (${verificationChange.old_value} → ${verificationChange.new_value})`;
+    }
+
+    const ownerChange = changes.find((c: any) => c.key === "owner_id");
+    if (ownerChange) {
+      return `Server ownership transferred to <@${ownerChange.new_value}>`;
+    }
+
+    return null;
   }
 
   private roleUpdateGrantsDangerousPermission(entry: any): string[] | null {
@@ -594,6 +771,7 @@ export class GuildGuardian implements DurableObject {
   ) {
     if (ALERTS_CHANNEL_ID.startsWith("REPLACE_")) {
       console.error("[guardian] ALERTS_CHANNEL_ID not configured — skipping Discord alert");
+      await this.dmBackupContacts(type, ctx);
       return;
     }
 
@@ -607,7 +785,7 @@ export class GuildGuardian implements DurableObject {
       `Auto-lockdown applied. Full detail logged.`,
     ].filter(Boolean);
 
-    await fetch(`https://discord.com/api/v10/channels/${ALERTS_CHANNEL_ID}/messages`, {
+    const res = await fetch(`https://discord.com/api/v10/channels/${ALERTS_CHANNEL_ID}/messages`, {
       method: "POST",
       headers: {
         Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
@@ -615,6 +793,71 @@ export class GuildGuardian implements DurableObject {
       },
       body: JSON.stringify({ content: lines.join("\n") }),
     });
+
+    // Falls back to DMing backup contacts if the primary alert channel
+    // post fails — most likely because a nuke deleted the channel out
+    // from under us, which is exactly when the alert matters most.
+    if (!res.ok) {
+      console.error("[guardian] alert channel post failed:", res.status, await res.text());
+      await this.dmBackupContacts(type, ctx, lines.join("\n"));
+    }
+  }
+
+  private async dmBackupContacts(
+    type: "raid" | "nuke",
+    ctx: { reason: string; actorIds: string[] },
+    preformattedContent?: string
+  ) {
+    if (BACKUP_ALERT_DISCORD_IDS.length === 0) return;
+
+    const content =
+      preformattedContent ??
+      [
+        `**${type.toUpperCase()} DETECTED** (backup alert — primary alert channel unreachable)`,
+        ctx.reason,
+        ctx.actorIds.length > 0
+          ? `Accounts banned: ${ctx.actorIds.map((id) => `<@${id}>`).join(", ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+    await Promise.all(
+      BACKUP_ALERT_DISCORD_IDS.map((discordId) => this.sendBackupDirectMessage(discordId, content))
+    );
+  }
+
+  private async sendBackupDirectMessage(discordUserId: string, content: string): Promise<void> {
+    const token = this.env.DISCORD_BOT_TOKEN?.trim();
+
+    const dmRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ recipient_id: discordUserId }),
+    });
+
+    if (!dmRes.ok) {
+      console.error("[guardian] backup DM channel open failed:", dmRes.status, await dmRes.text());
+      return;
+    }
+
+    const dmChannel = await dmRes.json();
+
+    const msgRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ content }),
+    });
+
+    if (!msgRes.ok) {
+      console.error("[guardian] backup DM send failed:", msgRes.status, await msgRes.text());
+    }
   }
 
   private async logEvent(
