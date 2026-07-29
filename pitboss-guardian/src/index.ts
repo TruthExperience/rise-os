@@ -68,8 +68,7 @@ export default {
 const GUILD_ID = "1510688925784608809";
 const TICKET_CATEGORY_ID = "1530534575829422110";
 const STEWARD_ROLE_ID = "1516542505443659946";
-// TODO: fill in once the channel is created.
-const ALERTS_CHANNEL_ID = "REPLACE_WITH_SECURITY_ALERTS_CHANNEL_ID";
+const ALERTS_CHANNEL_ID = "1531851227611140196"; // #security-alerts
 
 // ─── Scoring thresholds ────────────────────────────────────────────────────────
 
