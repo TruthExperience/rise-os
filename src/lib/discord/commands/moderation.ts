@@ -1,7 +1,14 @@
 import { registerCommand } from "./registry";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
+import { postTicketMessage } from "../tickets";
 
 const OWNER_FLAGS = ["is_owner", "is_co_owner"] as const;
+
+// Mirrors pitboss-guardian's ALERTS_CHANNEL_ID — same AARL pilot
+// scoping (hardcoded, not pulled from league config) as the rest of
+// the guardian system, so manual moderation actions show up in the
+// same place automatic raid/nuke detections do.
+const AARL_SECURITY_ALERTS_CHANNEL_ID = "1531851227611140196"; // #security-alerts
 
 async function requireOwner(ctx: {
   discordUserId: string;
@@ -57,6 +64,13 @@ registerCommand("kick", async (ctx) => {
     return { content: `Couldn't kick <@${targetId}>: ${result.error}`, ephemeral: true };
   }
 
+  // Manual moderation doesn't go through respondToThreat, so nothing
+  // posts to #security-alerts unless we do it here explicitly.
+  await postTicketMessage(
+    AARL_SECURITY_ALERTS_CHANNEL_ID,
+    `👢 **Manual kick** — <@${targetId}> (${targetUsername}) kicked by <@${ctx.discordUserId}>.${reason ? ` Reason: ${reason}` : ""}`
+  );
+
   return {
     content: `👢 <@${targetId}> (${targetUsername}) was kicked.${reason ? ` Reason: ${reason}` : ""}`,
     ephemeral: false,
@@ -75,6 +89,11 @@ registerCommand("ban", async (ctx) => {
   if (!result.ok) {
     return { content: `Couldn't ban <@${targetId}>: ${result.error}`, ephemeral: true };
   }
+
+  await postTicketMessage(
+    AARL_SECURITY_ALERTS_CHANNEL_ID,
+    `🔨 **Manual ban** — <@${targetId}> (${targetUsername}) banned by <@${ctx.discordUserId}>.${reason ? ` Reason: ${reason}` : ""}`
+  );
 
   return {
     content: `🔨 <@${targetId}> (${targetUsername}) was banned.${reason ? ` Reason: ${reason}` : ""}`,
@@ -132,6 +151,11 @@ registerCommand("lockdown", async (ctx) => {
         return { content: `Couldn't lock down the server: ${result.error}` };
       }
 
+      await postTicketMessage(
+        AARL_SECURITY_ALERTS_CHANNEL_ID,
+        `🔒 **Manual lockdown** triggered by <@${ctx.discordUserId}>. ${result.data.channelsLocked} channel(s) restricted, ${result.data.invitesDeleted} invite(s) removed.${reason ? ` Reason: ${reason}` : ""}`
+      );
+
       return {
         content: `🔒 Server locked down. ${result.data.channelsLocked} channel(s) restricted, ${result.data.invitesDeleted} invite(s) removed.${reason ? ` Reason: ${reason}` : ""}`,
       };
@@ -152,6 +176,11 @@ registerCommand("endlockdown", async (ctx) => {
       if (!result.ok) {
         return { content: `Couldn't lift the lockdown: ${result.error}` };
       }
+
+      await postTicketMessage(
+        AARL_SECURITY_ALERTS_CHANNEL_ID,
+        `🔓 **Lockdown lifted** by <@${ctx.discordUserId}>. ${result.data.channelsRestored} channel(s) restored${result.data.channelsFailed ? `, ${result.data.channelsFailed} failed` : ""}. ${result.data.note}`
+      );
 
       return {
         content: `🔓 Lockdown lifted. ${result.data.channelsRestored} channel(s) restored${result.data.channelsFailed ? `, ${result.data.channelsFailed} failed` : ""}. ${result.data.note}`,
