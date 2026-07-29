@@ -8,7 +8,7 @@ class_name = "GuildGuardian"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["GuildGuardian"]
+new_sqlite_classes = ["GuildGuardian"]
 
 # Bind a single named instance so the Worker and any manual admin
 # calls always reach the same running Durable Object, rather than
