@@ -27,7 +27,7 @@ async function discordModerationCall(
   action: "kick" | "ban",
   reason?: string
 ): Promise<{ ok: boolean; error?: string }> {
-  const token = process.env.DISCORD_BOT_TOKEN?.trim();
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN?.trim();
   const url =
     action === "kick"
       ? `https://discord.com/api/v10/guilds/${guildId}/members/${targetDiscordId}`
@@ -106,7 +106,7 @@ async function guardianCall(
   body?: Record<string, unknown>
 ): Promise<{ ok: boolean; error?: string; data?: any }> {
   const workerUrl = process.env.GUARDIAN_WORKER_URL?.trim();
-  const token = process.env.DISCORD_BOT_TOKEN?.trim();
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN?.trim();
 
   if (!workerUrl) {
     return { ok: false, error: "GUARDIAN_WORKER_URL is not configured" };
