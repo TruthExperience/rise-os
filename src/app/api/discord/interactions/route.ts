@@ -12,7 +12,7 @@ import { routeCommand } from "@/lib/discord/commands/router";
  *   Interactions Endpoint URL -> https://<your-domain>/api/discord/interactions
  *
  * Required env vars:
- *   DISCORD_PUBLIC_KEY
+ *   PITBOSS_DISCORD_PUBLIC_KEY
  */
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
@@ -26,8 +26,6 @@ export async function POST(req: NextRequest) {
 
   const interaction = JSON.parse(rawBody);
 
-  // Discord's handshake check — must respond with PONG or the
-  // endpoint gets marked invalid and Discord stops sending traffic.
   if (interaction.type === InteractionType.PING) {
     return NextResponse.json({ type: InteractionResponseType.PONG });
   }
@@ -37,8 +35,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(response);
   }
 
-  // Buttons/modals/select menus land here in later phases
-  // (cert exam flow, roster confirmation prompts, etc.)
   if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
     return NextResponse.json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
