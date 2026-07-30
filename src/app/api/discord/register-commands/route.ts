@@ -6,12 +6,12 @@ import { NextResponse } from "next/server";
  * DELETE THIS FILE after confirming it worked.
  */
 export async function GET() {
-  const appId = process.env.DISCORD_APP_ID;
-  const token = process.env.DISCORD_BOT_TOKEN;
+  const appId = process.env.PITBOSS_DISCORD_APPLICATION_ID;
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
 
   if (!appId || !token) {
     return NextResponse.json(
-      { error: "DISCORD_APP_ID or DISCORD_BOT_TOKEN not set" },
+      { error: "PITBOSS_DISCORD_APPLICATION_ID or PITBOSS_DISCORD_BOT_TOKEN not set" },
       { status: 500 }
     );
   }
@@ -348,10 +348,6 @@ export async function GET() {
     {
       name: "kick",
       description: "Kick a member from the server (owner/co-owner only)",
-      // Discord native KICK_MEMBERS permission bit -- hides this command
-      // from the picker for anyone without kick permission in the guild.
-      // Narrower than the in-app owner/co-owner check in moderation.ts,
-      // which further restricts among members who DO have this permission.
       default_member_permissions: "2",
       dm_permission: false,
       options: [
@@ -372,7 +368,6 @@ export async function GET() {
     {
       name: "ban",
       description: "Ban a member from the server (owner/co-owner only)",
-      // Discord native BAN_MEMBERS permission bit.
       default_member_permissions: "4",
       dm_permission: false,
       options: [
@@ -393,11 +388,6 @@ export async function GET() {
     {
       name: "lockdown",
       description: "Lock down the server (owner/co-owner only)",
-      // Discord native ADMINISTRATOR permission bit -- lockdown is more
-      // drastic than kick/ban, so it's gated on the highest native
-      // permission tier. Narrower than the in-app owner/co-owner check
-      // enforced by pitboss-guardian, which further restricts among
-      // members who DO have this permission.
       default_member_permissions: "8",
       dm_permission: false,
       options: [
