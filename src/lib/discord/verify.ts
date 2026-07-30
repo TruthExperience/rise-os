@@ -6,7 +6,7 @@ import { verifyKey } from "discord-interactions";
  * fail verification must be rejected with 401 or Discord will
  * disable the endpoint.
  *
- * Env var required: DISCORD_PUBLIC_KEY
+ * Env var required: PITBOSS_DISCORD_PUBLIC_KEY
  */
 export async function verifyDiscordRequest(
   rawBody: string,
@@ -15,9 +15,9 @@ export async function verifyDiscordRequest(
 ): Promise<boolean> {
   if (!signature || !timestamp) return false;
 
-  const publicKey = process.env.DISCORD_PUBLIC_KEY;
+  const publicKey = process.env.PITBOSS_DISCORD_PUBLIC_KEY;
   if (!publicKey) {
-    throw new Error("DISCORD_PUBLIC_KEY is not set");
+    throw new Error("PITBOSS_DISCORD_PUBLIC_KEY is not set");
   }
 
   return verifyKey(rawBody, signature, timestamp, publicKey);
