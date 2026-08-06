@@ -1,19 +1,70 @@
 "use client";
 
-import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
+
+type Profile = {
+  id: string;
+  username: string | null;
+  avatar: string | null;
+  email: string | null;
+};
 
 export default function DashboardPage() {
-  const { data: session, status } = useSession();
   const router = useRouter();
+  const supabase = createClient();
+  const [status, setStatus] = useState<"loading" | "authenticated" | "unauthenticated">("loading");
+  const [profile, setProfile] = useState<Profile | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadSession() {
+      const { data } = await supabase.auth.getUser();
+      const authUser = data?.user;
+
+      if (!authUser) {
+        if (mounted) setStatus("unauthenticated");
+        return;
+      }
+
+      const { data: userRow } = await supabase
+        .from("users")
+        .select("id, username, avatar, email")
+        .eq("auth_user_id", authUser.id)
+        .single();
+
+      if (!mounted) return;
+      setProfile(userRow ?? { id: authUser.id, username: authUser.email, avatar: null, email: authUser.email });
+      setStatus("authenticated");
+    }
+
+    loadSession();
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        setStatus("unauthenticated");
+      }
+    });
+
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, [supabase]);
 
   useEffect(() => {
     if (status === "unauthenticated") {
       router.push("/login");
     }
   }, [status, router]);
+
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+    router.push("/login");
+  }
 
   if (status === "loading") {
     return (
@@ -26,9 +77,7 @@ export default function DashboardPage() {
     );
   }
 
-  if (!session) return null;
-
-  const user = session.user as any;
+  if (!profile) return null;
 
   return (
     <main className="min-h-screen bg-rise-black px-4 py-8">
@@ -43,7 +92,7 @@ export default function DashboardPage() {
           </p>
         </div>
         <button
-          onClick={() => signOut({ callbackUrl: "/login" })}
+          onClick={handleSignOut}
           className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/50 hover:text-white transition-colors"
         >
           Sign Out
@@ -54,18 +103,16 @@ export default function DashboardPage() {
       <Link href="/pitboss/profile">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-6 mb-6 active:scale-[0.98] transition-transform">
           <div className="flex items-center gap-4">
-            {user?.image && (
+            {profile.avatar && (
               <img
-                src={user.image}
+                src={profile.avatar}
                 alt="avatar"
                 className="h-14 w-14 rounded-full border-2 border-rise-red"
               />
             )}
             <div className="flex-1">
-              <p className="text-white font-bold text-lg">
-                {user?.username || user?.name}
-              </p>
-              <p className="text-white/40 text-sm">{user?.email}</p>
+              <p className="text-white font-bold text-lg">{profile.username}</p>
+              <p className="text-white/40 text-sm">{profile.email}</p>
               <p className="text-rise-red text-xs mt-1 font-medium uppercase tracking-wide">
                 Commissioner
               </p>
