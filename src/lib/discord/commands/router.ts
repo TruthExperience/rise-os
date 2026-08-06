@@ -30,6 +30,14 @@ export async function routeCommand(interaction: any) {
   const applicationId: string = interaction.application_id;
   const interactionToken: string = interaction.token;
 
+  // Discord includes these directly on the interaction payload for any
+  // command invoked in a guild (which is all commands here, since league
+  // resolution requires guild_id). roles is an array of role ID strings;
+  // permissions is a stringified bitfield already computed by Discord
+  // (base role perms + channel overwrites), so no separate fetch needed.
+  const memberRoles: string[] = interaction.member?.roles ?? [];
+  const memberPermissions: string = interaction.member?.permissions ?? "0";
+
   let commandKey = topLevelName;
   let rawOptions: any[] = interaction.data?.options ?? [];
   if (rawOptions.length === 1 && rawOptions[0].type === 1) {
@@ -70,6 +78,8 @@ export async function routeCommand(interaction: any) {
       discordUserId,
       options,
       resolvedUsers,
+      memberRoles,
+      memberPermissions,
     });
 
     // A handler can opt into deferral instead of answering inline (see
