@@ -1,8 +1,49 @@
 "use client";
 
-import { signIn } from "next-auth/react";
+import { useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const supabase = createClient();
+
+  async function signInWithDiscord() {
+    await supabase.auth.signInWithOAuth({
+      provider: "discord",
+      options: { redirectTo: `${window.location.origin}/auth/callback?next=/dashboard` },
+    });
+  }
+
+  async function handleEmailAuth(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    const { error } =
+      mode === "signin"
+        ? await supabase.auth.signInWithPassword({ email, password })
+        : await supabase.auth.signUp({
+            email,
+            password,
+            options: {
+              emailRedirectTo: `${window.location.origin}/auth/callback?next=/dashboard`,
+            },
+          });
+
+    setLoading(false);
+    if (error) {
+      setError(error.message);
+    } else if (mode === "signin") {
+      window.location.href = "/dashboard";
+    } else {
+      setError("Check your email to confirm your account.");
+    }
+  }
+
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-rise-black px-6">
       {/* Logo */}
@@ -22,11 +63,11 @@ export default function LoginPage() {
       <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-white/5 p-8">
         <h2 className="text-xl font-bold text-white mb-2">Welcome</h2>
         <p className="text-sm text-white/40 mb-8">
-          Sign in with Discord to access your league.
+          Sign in with Discord or your email to access your league.
         </p>
 
         <button
-          onClick={() => signIn("discord", { callbackUrl: "/dashboard" })}
+          onClick={signInWithDiscord}
           className="w-full flex items-center justify-center gap-3 rounded-xl bg-[#5865F2] hover:bg-[#4752C4] transition-colors px-6 py-4 text-white font-semibold text-sm"
         >
           <svg
@@ -40,15 +81,64 @@ export default function LoginPage() {
           Continue with Discord
         </button>
 
+        {/* Divider */}
+        <div className="flex items-center gap-3 my-6">
+          <div className="h-px flex-1 bg-white/10" />
+          <span className="text-xs text-white/30 uppercase tracking-wider">or</span>
+          <div className="h-px flex-1 bg-white/10" />
+        </div>
+
+        {/* Email form */}
+        <form onSubmit={handleEmailAuth} className="flex flex-col gap-3">
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="Email"
+            required
+            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 outline-none focus:border-rise-red transition-colors"
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password"
+            required
+            minLength={6}
+            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 outline-none focus:border-rise-red transition-colors"
+          />
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full rounded-xl bg-rise-red hover:opacity-90 disabled:opacity-50 transition-opacity px-6 py-3 text-white font-semibold text-sm"
+          >
+            {loading ? "Please wait..." : mode === "signin" ? "Sign In" : "Create Account"}
+          </button>
+        </form>
+
+        {error && (
+          <p className="text-xs text-rise-red text-center mt-4">{error}</p>
+        )}
+
+        <button
+          onClick={() => {
+            setMode(mode === "signin" ? "signup" : "signin");
+            setError(null);
+          }}
+          className="w-full text-xs text-white/40 hover:text-white/60 text-center mt-6 transition-colors"
+        >
+          {mode === "signin"
+            ? "Need an account? Sign up"
+            : "Already have an account? Sign in"}
+        </button>
+
         <p className="text-xs text-white/20 text-center mt-6">
           By signing in you agree to the Rise OS terms of use.
         </p>
       </div>
 
       {/* Footer */}
-      <p className="mt-8 text-xs text-white/20">
-        TOPS Ecosystem · Rise OS v0.1
-      </p>
+      <p className="mt-8 text-xs text-white/20">TOPS Ecosystem · Rise OS v0.1</p>
     </main>
   );
 }
