@@ -1,60 +1,25 @@
-// pitboss-guardian/src/index.ts
+// pitboss-guardian — multi-tenant anti-raid / anti-nuke worker
 //
-// Cloudflare Worker + Durable Object that maintains a persistent
-// connection to the Discord Gateway for AARL, watching for raid
-// (mass suspicious joins) and nuke (mass destructive actions)
-// patterns, and responding automatically. Also exposes manual
-// /lockdown and /endlockdown actions for the /lockdown and
-// /endlockdown Discord slash commands.
+// CHANGE FROM PREVIOUS VERSION: no more hardcoded GUILD_ID / STEWARD_ROLE_ID /
+// ALERTS_CHANNEL_ID / WHITELISTED_ACTOR_IDS constants. Every guild the bot is
+// a member of gets auto-provisioned on GUILD_CREATE (fires on first join AND
+// on every gateway reconnect for guilds already joined), and its config is
+// persisted to pitboss.guardian_guild_config so it survives DO restarts.
 //
-// PILOT SCOPE: AARL only. Hardcoded below rather than pulled from
-// Supabase — deliberately, so this can't silently start acting on a
-// guild nobody reviewed the config for. Expand to a real per-guild
-// config table once the pilot's thresholds are validated.
+// One Durable Object instance ("guardian-singleton") holds the single Gateway
+// connection for the whole bot — this is correct Discord architecture: one
+// bot token gets one gateway session covering all its guilds, not one
+// session per guild. Per-guild state (config, raid/nuke scoring windows) is
+// kept in Maps keyed by guild_id inside that one instance.
 
-interface Env {
-  GUARDIAN: DurableObjectNamespace;
-  DISCORD_BOT_TOKEN: string;
-  DISCORD_APP_ID: string;
-  SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
-}
-
-export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+var src_default = {
+  async fetch(req, env) {
     const url = new URL(req.url);
-
-    // Single fixed DO instance — this Worker manages exactly one
-    // guild's Gateway connection for the pilot.
-    const id = env.GUARDIAN.idFromName("aarl-guardian");
+    const id = env.GUARDIAN.idFromName("guardian-singleton");
     const stub = env.GUARDIAN.get(id);
 
-    // Simple admin surface: hitting /start (with the right header)
-    // boots the Gateway connection if it isn't already running.
-    // Durable Objects don't self-start on deploy — something has to
-    // make the first request to wake one up.
-    if (url.pathname === "/start") {
-      const provided = req.headers.get("X-Guardian-Key")?.trim();
-      if (provided !== env.DISCORD_BOT_TOKEN?.trim()) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-      return stub.fetch(req);
-    }
-
-    // /status exposes a masked token preview and live connection
-    // state -- gated the same as /start rather than left open.
-    if (url.pathname === "/status") {
-      const provided = req.headers.get("X-Guardian-Key")?.trim();
-      if (provided !== env.DISCORD_BOT_TOKEN?.trim()) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-      return stub.fetch(req);
-    }
-
-    // /lockdown and /endlockdown — manual triggers for the
-    // /lockdown and /endlockdown Discord slash commands. Same
-    // X-Guardian-Key gating as /start and /status.
-    if (url.pathname === "/lockdown" || url.pathname === "/endlockdown") {
+    const guardedPaths = ["/start", "/status", "/lockdown", "/endlockdown", "/guilds"];
+    if (guardedPaths.includes(url.pathname)) {
       const provided = req.headers.get("X-Guardian-Key")?.trim();
       if (provided !== env.DISCORD_BOT_TOKEN?.trim()) {
         return new Response("Unauthorized", { status: 401 });
@@ -65,93 +30,44 @@ export default {
     return new Response("pitboss-guardian", { status: 200 });
   },
 
-  // Cron Trigger (see wrangler.toml `[triggers]`) — fires every 5
-  // minutes and pings /start on the DO directly. This is the
-  // self-healing measure from the original design notes: harmless
-  // no-op if already connected, but recovers automatically if the
+  // Cron Trigger — fires every 5 minutes, pings /start on the DO directly.
+  // Harmless no-op if already connected; recovers automatically if the
   // Gateway connection ever silently dies without a clean close.
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    const id = env.GUARDIAN.idFromName("aarl-guardian");
+  async scheduled(_event, env, ctx) {
+    const id = env.GUARDIAN.idFromName("guardian-singleton");
     const stub = env.GUARDIAN.get(id);
     ctx.waitUntil(
       stub.fetch("https://internal/start", {
-        headers: { "X-Guardian-Key": env.DISCORD_BOT_TOKEN },
+        headers: { "X-Guardian-Key": env.DISCORD_BOT_TOKEN }
       }).catch((err) => {
         console.error("[guardian] scheduled /start ping failed:", err);
       })
     );
-  },
+  }
 };
 
-// ─── Config (AARL pilot — hardcoded) ──────────────────────────────────────────
-
-const GUILD_ID = "1510688925784608809";
-const TICKET_CATEGORY_ID = "1530534575829422110";
-const STEWARD_ROLE_ID = "1516542505443659946";
-const ALERTS_CHANNEL_ID = "1531851227611140196"; // #security-alerts
-
-// Text-bearing channel types eligible for the manual /lockdown's
-// SEND_MESSAGES overwrite. Voice (2), category (4), and forum (15)
-// channels are left alone.
-const LOCKDOWN_CHANNEL_TYPES = [0, 5]; // GUILD_TEXT, GUILD_ANNOUNCEMENT
-
-// Permission bits touched by manual /lockdown specifically — distinct
-// from DANGEROUS_PERMISSIONS below, which guards against grants during
-// nuke detection.
-const LOCKDOWN_DENY_PERMISSIONS = {
+var LOCKDOWN_CHANNEL_TYPES = [0, 5];
+var LOCKDOWN_DENY_PERMISSIONS = {
   SEND_MESSAGES: 1n << 11n,
-  CREATE_INSTANT_INVITE: 1n << 0n,
-} as const;
-const LOCKDOWN_DENY_MASK =
+  CREATE_INSTANT_INVITE: 1n << 0n
+};
+var LOCKDOWN_DENY_MASK =
   LOCKDOWN_DENY_PERMISSIONS.SEND_MESSAGES | LOCKDOWN_DENY_PERMISSIONS.CREATE_INSTANT_INVITE;
 
-// Actions by these Discord user IDs are never scored as raid/nuke
-// triggers — meant for commissioners/head stewards who legitimately
-// do bulk moderation (mass bans, role cleanups) that would otherwise
-// look identical to a nuke. Does NOT exempt them from the bot
-// self-removal protection below — that check runs first and applies
-// regardless of whitelist status.
-const WHITELISTED_ACTOR_IDS: string[] = [
-  "1047084061027471480", // truthexperience (owner)
-  "1401841577478848603", // _colapintolover (co-owner)
-  "1248351138302922883", // yello_y (co-owner)
-];
+var RAID_WINDOW_MS = 60_000;
+var RAID_SCORE_THRESHOLD = 10;
+var RAID_JOIN_COUNT_THRESHOLD = 8;
+var AVATAR_HASH_SHARE_THRESHOLD = 3;
 
-// Direct-message fallback recipients if posting to ALERTS_CHANNEL_ID
-// fails — most likely because the channel itself was a casualty of
-// the nuke.
-const BACKUP_ALERT_DISCORD_IDS: string[] = [
-  "1047084061027471480", // truthexperience (owner)
-  "1401841577478848603", // _colapintolover (co-owner)
-  "1248351138302922883", // yello_y (co-owner)
-];
+var NUKE_WINDOW_MS = 30_000;
+var NUKE_DELETE_THRESHOLD = 3;
+var NUKE_BAN_KICK_THRESHOLD = 5;
+var NUKE_CREATE_THRESHOLD = 5;
+var NUKE_ROLE_GRANT_THRESHOLD = 5;
+var NUKE_WEBHOOK_THRESHOLD = 1;
+var NUKE_BOT_ADD_THRESHOLD = 1;
 
-// Only this account may remove PitBoss from the guild. Co-owners are
-// whitelisted for everything else above, but NOT for this — see the
-// self-protection check at the top of scoreAuditEntry, which runs
-// before the whitelist bypass. Note this is detection/alert only, not
-// prevention — see the note on OWNER_DISCORD_ID above regarding
-// Discord role hierarchy being the actual blocking control.
-const OWNER_DISCORD_ID = "1047084061027471480"; // truthexperience
-
-// ─── Scoring thresholds ────────────────────────────────────────────────────────
-
-const RAID_WINDOW_MS = 60_000;
-const RAID_SCORE_THRESHOLD = 10;
-const RAID_JOIN_COUNT_THRESHOLD = 8; // raw joins in-window, independent of score
-const AVATAR_HASH_SHARE_THRESHOLD = 3; // distinct users sharing one avatar hash
-
-const NUKE_WINDOW_MS = 30_000;
-const NUKE_DELETE_THRESHOLD = 3; // channel/role deletions by one actor
-const NUKE_BAN_KICK_THRESHOLD = 5; // bans/kicks by one actor
-const NUKE_CREATE_THRESHOLD = 5; // channel/role creations by one actor (spam)
-const NUKE_ROLE_GRANT_THRESHOLD = 5; // role additions to members by one actor
-const NUKE_WEBHOOK_THRESHOLD = 1; // webhook creations by one actor -- zero-tolerance, made explicit
-const NUKE_BOT_ADD_THRESHOLD = 1; // bot/integration adds by one actor -- zero-tolerance, made explicit
-
-// Discord audit log action types relevant here.
-// https://discord.com/developers/docs/resources/audit-log#audit-log-entry-object-audit-log-events
-const AUDIT_ACTION = {
+var AUDIT_ACTION = {
   GUILD_UPDATE: 1,
   CHANNEL_CREATE: 10,
   CHANNEL_DELETE: 12,
@@ -162,78 +78,50 @@ const AUDIT_ACTION = {
   ROLE_CREATE: 30,
   ROLE_UPDATE: 31,
   ROLE_DELETE: 32,
-  WEBHOOK_CREATE: 50,
-} as const;
+  WEBHOOK_CREATE: 50
+};
 
-const DANGEROUS_PERMISSIONS = {
+var DANGEROUS_PERMISSIONS = {
   ADMINISTRATOR: 1n << 3n,
   MANAGE_ROLES: 1n << 28n,
   MANAGE_CHANNELS: 1n << 4n,
-  MANAGE_WEBHOOKS: 1n << 29n,
-} as const;
+  MANAGE_WEBHOOKS: 1n << 29n
+};
 
-// ─── Durable Object ────────────────────────────────────────────────────────────
+// Heuristics used to auto-provision a guild on GUILD_CREATE.
+var STEWARD_ROLE_NAME_PATTERNS = [/steward/i, /moderator|mod\b/i];
+var ALERTS_CHANNEL_NAME_PATTERNS = [/guardian/i, /mod-?log/i, /audit/i, /security/i, /alert/i];
+var AUTO_CREATED_ALERTS_CHANNEL_NAME = "guardian-alerts";
 
-interface RaidScoreEntry {
-  timestamp: number;
-  score: number;
-  discordUserId: string;
-  avatarHash: string | null;
-  reasons: string[];
-}
+var GuildGuardian = class {
+  state;
+  env;
+  ws = null;
+  heartbeatInterval = null;
+  sequence = null;
+  sessionId = null;
+  resumeGatewayUrl = null;
+  heartbeatAckReceived = true;
+  consecutiveAuthFailures = 0;
 
-interface NukeActionEntry {
-  timestamp: number;
-  actionType: number;
-}
+  // Per-guild config, loaded from Supabase at startup and refreshed on
+  // every GUILD_CREATE. Map<guildId, GuildConfig>
+  guildConfigs = new Map();
+  configsLoaded = false;
 
-// Persisted (via state.storage, not in-memory) so a manual lockdown
-// survives DO eviction and so /endlockdown can restore exactly what
-// was there before, rather than just clearing the overwrite blind.
-interface ChannelOverwriteBackup {
-  channelId: string;
-  hadOverwrite: boolean; // false = there was no @everyone overwrite at all; endlockdown should delete, not restore, in that case
-  priorAllow: string; // Discord permission bitfields are strings on the wire
-  priorDeny: string;
-}
+  // Per-guild scoring windows. Short-lived by design — losing these on a
+  // DO restart/eviction is an acceptable tradeoff vs. persisting a rolling
+  // window to storage.
+  raidScoresByGuild = new Map(); // Map<guildId, RaidScoreEntry[]>
+  nukeActionsByGuildAndActor = new Map(); // Map<guildId, Map<actorId, entry[]>>
 
-interface LockdownState {
-  active: boolean;
-  reason: string | null;
-  triggeredBy: string | null;
-  startedAt: number | null;
-  channelBackups: ChannelOverwriteBackup[];
-}
-
-const LOCKDOWN_STORAGE_KEY = "manual_lockdown_state";
-
-export class GuildGuardian implements DurableObject {
-  private state: DurableObjectState;
-  private env: Env;
-  private ws: WebSocket | null = null;
-  private heartbeatInterval: number | null = null;
-  private sequence: number | null = null;
-  private sessionId: string | null = null;
-  private resumeGatewayUrl: string | null = null;
-  private heartbeatAckReceived = true;
-
-  // Tracks consecutive auth-failure closes (invalid token, etc.) so
-  // reconnect backoff can grow instead of hammering Discord's Gateway
-  // at a flat interval when the token itself is the problem.
-  private consecutiveAuthFailures = 0;
-
-  // In-memory scoring windows. Short-lived (30-60s) by design, so
-  // losing these on a DO restart/eviction is an acceptable tradeoff
-  // versus the complexity of persisting a rolling window to storage.
-  private raidScores: RaidScoreEntry[] = [];
-  private nukeActionsByActor: Map<string, NukeActionEntry[]> = new Map();
-
-  constructor(state: DurableObjectState, env: Env) {
+  constructor(state, env) {
     this.state = state;
     this.env = env;
   }
 
-  async fetch(req: Request): Promise<Response> {
+  async fetch(req) {
+    await this.ensureConfigsLoaded();
     const url = new URL(req.url);
 
     if (url.pathname === "/start") {
@@ -244,398 +132,422 @@ export class GuildGuardian implements DurableObject {
       return new Response("Already connected.", { status: 200 });
     }
 
+    if (url.pathname === "/guilds") {
+      return Response.json({
+        guilds: [...this.guildConfigs.entries()].map(([guildId, cfg]) => ({ guildId, ...cfg }))
+      });
+    }
+
     if (url.pathname === "/status") {
       const token = this.env.DISCORD_BOT_TOKEN ?? "";
-      const lockdown = await this.state.storage.get<LockdownState>(LOCKDOWN_STORAGE_KEY);
       return Response.json({
         connected: this.ws?.readyState === WebSocket.READY_STATE_OPEN,
         sessionId: this.sessionId,
         sequence: this.sequence,
-        raidScoreWindowSize: this.raidScores.length,
-        nukeActorsTracked: this.nukeActionsByActor.size,
+        guildsProvisioned: this.guildConfigs.size,
         consecutiveAuthFailures: this.consecutiveAuthFailures,
-        manualLockdownActive: lockdown?.active ?? false,
-        // TEMPORARY diagnostic — kept intentionally for now. Never
-        // logs the full token, only enough to confirm the secret's
-        // shape matches what's expected (length, whether it
-        // accidentally includes a "Bot " prefix, and a masked
-        // first/last few characters for visual comparison against
-        // the Discord Developer Portal).
         tokenDiagnostic: {
           length: token.length,
           startsWithBotPrefix: token.startsWith("Bot "),
           hasLeadingOrTrailingWhitespace: token !== token.trim(),
-          preview: token.length > 10
-            ? `${token.slice(0, 6)}...${token.slice(-4)}`
-            : "(too short to preview)",
-        },
+          preview: token.length > 10 ? `${token.slice(0, 6)}...${token.slice(-4)}` : "(too short to preview)"
+        }
       });
     }
 
     if (url.pathname === "/lockdown") {
       return this.handleManualLockdown(req);
     }
-
     if (url.pathname === "/endlockdown") {
-      return this.handleManualEndLockdown();
+      return this.handleManualEndLockdown(req);
     }
 
     return new Response("Not found", { status: 404 });
   }
 
-  // ─── Manual lockdown / endlockdown ──────────────────────────────────────────
+  // ─── Config loading / provisioning ──────────────────────────────────────
 
-  private async handleManualLockdown(req: Request): Promise<Response> {
-    const existing = await this.state.storage.get<LockdownState>(LOCKDOWN_STORAGE_KEY);
-    if (existing?.active) {
-      return Response.json(
-        { ok: false, error: "Lockdown already active." },
-        { status: 409 }
-      );
-    }
-
-    let body: { reason?: string; triggeredBy?: string } = {};
+  async ensureConfigsLoaded() {
+    if (this.configsLoaded) return;
     try {
-      body = await req.json();
-    } catch {
-      // no body sent -- reason/triggeredBy stay undefined, that's fine
+      const res = await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_guild_config?select=*`, {
+        headers: {
+          apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`
+        }
+      });
+      if (res.ok) {
+        const rows = await res.json();
+        for (const row of rows) {
+          this.guildConfigs.set(row.guild_id, {
+            guildName: row.guild_name,
+            ownerDiscordId: row.owner_discord_id,
+            whitelistedActorIds: row.whitelisted_actor_ids ?? [],
+            stewardRoleId: row.steward_role_id,
+            alertsChannelId: row.alerts_channel_id
+          });
+        }
+      } else {
+        console.error("[guardian] failed to load guild configs:", res.status, await res.text());
+      }
+    } catch (err) {
+      console.error("[guardian] error loading guild configs:", err);
+    }
+    this.configsLoaded = true;
+  }
+
+  // Called on GUILD_CREATE. Idempotent — safe to re-run on every reconnect;
+  // re-derives config each time so role/channel renames stay in sync.
+  async provisionGuild(guild) {
+    const token = this.env.DISCORD_BOT_TOKEN?.trim();
+    const roles = guild.roles ?? [];
+    const channels = guild.channels ?? [];
+    const members = guild.members ?? [];
+
+    const ownerDiscordId = guild.owner_id;
+
+    // Whitelist: owner + anyone holding a role with ADMINISTRATOR.
+    const adminRoleIds = new Set(
+      roles.filter((r) => (BigInt(r.permissions) & DANGEROUS_PERMISSIONS.ADMINISTRATOR) !== 0n).map((r) => r.id)
+    );
+    const whitelistedActorIds = new Set([ownerDiscordId]);
+    for (const member of members) {
+      if (member.roles?.some((rid) => adminRoleIds.has(rid))) {
+        whitelistedActorIds.add(member.user.id);
+      }
     }
 
-    const channelBackups: ChannelOverwriteBackup[] = [];
+    // Steward role: first name-pattern match, preferring earlier patterns.
+    let stewardRoleId = null;
+    for (const pattern of STEWARD_ROLE_NAME_PATTERNS) {
+      const match = roles.find((r) => pattern.test(r.name) && r.name !== "@everyone");
+      if (match) {
+        stewardRoleId = match.id;
+        break;
+      }
+    }
 
-    const channelsRes = await fetch(
-      `https://discord.com/api/v10/guilds/${GUILD_ID}/channels`,
-      { headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` } }
+    // Alerts channel: find existing match, else auto-create a private one.
+    let alertsChannelId = null;
+    const textChannels = channels.filter((c) => c.type === 0);
+    const existingAlertsChannel = textChannels.find((c) =>
+      ALERTS_CHANNEL_NAME_PATTERNS.some((p) => p.test(c.name))
     );
 
-    if (!channelsRes.ok) {
-      return Response.json(
-        { ok: false, error: `Failed to list channels (${channelsRes.status})` },
-        { status: 502 }
-      );
-    }
-
-    const channels: any[] = await channelsRes.json();
-    const textChannels = channels.filter((c) => LOCKDOWN_CHANNEL_TYPES.includes(c.type));
-
-    for (const channel of textChannels) {
-      const existingOverwrite = (channel.permission_overwrites ?? []).find(
-        (ow: any) => ow.id === GUILD_ID && ow.type === 0
-      );
-
-      channelBackups.push({
-        channelId: channel.id,
-        hadOverwrite: Boolean(existingOverwrite),
-        priorAllow: existingOverwrite?.allow ?? "0",
-        priorDeny: existingOverwrite?.deny ?? "0",
+    if (existingAlertsChannel) {
+      alertsChannelId = existingAlertsChannel.id;
+    } else {
+      const permissionOverwrites = [
+        { id: guild.id, type: 0, allow: "0", deny: (1n << 10n).toString() } // deny VIEW_CHANNEL for @everyone
+      ];
+      for (const roleId of adminRoleIds) {
+        permissionOverwrites.push({ id: roleId, type: 0, allow: (1n << 10n).toString(), deny: "0" });
+      }
+      const createRes = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/channels`, {
+        method: "POST",
+        headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: AUTO_CREATED_ALERTS_CHANNEL_NAME,
+          type: 0,
+          topic: "Auto-created by pitboss-guardian for raid/nuke alerts.",
+          permission_overwrites: permissionOverwrites
+        })
       });
-
-      const priorAllow = BigInt(existingOverwrite?.allow ?? "0");
-      const priorDeny = BigInt(existingOverwrite?.deny ?? "0");
-
-      // Strip the lockdown bits out of allow (a bit can't legally sit
-      // in both allow and deny) and add them to deny.
-      const newAllow = priorAllow & ~LOCKDOWN_DENY_MASK;
-      const newDeny = priorDeny | LOCKDOWN_DENY_MASK;
-
-      const putRes = await fetch(
-        `https://discord.com/api/v10/channels/${channel.id}/permissions/${GUILD_ID}`,
-        {
-          method: "PUT",
-          headers: {
-            Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            type: 0, // role
-            allow: newAllow.toString(),
-            deny: newDeny.toString(),
-          }),
-        }
-      );
-
-      if (!putRes.ok) {
+      if (createRes.ok) {
+        const created = await createRes.json();
+        alertsChannelId = created.id;
+      } else {
         console.error(
-          `[guardian] lockdown overwrite failed for channel ${channel.id}:`,
-          putRes.status,
-          await putRes.text()
+          `[guardian] failed to auto-create alerts channel for guild ${guild.id}:`,
+          createRes.status,
+          await createRes.text()
         );
       }
     }
 
-    // Disable invites: delete every currently-active invite. Combined
-    // with the CREATE_INSTANT_INVITE deny above, this both closes
-    // existing doors and stops @everyone opening new ones -- but
-    // deleted invites can't be restored on /endlockdown, only recreated
-    // manually.
-    let invitesDeleted = 0;
-    const invitesRes = await fetch(
-      `https://discord.com/api/v10/guilds/${GUILD_ID}/invites`,
-      { headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` } }
+    const config = {
+      guildName: guild.name,
+      ownerDiscordId,
+      whitelistedActorIds: [...whitelistedActorIds],
+      stewardRoleId,
+      alertsChannelId
+    };
+    this.guildConfigs.set(guild.id, config);
+
+    await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_guild_config`, {
+      method: "POST",
+      headers: {
+        apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        guild_id: guild.id,
+        guild_name: config.guildName,
+        owner_discord_id: config.ownerDiscordId,
+        whitelisted_actor_ids: config.whitelistedActorIds,
+        steward_role_id: config.stewardRoleId,
+        alerts_channel_id: config.alertsChannelId,
+        alerts_channel_auto_created: !existingAlertsChannel,
+        updated_at: new Date().toISOString()
+      })
+    }).catch((err) => console.error("[guardian] failed to persist guild config:", err));
+
+    console.log(
+      `[guardian] provisioned guild ${guild.id} (${guild.name}) — steward role: ${stewardRoleId ?? "none found"}, alerts channel: ${alertsChannelId ?? "FAILED"}`
     );
+  }
+
+  // ─── Manual lockdown / endlockdown (now guild-scoped) ───────────────────
+
+  async handleManualLockdown(req) {
+    let body = {};
+    try {
+      body = await req.json();
+    } catch {}
+    const guildId = body.guildId;
+    if (!guildId) {
+      return Response.json({ ok: false, error: "guildId is required in the request body." }, { status: 400 });
+    }
+
+    const lockdownKey = `manual_lockdown_state:${guildId}`;
+    const existing = await this.state.storage.get(lockdownKey);
+    if (existing?.active) {
+      return Response.json({ ok: false, error: "Lockdown already active for this guild." }, { status: 409 });
+    }
+
+    const token = this.env.DISCORD_BOT_TOKEN?.trim();
+    const channelBackups = [];
+    const channelsRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`, {
+      headers: { Authorization: `Bot ${token}` }
+    });
+    if (!channelsRes.ok) {
+      return Response.json({ ok: false, error: `Failed to list channels (${channelsRes.status})` }, { status: 502 });
+    }
+    const channels = await channelsRes.json();
+    const textChannels = channels.filter((c) => LOCKDOWN_CHANNEL_TYPES.includes(c.type));
+
+    for (const channel of textChannels) {
+      const existingOverwrite = (channel.permission_overwrites ?? []).find(
+        (ow) => ow.id === guildId && ow.type === 0
+      );
+      channelBackups.push({
+        channelId: channel.id,
+        hadOverwrite: Boolean(existingOverwrite),
+        priorAllow: existingOverwrite?.allow ?? "0",
+        priorDeny: existingOverwrite?.deny ?? "0"
+      });
+      const priorAllow = BigInt(existingOverwrite?.allow ?? "0");
+      const priorDeny = BigInt(existingOverwrite?.deny ?? "0");
+      const newAllow = priorAllow & ~LOCKDOWN_DENY_MASK;
+      const newDeny = priorDeny | LOCKDOWN_DENY_MASK;
+      const putRes = await fetch(`https://discord.com/api/v10/channels/${channel.id}/permissions/${guildId}`, {
+        method: "PUT",
+        headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ type: 0, allow: newAllow.toString(), deny: newDeny.toString() })
+      });
+      if (!putRes.ok) {
+        console.error(`[guardian] lockdown overwrite failed for channel ${channel.id}:`, putRes.status, await putRes.text());
+      }
+    }
+
+    let invitesDeleted = 0;
+    const invitesRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/invites`, {
+      headers: { Authorization: `Bot ${token}` }
+    });
     if (invitesRes.ok) {
-      const invites: any[] = await invitesRes.json();
+      const invites = await invitesRes.json();
       const results = await Promise.allSettled(
         invites.map((inv) =>
           fetch(`https://discord.com/api/v10/invites/${inv.code}`, {
             method: "DELETE",
-            headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` },
+            headers: { Authorization: `Bot ${token}` }
           })
         )
       );
       invitesDeleted = results.filter((r) => r.status === "fulfilled").length;
     }
 
-    const newState: LockdownState = {
+    await this.state.storage.put(lockdownKey, {
       active: true,
       reason: body.reason ?? null,
       triggeredBy: body.triggeredBy ?? null,
       startedAt: Date.now(),
-      channelBackups,
-    };
-    await this.state.storage.put(LOCKDOWN_STORAGE_KEY, newState);
-
-    return Response.json({
-      ok: true,
-      channelsLocked: textChannels.length,
-      invitesDeleted,
+      channelBackups
     });
+
+    return Response.json({ ok: true, channelsLocked: textChannels.length, invitesDeleted });
   }
 
-  private async handleManualEndLockdown(): Promise<Response> {
-    const existing = await this.state.storage.get<LockdownState>(LOCKDOWN_STORAGE_KEY);
-    if (!existing?.active) {
-      return Response.json(
-        { ok: false, error: "No active lockdown." },
-        { status: 409 }
-      );
+  async handleManualEndLockdown(req) {
+    let body = {};
+    try {
+      body = await req.json();
+    } catch {}
+    const guildId = body.guildId;
+    if (!guildId) {
+      return Response.json({ ok: false, error: "guildId is required in the request body." }, { status: 400 });
     }
 
+    const lockdownKey = `manual_lockdown_state:${guildId}`;
+    const existing = await this.state.storage.get(lockdownKey);
+    if (!existing?.active) {
+      return Response.json({ ok: false, error: "No active lockdown for this guild." }, { status: 409 });
+    }
+
+    const token = this.env.DISCORD_BOT_TOKEN?.trim();
     let restored = 0;
     let failed = 0;
-
     for (const backup of existing.channelBackups) {
       if (backup.hadOverwrite) {
-        const putRes = await fetch(
-          `https://discord.com/api/v10/channels/${backup.channelId}/permissions/${GUILD_ID}`,
-          {
-            method: "PUT",
-            headers: {
-              Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              type: 0,
-              allow: backup.priorAllow,
-              deny: backup.priorDeny,
-            }),
-          }
-        );
+        const putRes = await fetch(`https://discord.com/api/v10/channels/${backup.channelId}/permissions/${guildId}`, {
+          method: "PUT",
+          headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ type: 0, allow: backup.priorAllow, deny: backup.priorDeny })
+        });
         if (putRes.ok) restored++;
         else {
           failed++;
-          console.error(
-            `[guardian] endlockdown restore failed for channel ${backup.channelId}:`,
-            putRes.status,
-            await putRes.text()
-          );
+          console.error(`[guardian] endlockdown restore failed for channel ${backup.channelId}:`, putRes.status, await putRes.text());
         }
       } else {
-        const delRes = await fetch(
-          `https://discord.com/api/v10/channels/${backup.channelId}/permissions/${GUILD_ID}`,
-          {
-            method: "DELETE",
-            headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` },
-          }
-        );
+        const delRes = await fetch(`https://discord.com/api/v10/channels/${backup.channelId}/permissions/${guildId}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bot ${token}` }
+        });
         if (delRes.ok) restored++;
         else {
           failed++;
-          console.error(
-            `[guardian] endlockdown overwrite-delete failed for channel ${backup.channelId}:`,
-            delRes.status,
-            await delRes.text()
-          );
+          console.error(`[guardian] endlockdown overwrite-delete failed for channel ${backup.channelId}:`, delRes.status, await delRes.text());
         }
       }
     }
 
-    await this.state.storage.delete(LOCKDOWN_STORAGE_KEY);
-
+    await this.state.storage.delete(lockdownKey);
     return Response.json({
       ok: true,
       channelsRestored: restored,
       channelsFailed: failed,
-      note: "Deleted invites from lockdown were not restored — recreate manually if needed.",
+      note: "Deleted invites from lockdown were not restored — recreate manually if needed."
     });
   }
 
-  // ─── Gateway connection ─────────────────────────────────────────────────────
+  // ─── Gateway connection ──────────────────────────────────────────────────
 
-  private async connectGateway(resumeUrl?: string) {
-    // fetch() does not accept ws:// or wss:// as a URL scheme — it throws
-    // a TypeError immediately if given one. The Upgrade: websocket header
-    // is what actually signals the protocol switch; the URL itself must
-    // use http(s). Discord's gateway URLs (both the initial endpoint and
-    // resume_gateway_url from READY) come in wss:// form, so they need
-    // converting here before being passed to fetch().
+  async connectGateway(resumeUrl) {
     const rawUrl = resumeUrl ?? "wss://gateway.discord.gg/?v=10&encoding=json";
     const gatewayUrl = rawUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
-
-    const res = await fetch(gatewayUrl, {
-      headers: { Upgrade: "websocket" },
-    });
-
+    const res = await fetch(gatewayUrl, { headers: { Upgrade: "websocket" } });
     const ws = res.webSocket;
     if (!ws) {
       console.error("[guardian] Gateway upgrade failed — no webSocket on response");
-      // Retry after a delay rather than looping tightly.
       await this.scheduleReconnect(5000);
       return;
     }
-
     ws.accept();
     this.ws = ws;
-
     ws.addEventListener("message", (event) => this.handleMessage(event));
     ws.addEventListener("close", (event) => this.handleClose(event));
-    ws.addEventListener("error", (event) => {
-      console.error("[guardian] WebSocket error:", event);
-    });
+    ws.addEventListener("error", (event) => console.error("[guardian] WebSocket error:", event));
   }
 
-  private async handleMessage(event: MessageEvent) {
-    const payload = JSON.parse(event.data as string);
+  async handleMessage(event) {
+    const payload = JSON.parse(event.data);
     const { op, d, s, t } = payload;
-
     if (s !== null && s !== undefined) this.sequence = s;
 
     switch (op) {
-      case 10: // HELLO
+      case 10:
         this.startHeartbeat(d.heartbeat_interval);
-        if (this.sessionId && this.resumeGatewayUrl) {
-          this.sendResume();
-        } else {
-          this.sendIdentify();
-        }
+        if (this.sessionId && this.resumeGatewayUrl) this.sendResume();
+        else this.sendIdentify();
         break;
-
-      case 11: // HEARTBEAT_ACK
+      case 11:
         this.heartbeatAckReceived = true;
         break;
-
-      case 1: // HEARTBEAT REQUEST — Discord can ask for an
-        // out-of-cycle heartbeat; respond immediately rather than
-        // waiting for the next scheduled interval tick.
+      case 1:
         this.heartbeatAckReceived = false;
         this.ws?.send(JSON.stringify({ op: 1, d: this.sequence }));
         break;
-
-      case 0: // DISPATCH
+      case 0:
         await this.handleDispatch(t, d);
         break;
-
-      case 7: // RECONNECT
+      case 7:
         this.ws?.close(4000, "reconnect requested");
         break;
-
-      case 9: // INVALID_SESSION
+      case 9:
         this.sessionId = null;
         this.resumeGatewayUrl = null;
-        // Discord asks for a short random delay before re-identifying.
         await new Promise((r) => setTimeout(r, 1000 + Math.random() * 4000));
         this.sendIdentify();
         break;
     }
   }
 
-  private sendIdentify() {
+  sendIdentify() {
     this.ws?.send(
       JSON.stringify({
         op: 2,
         d: {
           token: this.env.DISCORD_BOT_TOKEN?.trim(),
-          intents:
-            (1 << 1) | // GUILD_MEMBERS (required for GUILD_MEMBER_ADD)
-            (1 << 2), // GUILD_MODERATION (required for GUILD_AUDIT_LOG_ENTRY_CREATE)
-          properties: {
-            os: "cloudflare-workers",
-            browser: "pitboss-guardian",
-            device: "pitboss-guardian",
-          },
-        },
+          intents: (1 << 1) | (1 << 2), // GUILD_MEMBERS, GUILD_MODERATION
+          properties: { os: "cloudflare-workers", browser: "pitboss-guardian", device: "pitboss-guardian" }
+        }
       })
     );
   }
 
-  private sendResume() {
+  sendResume() {
     this.ws?.send(
       JSON.stringify({
         op: 6,
-        d: {
-          token: this.env.DISCORD_BOT_TOKEN?.trim(),
-          session_id: this.sessionId,
-          seq: this.sequence,
-        },
+        d: { token: this.env.DISCORD_BOT_TOKEN?.trim(), session_id: this.sessionId, seq: this.sequence }
       })
     );
   }
 
-  private startHeartbeat(intervalMs: number) {
+  startHeartbeat(intervalMs) {
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
     this.heartbeatAckReceived = true;
-
     this.heartbeatInterval = setInterval(() => {
       if (!this.heartbeatAckReceived) {
-        // Missed the previous ACK — connection is dead, force a
-        // reconnect rather than keep sending into the void.
         console.error("[guardian] Heartbeat ACK missed — reconnecting");
         this.ws?.close(4000, "heartbeat timeout");
         return;
       }
       this.heartbeatAckReceived = false;
       this.ws?.send(JSON.stringify({ op: 1, d: this.sequence }));
-    }, intervalMs) as unknown as number;
+    }, intervalMs);
   }
 
-  private async handleClose(event: CloseEvent) {
+  async handleClose(event) {
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
     console.error("[guardian] Gateway closed:", event.code, event.reason);
-
-    // Codes that mean "don't try to resume, start fresh."
     const noResumeCodes = [4004, 4010, 4011, 4012, 4013, 4014];
     if (noResumeCodes.includes(event.code)) {
       this.sessionId = null;
       this.resumeGatewayUrl = null;
     }
-
-    // 4004 = authentication failed (bad token). Retrying at the normal
-    // short jitter just hammers Discord's Gateway with failed
-    // IDENTIFYs indefinitely if the token is actually broken -- back
-    // off exponentially instead, capped at 5 minutes. Any other close
-    // code resets the counter, since it's not an auth problem.
     if (event.code === 4004) {
       this.consecutiveAuthFailures++;
       const backoffMs = Math.min(5 * 60_000, 5000 * 2 ** this.consecutiveAuthFailures);
-      console.error(
-        `[guardian] Auth failure #${this.consecutiveAuthFailures} — backing off ${backoffMs}ms before retry`
-      );
+      console.error(`[guardian] Auth failure #${this.consecutiveAuthFailures} — backing off ${backoffMs}ms`);
       await this.scheduleReconnect(backoffMs);
       return;
     }
     this.consecutiveAuthFailures = 0;
-
     await this.scheduleReconnect(2000 + Math.random() * 3000);
   }
 
-  private async scheduleReconnect(delayMs: number) {
+  async scheduleReconnect(delayMs) {
     await new Promise((r) => setTimeout(r, delayMs));
     await this.connectGateway(this.resumeGatewayUrl ?? undefined);
   }
 
-  // ─── Dispatch handling ───────────────────────────────────────────────────────
+  // ─── Dispatch handling ────────────────────────────────────────────────────
 
-  private async handleDispatch(type: string, data: any) {
+  async handleDispatch(type, data) {
     switch (type) {
       case "READY":
         this.sessionId = data.session_id;
@@ -643,331 +555,183 @@ export class GuildGuardian implements DurableObject {
         this.consecutiveAuthFailures = 0;
         console.log("[guardian] READY — session established");
         break;
-
       case "RESUMED":
         console.log("[guardian] Session resumed");
         break;
-
-      case "GUILD_MEMBER_ADD":
-        if (data.guild_id === GUILD_ID) {
-          await this.scoreJoin(data);
-        }
+      case "GUILD_CREATE":
+        await this.provisionGuild(data);
         break;
-
+      case "GUILD_MEMBER_ADD":
+        if (this.guildConfigs.has(data.guild_id)) await this.scoreJoin(data.guild_id, data);
+        break;
       case "GUILD_AUDIT_LOG_ENTRY_CREATE":
-        if (data.guild_id === GUILD_ID) {
-          await this.scoreAuditEntry(data);
-        }
+        if (this.guildConfigs.has(data.guild_id)) await this.scoreAuditEntry(data.guild_id, data);
         break;
     }
   }
 
-  // ─── Raid scoring ────────────────────────────────────────────────────────────
+  // ─── Raid scoring (per guild) ───────────────────────────────────────────
 
-  private async scoreJoin(member: any) {
+  async scoreJoin(guildId, member) {
     const now = Date.now();
     const user = member.user;
     const createdAt = snowflakeToTimestamp(user.id);
     const accountAgeMs = now - createdAt;
-
     let score = 0;
-    const reasons: string[] = [];
 
-    if (accountAgeMs < 24 * 60 * 60 * 1000) {
-      score += 3;
-      reasons.push("account < 24h old");
-    } else if (accountAgeMs < 7 * 24 * 60 * 60 * 1000) {
-      score += 2;
-      reasons.push("account < 7d old");
-    }
+    if (accountAgeMs < 24 * 60 * 60 * 1000) score += 3;
+    else if (accountAgeMs < 7 * 24 * 60 * 60 * 1000) score += 2;
+    if (!user.avatar) score += 1;
+    if (/\d{4,}$/.test(user.username)) score += 1;
 
-    if (!user.avatar) {
-      score += 1;
-      reasons.push("no avatar");
-    }
+    if (!this.raidScoresByGuild.has(guildId)) this.raidScoresByGuild.set(guildId, []);
+    const raidScores = this.raidScoresByGuild.get(guildId);
+    raidScores.push({ timestamp: now, score, discordUserId: user.id, avatarHash: user.avatar ?? null });
 
-    if (/\d{4,}$/.test(user.username)) {
-      score += 1;
-      reasons.push("generic digit-heavy username");
-    }
+    const pruned = raidScores.filter((e) => now - e.timestamp <= RAID_WINDOW_MS);
+    this.raidScoresByGuild.set(guildId, pruned);
 
-    this.raidScores.push({
-      timestamp: now,
-      score,
-      discordUserId: user.id,
-      avatarHash: user.avatar ?? null,
-      reasons,
-    });
-    this.pruneRaidScores(now);
-
-    const windowTotal = this.raidScores.reduce((sum, e) => sum + e.score, 0);
-    const rawJoinCount = this.raidScores.length;
-
-    // Shared avatar hash — a strong bot-generator tell: distinct users
-    // joining with byte-identical avatar hashes in the same window.
-    // Only non-null hashes count; a shared "no avatar" default isn't
-    // meaningful since huge numbers of legitimate users have none.
-    const avatarHashCounts = new Map<string, number>();
-    for (const e of this.raidScores) {
+    const windowTotal = pruned.reduce((sum, e) => sum + e.score, 0);
+    const rawJoinCount = pruned.length;
+    const avatarHashCounts = new Map();
+    for (const e of pruned) {
       if (!e.avatarHash) continue;
       avatarHashCounts.set(e.avatarHash, (avatarHashCounts.get(e.avatarHash) ?? 0) + 1);
     }
-    const sharedAvatarHash = [...avatarHashCounts.entries()].find(
-      ([, count]) => count >= AVATAR_HASH_SHARE_THRESHOLD
-    );
+    const sharedAvatarHash = [...avatarHashCounts.entries()].find(([, count]) => count >= AVATAR_HASH_SHARE_THRESHOLD);
 
-    // Three independent triggers, ORed together — a raid using
-    // older/normal-looking accounts might never build a high score,
-    // but a raw join-velocity spike or reused-avatar cluster still
-    // gives it away.
-    if (
-      windowTotal >= RAID_SCORE_THRESHOLD ||
-      rawJoinCount >= RAID_JOIN_COUNT_THRESHOLD ||
-      sharedAvatarHash
-    ) {
-      const reasons: string[] = [];
-      if (windowTotal >= RAID_SCORE_THRESHOLD) {
-        reasons.push(`raid score ${windowTotal} reached in ${RAID_WINDOW_MS / 1000}s window`);
-      }
-      if (rawJoinCount >= RAID_JOIN_COUNT_THRESHOLD) {
-        reasons.push(`${rawJoinCount} raw joins in ${RAID_WINDOW_MS / 1000}s window`);
-      }
-      if (sharedAvatarHash) {
-        reasons.push(
-          `${sharedAvatarHash[1]} joiners sharing avatar hash ${sharedAvatarHash[0].slice(0, 8)}...`
-        );
-      }
+    if (windowTotal >= RAID_SCORE_THRESHOLD || rawJoinCount >= RAID_JOIN_COUNT_THRESHOLD || sharedAvatarHash) {
+      const reasons = [];
+      if (windowTotal >= RAID_SCORE_THRESHOLD) reasons.push(`raid score ${windowTotal} reached in ${RAID_WINDOW_MS / 1000}s window`);
+      if (rawJoinCount >= RAID_JOIN_COUNT_THRESHOLD) reasons.push(`${rawJoinCount} raw joins in ${RAID_WINDOW_MS / 1000}s window`);
+      if (sharedAvatarHash) reasons.push(`${sharedAvatarHash[1]} joiners sharing avatar hash ${sharedAvatarHash[0].slice(0, 8)}...`);
 
-      // Only ban accounts that actually looked suspicious individually
-      // (score > 0), or that are part of the shared-avatar-hash
-      // cluster specifically -- not every account that merely happened
-      // to join in the same window as a raid. A join-count-velocity
-      // trigger with several score-0 legitimate joiners mixed in
-      // shouldn't catch those innocent accounts in the ban.
       const sharedHashValue = sharedAvatarHash?.[0];
-      const actorIds = this.raidScores
-        .filter((e) => e.score > 0 || (sharedHashValue && e.avatarHash === sharedHashValue))
-        .map((e) => e.discordUserId);
+      const actorIds = pruned.filter((e) => e.score > 0 || (sharedHashValue && e.avatarHash === sharedHashValue)).map((e) => e.discordUserId);
 
-      await this.respondToThreat("raid", {
-        reason: reasons.join("; "),
-        score: windowTotal,
-        actorIds,
-        detail: { joins: this.raidScores },
-      });
-      this.raidScores = [];
+      await this.respondToThreat(guildId, "raid", { reason: reasons.join("; "), score: windowTotal, actorIds, detail: { joins: pruned } });
+      this.raidScoresByGuild.set(guildId, []);
     }
   }
 
-  private pruneRaidScores(now: number) {
-    this.raidScores = this.raidScores.filter((e) => now - e.timestamp <= RAID_WINDOW_MS);
-  }
+  // ─── Nuke scoring (per guild) ───────────────────────────────────────────
 
-  // ─── Nuke scoring ────────────────────────────────────────────────────────────
+  async scoreAuditEntry(guildId, entry) {
+    const config = this.guildConfigs.get(guildId);
+    if (!config) return;
 
-  private async scoreAuditEntry(entry: any) {
-    // Bot self-removal protection — only OWNER_DISCORD_ID may remove
-    // PitBoss from this guild. Runs before self-exclusion and the
-    // whitelist bypass below, since a whitelisted co-owner attempting
-    // this must still be caught. Detection/alert only, not
-    // prevention — see the note on OWNER_DISCORD_ID above regarding
-    // Discord role hierarchy being the actual blocking control.
     if (
-      (entry.action_type === AUDIT_ACTION.MEMBER_KICK ||
-        entry.action_type === AUDIT_ACTION.MEMBER_BAN_ADD) &&
+      (entry.action_type === AUDIT_ACTION.MEMBER_KICK || entry.action_type === AUDIT_ACTION.MEMBER_BAN_ADD) &&
       entry.target_id === this.env.DISCORD_APP_ID &&
-      entry.user_id !== OWNER_DISCORD_ID
+      entry.user_id !== config.ownerDiscordId
     ) {
-      await this.respondToThreat("nuke", {
+      await this.respondToThreat(guildId, "nuke", {
         reason: `Unauthorized attempt to remove PitBoss from the guild by <@${entry.user_id}> — only the owner may do this`,
         actorIds: [entry.user_id],
-        detail: { entry },
+        detail: { entry }
       });
       return;
     }
 
-    // Hard self-exclusion — PitBoss's own bot user must never be
-    // scored against its own detector. This is checked before any
-    // other logic runs, not configured as an editable whitelist entry.
     if (entry.user_id === this.env.DISCORD_APP_ID) return;
-
-    // Trusted staff exclusion — legitimate bulk moderation by a
-    // commissioner/head steward shouldn't look identical to a nuke.
-    if (WHITELISTED_ACTOR_IDS.includes(entry.user_id)) return;
+    if (config.whitelistedActorIds.includes(entry.user_id)) return;
 
     const now = Date.now();
-    const actorId = entry.user_id as string;
-    const actionType = entry.action_type as number;
+    const actorId = entry.user_id;
+    const actionType = entry.action_type;
 
-    // Zero-tolerance triggers — no window, no accumulation. Thresholds
-    // named explicitly (both = 1) for consistency with the windowed
-    // triggers below, even though behavior is unchanged from before.
     if (actionType === AUDIT_ACTION.WEBHOOK_CREATE) {
       const reason = `Webhook created by non-whitelisted actor (threshold: ${NUKE_WEBHOOK_THRESHOLD})`;
-      await this.respondToThreat("nuke", {
-        reason,
-        actorIds: [actorId],
-        detail: { entry },
-      });
-      await this.recordBannedId(actorId, "webhook_create", reason);
+      await this.respondToThreat(guildId, "nuke", { reason, actorIds: [actorId], detail: { entry } });
+      await this.recordBannedId(guildId, actorId, "webhook_create", reason);
       return;
     }
-
     if (actionType === AUDIT_ACTION.BOT_ADD) {
       const reason = `Bot/integration added by non-whitelisted actor (threshold: ${NUKE_BOT_ADD_THRESHOLD})`;
-      await this.respondToThreat("nuke", {
-        reason,
-        actorIds: [actorId],
-        detail: { entry },
-      });
-      await this.recordBannedId(actorId, "bot_add", reason);
+      await this.respondToThreat(guildId, "nuke", { reason, actorIds: [actorId], detail: { entry } });
+      await this.recordBannedId(guildId, actorId, "bot_add", reason);
       return;
     }
-
     if (actionType === AUDIT_ACTION.GUILD_UPDATE) {
       const dangerous = this.guildUpdateIsDangerous(entry);
       if (dangerous) {
-        await this.respondToThreat("nuke", {
-          reason: dangerous,
-          actorIds: [actorId],
-          detail: { entry },
-        });
+        await this.respondToThreat(guildId, "nuke", { reason: dangerous, actorIds: [actorId], detail: { entry } });
         return;
       }
     }
-
     if (actionType === AUDIT_ACTION.ROLE_UPDATE) {
       const grantedDangerous = this.roleUpdateGrantsDangerousPermission(entry);
       if (grantedDangerous) {
-        await this.respondToThreat("nuke", {
-          reason: `Dangerous permission grant: ${grantedDangerous.join(", ")}`,
-          actorIds: [actorId],
-          detail: { entry },
-        });
+        await this.respondToThreat(guildId, "nuke", { reason: `Dangerous permission grant: ${grantedDangerous.join(", ")}`, actorIds: [actorId], detail: { entry } });
         return;
       }
     }
 
-    // Windowed, per-actor triggers.
-    if (
-      actionType === AUDIT_ACTION.CHANNEL_DELETE ||
-      actionType === AUDIT_ACTION.ROLE_DELETE ||
-      actionType === AUDIT_ACTION.MEMBER_BAN_ADD ||
-      actionType === AUDIT_ACTION.MEMBER_KICK ||
-      actionType === AUDIT_ACTION.CHANNEL_CREATE ||
-      actionType === AUDIT_ACTION.ROLE_CREATE ||
-      actionType === AUDIT_ACTION.MEMBER_ROLE_UPDATE
-    ) {
-      const existing = this.nukeActionsByActor.get(actorId) ?? [];
+    const trackedTypes = [
+      AUDIT_ACTION.CHANNEL_DELETE, AUDIT_ACTION.ROLE_DELETE, AUDIT_ACTION.MEMBER_BAN_ADD,
+      AUDIT_ACTION.MEMBER_KICK, AUDIT_ACTION.CHANNEL_CREATE, AUDIT_ACTION.ROLE_CREATE, AUDIT_ACTION.MEMBER_ROLE_UPDATE
+    ];
+    if (trackedTypes.includes(actionType)) {
+      if (!this.nukeActionsByGuildAndActor.has(guildId)) this.nukeActionsByGuildAndActor.set(guildId, new Map());
+      const guildActorMap = this.nukeActionsByGuildAndActor.get(guildId);
+
+      const existing = guildActorMap.get(actorId) ?? [];
       existing.push({ timestamp: now, actionType });
       const pruned = existing.filter((e) => now - e.timestamp <= NUKE_WINDOW_MS);
-      this.nukeActionsByActor.set(actorId, pruned);
+      guildActorMap.set(actorId, pruned);
 
-      const deleteCount = pruned.filter(
-        (e) => e.actionType === AUDIT_ACTION.CHANNEL_DELETE || e.actionType === AUDIT_ACTION.ROLE_DELETE
-      ).length;
-      const banKickCount = pruned.filter(
-        (e) => e.actionType === AUDIT_ACTION.MEMBER_BAN_ADD || e.actionType === AUDIT_ACTION.MEMBER_KICK
-      ).length;
-      const createCount = pruned.filter(
-        (e) => e.actionType === AUDIT_ACTION.CHANNEL_CREATE || e.actionType === AUDIT_ACTION.ROLE_CREATE
-      ).length;
-      const roleGrantCount = pruned.filter(
-        (e) => e.actionType === AUDIT_ACTION.MEMBER_ROLE_UPDATE
-      ).length;
+      const deleteCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.CHANNEL_DELETE || e.actionType === AUDIT_ACTION.ROLE_DELETE).length;
+      const banKickCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.MEMBER_BAN_ADD || e.actionType === AUDIT_ACTION.MEMBER_KICK).length;
+      const createCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.CHANNEL_CREATE || e.actionType === AUDIT_ACTION.ROLE_CREATE).length;
+      const roleGrantCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.MEMBER_ROLE_UPDATE).length;
 
-      if (deleteCount >= NUKE_DELETE_THRESHOLD) {
-        await this.respondToThreat("nuke", {
-          reason: `${deleteCount} channel/role deletions by one actor in ${NUKE_WINDOW_MS / 1000}s`,
-          score: deleteCount,
-          actorIds: [actorId],
-          detail: { entries: pruned },
-        });
-        this.nukeActionsByActor.delete(actorId);
-      } else if (banKickCount >= NUKE_BAN_KICK_THRESHOLD) {
-        await this.respondToThreat("nuke", {
-          reason: `${banKickCount} bans/kicks by one actor in ${NUKE_WINDOW_MS / 1000}s`,
-          score: banKickCount,
-          actorIds: [actorId],
-          detail: { entries: pruned },
-        });
-        this.nukeActionsByActor.delete(actorId);
-      } else if (createCount >= NUKE_CREATE_THRESHOLD) {
-        await this.respondToThreat("nuke", {
-          reason: `${createCount} channel/role creations by one actor in ${NUKE_WINDOW_MS / 1000}s (spam)`,
-          score: createCount,
-          actorIds: [actorId],
-          detail: { entries: pruned },
-        });
-        this.nukeActionsByActor.delete(actorId);
-      } else if (roleGrantCount >= NUKE_ROLE_GRANT_THRESHOLD) {
-        await this.respondToThreat("nuke", {
-          reason: `${roleGrantCount} role grants to members by one actor in ${NUKE_WINDOW_MS / 1000}s`,
-          score: roleGrantCount,
-          actorIds: [actorId],
-          detail: { entries: pruned },
-        });
-        this.nukeActionsByActor.delete(actorId);
-      }
+      const fire = async (reason, score) => {
+        await this.respondToThreat(guildId, "nuke", { reason, score, actorIds: [actorId], detail: { entries: pruned } });
+        guildActorMap.delete(actorId);
+      };
+
+      if (deleteCount >= NUKE_DELETE_THRESHOLD) await fire(`${deleteCount} channel/role deletions by one actor in ${NUKE_WINDOW_MS / 1000}s`, deleteCount);
+      else if (banKickCount >= NUKE_BAN_KICK_THRESHOLD) await fire(`${banKickCount} bans/kicks by one actor in ${NUKE_WINDOW_MS / 1000}s`, banKickCount);
+      else if (createCount >= NUKE_CREATE_THRESHOLD) await fire(`${createCount} channel/role creations by one actor in ${NUKE_WINDOW_MS / 1000}s (spam)`, createCount);
+      else if (roleGrantCount >= NUKE_ROLE_GRANT_THRESHOLD) await fire(`${roleGrantCount} role grants to members by one actor in ${NUKE_WINDOW_MS / 1000}s`, roleGrantCount);
     }
   }
 
-  private guildUpdateIsDangerous(entry: any): string | null {
+  guildUpdateIsDangerous(entry) {
     const changes = entry.changes ?? [];
-
-    const verificationChange = changes.find((c: any) => c.key === "verification_level");
-    if (
-      verificationChange &&
-      typeof verificationChange.new_value === "number" &&
-      typeof verificationChange.old_value === "number" &&
-      verificationChange.new_value < verificationChange.old_value
-    ) {
+    const verificationChange = changes.find((c) => c.key === "verification_level");
+    if (verificationChange && typeof verificationChange.new_value === "number" && typeof verificationChange.old_value === "number" && verificationChange.new_value < verificationChange.old_value) {
       return `Verification level lowered (${verificationChange.old_value} → ${verificationChange.new_value})`;
     }
-
-    const ownerChange = changes.find((c: any) => c.key === "owner_id");
-    if (ownerChange) {
-      return `Server ownership transferred to <@${ownerChange.new_value}>`;
-    }
-
+    const ownerChange = changes.find((c) => c.key === "owner_id");
+    if (ownerChange) return `Server ownership transferred to <@${ownerChange.new_value}>`;
     return null;
   }
 
-  private roleUpdateGrantsDangerousPermission(entry: any): string[] | null {
-    const permsChange = entry.changes?.find((c: any) => c.key === "permissions");
+  roleUpdateGrantsDangerousPermission(entry) {
+    const permsChange = entry.changes?.find((c) => c.key === "permissions");
     if (!permsChange || !permsChange.new_value) return null;
-
     const newPerms = BigInt(permsChange.new_value);
     const oldPerms = BigInt(permsChange.old_value ?? "0");
-    const granted: string[] = [];
-
+    const granted = [];
     for (const [name, bit] of Object.entries(DANGEROUS_PERMISSIONS)) {
       const hasNow = (newPerms & bit) !== 0n;
       const hadBefore = (oldPerms & bit) !== 0n;
       if (hasNow && !hadBefore) granted.push(name);
     }
-
     return granted.length > 0 ? granted : null;
   }
 
-  // ─── Response: the "all" mode — every action fires together ──────────────────
+  // ─── Response: every action fires together, scoped to the guild ────────
 
-  private async respondToThreat(
-    type: "raid" | "nuke",
-    ctx: { reason: string; score?: number; actorIds: string[]; detail: unknown }
-  ) {
-    console.log(`[guardian] THREAT DETECTED (${type}):`, ctx.reason);
-
-    // Fire all four concurrently — none should block or skip the
-    // others if one fails (e.g. a ban failing shouldn't stop the
-    // alert from posting).
+  async respondToThreat(guildId, type, ctx) {
+    console.log(`[guardian] THREAT DETECTED in ${guildId} (${type}):`, ctx.reason);
     const results = await Promise.allSettled([
-      this.autoPunish(ctx.actorIds),
-      this.autoLockdown(type, ctx),
-      this.alertSteward(type, ctx),
-      this.logEvent(type, ctx),
+      this.autoPunish(guildId, ctx.actorIds),
+      this.autoLockdown(guildId, type, ctx),
+      this.alertSteward(guildId, type, ctx),
+      this.logEvent(guildId, type, ctx)
     ]);
-
     for (const [i, result] of results.entries()) {
       if (result.status === "rejected") {
         const labels = ["autoPunish", "autoLockdown", "alertSteward", "logEvent"];
@@ -976,266 +740,168 @@ export class GuildGuardian implements DurableObject {
     }
   }
 
-  private async autoPunish(actorIds: string[]) {
-    for (const userId of actorIds) {
-      await this.banWithRetry(userId);
-    }
+  async autoPunish(guildId, actorIds) {
+    for (const userId of actorIds) await this.banWithRetry(guildId, userId);
   }
 
-  // Bans a single user, retrying once on a 429 by honoring Discord's
-  // retry_after. Auto-punish runs on exactly the scenario (banning a
-  // dozen+ raid accounts in a burst) most likely to hit a rate limit,
-  // so a bare unhandled 429 would silently drop bans right when it
-  // matters most.
-  private async banWithRetry(userId: string, attempt = 0): Promise<void> {
-    const res = await fetch(
-      `https://discord.com/api/v10/guilds/${GUILD_ID}/bans/${userId}`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          delete_message_seconds: 3600, // clean up an hour of messages, in case it's spam
-        }),
-      }
-    );
-
+  async banWithRetry(guildId, userId, attempt = 0) {
+    const res = await fetch(`https://discord.com/api/v10/guilds/${guildId}/bans/${userId}`, {
+      method: "PUT",
+      headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ delete_message_seconds: 3600 })
+    });
     if (res.ok) return;
-
     if (res.status === 429 && attempt < 2) {
       let retryAfterMs = 1000;
       try {
-        const body: any = await res.clone().json();
-        if (typeof body.retry_after === "number") {
-          retryAfterMs = Math.ceil(body.retry_after * 1000);
-        }
+        const body = await res.clone().json();
+        if (typeof body.retry_after === "number") retryAfterMs = Math.ceil(body.retry_after * 1000);
       } catch {
-        // fall back to the header if the body isn't JSON for some reason
         const headerVal = res.headers.get("Retry-After");
         if (headerVal) retryAfterMs = Math.ceil(parseFloat(headerVal) * 1000);
       }
       console.error(`[guardian] ban rate-limited for ${userId}, retrying in ${retryAfterMs}ms`);
       await new Promise((r) => setTimeout(r, retryAfterMs));
-      return this.banWithRetry(userId, attempt + 1);
+      return this.banWithRetry(guildId, userId, attempt + 1);
     }
-
     console.error(`[guardian] ban failed for ${userId}:`, res.status, await res.text());
   }
 
-  private async autoLockdown(
-    type: "raid" | "nuke",
-    ctx: { detail: unknown }
-  ) {
+  async autoLockdown(guildId, type, ctx) {
+    const token = this.env.DISCORD_BOT_TOKEN?.trim();
     if (type === "raid") {
-      // Raise verification level to the max and revoke active
-      // invites — stops further unknown joiners without needing to
-      // identify them individually.
-      await fetch(`https://discord.com/api/v10/guilds/${GUILD_ID}`, {
+      await fetch(`https://discord.com/api/v10/guilds/${guildId}`, {
         method: "PATCH",
-        headers: {
-          Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ verification_level: 4 }), // VERY_HIGH
+        headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ verification_level: 4 }) // VERY_HIGH
       });
-
-      const invitesRes = await fetch(
-        `https://discord.com/api/v10/guilds/${GUILD_ID}/invites`,
-        { headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` } }
-      );
+      const invitesRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/invites`, {
+        headers: { Authorization: `Bot ${token}` }
+      });
       if (invitesRes.ok) {
-        const invites: any[] = await invitesRes.json();
+        const invites = await invitesRes.json();
         await Promise.all(
-          invites.map((inv) =>
-            fetch(`https://discord.com/api/v10/invites/${inv.code}`, {
-              method: "DELETE",
-              headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` },
-            })
-          )
+          invites.map((inv) => fetch(`https://discord.com/api/v10/invites/${inv.code}`, { method: "DELETE", headers: { Authorization: `Bot ${token}` } }))
         );
       }
     } else {
-      // Nuke: the actor is already banned via autoPunish. Where the
-      // triggering entry was a dangerous permission grant, strip it
-      // back off the role immediately rather than leaving a
-      // still-dangerous role sitting around post-ban.
-      const entries = (ctx.detail as any)?.entries ?? [(ctx.detail as any)?.entry];
+      const entries = ctx.detail?.entries ?? [ctx.detail?.entry];
       for (const entry of entries) {
         if (entry?.action_type === AUDIT_ACTION.ROLE_UPDATE && entry.target_id) {
-          const permsChange = entry.changes?.find((c: any) => c.key === "permissions");
+          const permsChange = entry.changes?.find((c) => c.key === "permissions");
           if (permsChange?.old_value !== undefined) {
-            await fetch(
-              `https://discord.com/api/v10/guilds/${GUILD_ID}/roles/${entry.target_id}`,
-              {
-                method: "PATCH",
-                headers: {
-                  Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ permissions: permsChange.old_value }),
-              }
-            );
+            await fetch(`https://discord.com/api/v10/guilds/${guildId}/roles/${entry.target_id}`, {
+              method: "PATCH",
+              headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ permissions: permsChange.old_value })
+            });
           }
         }
       }
     }
   }
 
-  private async alertSteward(
-    type: "raid" | "nuke",
-    ctx: { reason: string; score?: number; actorIds: string[] }
-  ) {
-    if (ALERTS_CHANNEL_ID.startsWith("REPLACE_")) {
-      console.error("[guardian] ALERTS_CHANNEL_ID not configured — skipping Discord alert");
-      await this.dmBackupContacts(type, ctx);
+  async alertSteward(guildId, type, ctx) {
+    const config = this.guildConfigs.get(guildId);
+    const emoji = type === "raid" ? "🚨" : "💣";
+    const rolePrefix = config?.stewardRoleId ? `<@&${config.stewardRoleId}> ` : "";
+    const lines = [
+      `${emoji} ${rolePrefix}**${type.toUpperCase()} DETECTED**`,
+      ctx.reason,
+      ctx.actorIds.length > 0 ? `Accounts banned: ${ctx.actorIds.map((id) => `<@${id}>`).join(", ")}` : null,
+      `Auto-lockdown applied. Full detail logged.`
+    ].filter(Boolean);
+
+    if (!config?.alertsChannelId) {
+      console.error(`[guardian] no alerts channel configured for guild ${guildId} — falling back to DM`);
+      await this.dmBackupContacts(guildId, type, ctx, lines.join("\n"));
       return;
     }
 
-    const emoji = type === "raid" ? "🚨" : "💣";
-    const lines = [
-      `${emoji} <@&${STEWARD_ROLE_ID}> **${type.toUpperCase()} DETECTED**`,
-      ctx.reason,
-      ctx.actorIds.length > 0
-        ? `Accounts banned: ${ctx.actorIds.map((id) => `<@${id}>`).join(", ")}`
-        : null,
-      `Auto-lockdown applied. Full detail logged.`,
-    ].filter(Boolean);
-
-    const res = await fetch(`https://discord.com/api/v10/channels/${ALERTS_CHANNEL_ID}/messages`, {
+    const res = await fetch(`https://discord.com/api/v10/channels/${config.alertsChannelId}/messages`, {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ content: lines.join("\n") }),
+      headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content: lines.join("\n") })
     });
-
-    // Falls back to DMing backup contacts if the primary alert channel
-    // post fails — most likely because a nuke deleted the channel out
-    // from under us, which is exactly when the alert matters most.
     if (!res.ok) {
       console.error("[guardian] alert channel post failed:", res.status, await res.text());
-      await this.dmBackupContacts(type, ctx, lines.join("\n"));
+      await this.dmBackupContacts(guildId, type, ctx, lines.join("\n"));
     }
   }
 
-  private async dmBackupContacts(
-    type: "raid" | "nuke",
-    ctx: { reason: string; actorIds: string[] },
-    preformattedContent?: string
-  ) {
-    if (BACKUP_ALERT_DISCORD_IDS.length === 0) return;
-
+  async dmBackupContacts(guildId, type, ctx, preformattedContent) {
+    const config = this.guildConfigs.get(guildId);
+    const recipients = config?.whitelistedActorIds ?? [];
+    if (recipients.length === 0) return;
     const content =
       preformattedContent ??
       [
         `**${type.toUpperCase()} DETECTED** (backup alert — primary alert channel unreachable)`,
         ctx.reason,
-        ctx.actorIds.length > 0
-          ? `Accounts banned: ${ctx.actorIds.map((id) => `<@${id}>`).join(", ")}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-    await Promise.all(
-      BACKUP_ALERT_DISCORD_IDS.map((discordId) => this.sendBackupDirectMessage(discordId, content))
-    );
+        ctx.actorIds.length > 0 ? `Accounts banned: ${ctx.actorIds.map((id) => `<@${id}>`).join(", ")}` : null
+      ].filter(Boolean).join("\n");
+    await Promise.all(recipients.map((discordId) => this.sendBackupDirectMessage(discordId, content)));
   }
 
-  private async sendBackupDirectMessage(discordUserId: string, content: string): Promise<void> {
+  async sendBackupDirectMessage(discordUserId, content) {
     const token = this.env.DISCORD_BOT_TOKEN?.trim();
-
     const dmRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ recipient_id: discordUserId }),
+      headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ recipient_id: discordUserId })
     });
-
     if (!dmRes.ok) {
       console.error("[guardian] backup DM channel open failed:", dmRes.status, await dmRes.text());
       return;
     }
-
     const dmChannel = await dmRes.json();
-
     const msgRes = await fetch(`https://discord.com/api/v10/channels/${dmChannel.id}/messages`, {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ content }),
+      headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content })
     });
-
-    if (!msgRes.ok) {
-      console.error("[guardian] backup DM send failed:", msgRes.status, await msgRes.text());
-    }
+    if (!msgRes.ok) console.error("[guardian] backup DM send failed:", msgRes.status, await msgRes.text());
   }
 
-  private async logEvent(
-    type: "raid" | "nuke",
-    ctx: { reason: string; score?: number; actorIds: string[]; detail: unknown }
-  ) {
+  async logEvent(guildId, type, ctx) {
     await fetch(`${this.env.SUPABASE_URL}/rest/v1/security_events`, {
       method: "POST",
       headers: {
         apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
         Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
         "Content-Type": "application/json",
-        Prefer: "return=minimal",
+        Prefer: "return=minimal"
       },
       body: JSON.stringify({
-        guild_id: GUILD_ID,
+        guild_id: guildId,
         event_type: type,
         trigger_reason: ctx.reason,
         actor_discord_id: ctx.actorIds[0] ?? null,
         score: ctx.score ?? null,
         action_taken: "ban+lockdown+alert",
-        detail: { actorIds: ctx.actorIds, ...(ctx.detail as object) },
-      }),
+        detail: { actorIds: ctx.actorIds, ...ctx.detail }
+      })
     });
   }
 
-  // Records the Discord ID of a webhook-create or bot-add violator
-  // into pitboss.guardian_banned_ids -- a standalone, simply-queryable
-  // list of banned IDs for these two triggers specifically, separate
-  // from the general security_events log.
-  private async recordBannedId(
-    discordId: string,
-    triggerType: "webhook_create" | "bot_add",
-    reason: string
-  ) {
+  async recordBannedId(guildId, discordId, triggerType, reason) {
     const res = await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_banned_ids`, {
       method: "POST",
       headers: {
         apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
         Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
         "Content-Type": "application/json",
-        Prefer: "return=minimal",
+        Prefer: "return=minimal"
       },
-      body: JSON.stringify({
-        discord_id: discordId,
-        guild_id: GUILD_ID,
-        trigger_type: triggerType,
-        reason,
-      }),
+      body: JSON.stringify({ discord_id: discordId, guild_id: guildId, trigger_type: triggerType, reason })
     });
-    if (!res.ok) {
-      console.error("[guardian] recordBannedId failed:", res.status, await res.text());
-    }
+    if (!res.ok) console.error("[guardian] recordBannedId failed:", res.status, await res.text());
   }
-}
+};
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-const DISCORD_EPOCH = 1420070400000n;
-
-function snowflakeToTimestamp(snowflake: string): number {
+var DISCORD_EPOCH = 1420070400000n;
+function snowflakeToTimestamp(snowflake) {
   return Number((BigInt(snowflake) >> 22n) + DISCORD_EPOCH);
 }
+
+export { GuildGuardian, src_default as default };
