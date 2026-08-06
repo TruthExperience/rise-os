@@ -11,6 +11,15 @@ export interface CommandContext {
   discordUserId: string;
   options: Record<string, unknown>;
   resolvedUsers: Record<string, ResolvedDiscordUser>;
+  /** Role IDs the invoking member holds in this guild. */
+  memberRoles: string[];
+  /**
+   * The invoking member's computed permissions in this channel, as a
+   * string bitfield straight from Discord's interaction payload.
+   * Discord guarantees this always includes ADMINISTRATOR for the
+   * guild owner, regardless of their roles.
+   */
+  memberPermissions: string;
 }
 
 export type CommandHandler = (ctx: CommandContext) => Promise<CommandResponse>;
