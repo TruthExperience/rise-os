@@ -90,11 +90,11 @@ const nextConfig = {
     // Every existing useSession()/signIn()/signOut()/SessionProvider
     // import across the app keeps resolving to "next-auth/react" as
     // written — this alias swaps the implementation underneath to a
-    // Supabase-backed shim (lib/compat/next-auth-react.tsx) instead of
-    // requiring every page to be edited individually.
+    // Supabase-backed shim instead of requiring every page to be
+    // edited individually.
     config.resolve.alias["next-auth/react"] = path.resolve(
       __dirname,
-      "lib/compat/next-auth-react.tsx"
+      "src/lib/compat/next-auth-react.tsx"
     );
     return config;
   },
