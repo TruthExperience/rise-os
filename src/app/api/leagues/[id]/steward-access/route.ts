@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/server";
 
 const STEWARD_ROLES = ["STW", "HEAD_STW", "BSAC_CHIEF", "COMMISSIONER", "ADMIN"];
@@ -9,26 +8,29 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) return NextResponse.json({ hasAccess: false });
+  const supabase = await createClient();
+  const { data: authData } = await supabase.auth.getUser();
+  const authUser = authData?.user;
 
-  const user = session.user as any;
+  if (!authUser) return NextResponse.json({ hasAccess: false });
 
-  // Support both field name conventions from next-auth Discord provider
-  const discordId: string | undefined =
-    user.discordId ?? user.discord_id ?? user.id;
+  const admin = createAdminClient();
 
-  const email: string | undefined = user.email ?? undefined;
+  const { data: profile } = await admin
+    .from("users")
+    .select("discord_id, email")
+    .eq("auth_user_id", authUser.id)
+    .maybeSingle();
+
+  const discordId = profile?.discord_id ?? undefined;
+  const email = profile?.email ?? authUser.email ?? undefined;
 
   if (!discordId && !email) return NextResponse.json({ hasAccess: false });
 
-  const supabase = createAdminClient();
-
-  // Look up driver — try discord_id first, fall back to email
   let driver: { id: string } | null = null;
 
   if (discordId) {
-    const { data } = await supabase
+    const { data } = await admin
       .schema("pitboss")
       .from("drivers")
       .select("id")
@@ -38,7 +40,7 @@ export async function GET(
   }
 
   if (!driver && email) {
-    const { data } = await supabase
+    const { data } = await admin
       .schema("pitboss")
       .from("drivers")
       .select("id")
@@ -49,8 +51,22 @@ export async function GET(
 
   if (!driver) return NextResponse.json({ hasAccess: false });
 
-  // Check for active steward-tier licence in this league
-  const { data: licence } = await supabase
+  // Owners and head stewards govern the league itself — they shouldn't
+  // need to pass a certification exam to access their own steward panel.
+  // Only fall through to the licence check for everyone else.
+  const { data: membership } = await admin
+    .schema("pitboss")
+    .from("driver_leagues")
+    .select("is_owner, is_co_owner, is_head_steward")
+    .eq("driver_id", driver.id)
+    .eq("league_id", params.id)
+    .maybeSingle();
+
+  if (membership?.is_owner || membership?.is_co_owner || membership?.is_head_steward) {
+    return NextResponse.json({ hasAccess: true });
+  }
+
+  const { data: licence } = await admin
     .schema("pitboss")
     .from("licences")
     .select("id")
