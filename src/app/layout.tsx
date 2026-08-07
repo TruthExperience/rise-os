@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { SessionProvider } from "next-auth/react";
 import { SwUpdateListener } from "@/components/providers/SwUpdateListener";
 import BottomNav from "@/components/ui/BottomNav";
 
@@ -56,10 +57,12 @@ export default function RootLayout({
       </head>
       <body className={inter.className}>
         <SwUpdateListener />
-        <div className="pb-[calc(4rem+env(safe-area-inset-bottom))]">
-          {children}
-        </div>
-        <BottomNav />
+        <SessionProvider>
+          <div className="pb-[calc(4rem+env(safe-area-inset-bottom))]">
+            {children}
+          </div>
+          <BottomNav />
+        </SessionProvider>
       </body>
     </html>
   );
