@@ -1,20 +1,4 @@
-// pitboss-proxy/src/index.ts  (Cloudflare Worker)
-
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-
-const app = new Hono();
-app.use('*', cors());
-
-// ─── Auth ─────────────────────────────────────────────────────────────────────
-
-app.use('*', async (c, next) => {
-  const key = c.req.header('X-PitBoss-Key');
-  if (key !== c.env.PITBOSS_INTERNAL_KEY) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-  return next();
-});
+// pitboss-proxy/index.js  (Cloudflare Worker — vanilla JS, no deps, Quick Edit compatible)
 
 // ─── Model registry ───────────────────────────────────────────────────────────
 // Ordered by quality per task. All :free. Paid models only appear in PAID_FALLBACK.
@@ -38,7 +22,7 @@ const MODELS = {
     'deepseek/deepseek-r1-0528:free',      // latest R1
     'qwen/qwen3-235b-a22b:free',           // dual-mode thinking
     'nvidia/nemotron-3-ultra-253b-v1:free',// 1M context reasoning
-    'zhipu-ai/glm-4.5-air:free',          // GLM family, strong reasoning
+    'zhipu-ai/glm-4.5-air:free',           // GLM family, strong reasoning
     'meta-llama/llama-4-maverick:free',
     'openrouter/free',
   ],
@@ -53,12 +37,20 @@ const MODELS = {
     'openrouter/free',
   ],
 
-  // Vision
+  // Vision — image evidence only
   vision: [
     'meta-llama/llama-4-maverick:free',
     'google/gemma-3-27b-it:free',
     'nvidia/nemotron-nano-vl-12b-v2:free',
     'moonshotai/kimi-vl-a3b-thinking:free',
+  ],
+
+  // Video — genuine video_url support, not just image frames.
+  // NOTE: verify this model ID and free-tier availability against
+  // OpenRouter's live model list before relying on it — video support
+  // moves fast and per-model, unlike the stable image-vision pool above.
+  video: [
+    'google/gemma-4-26b-a4b-it:free',
   ],
 
   // Fast / low latency — shorter context, quicker response
@@ -70,31 +62,56 @@ const MODELS = {
     'openrouter/free',
   ],
 
-} as const;
+};
 
-// Only used if ALL free models fail
+// Only used if ALL free models fail (not currently invoked below — kept for parity
+// with the original file; wire in a paid-fallback call here if/when needed).
 const PAID_FALLBACK = [
   { model: 'anthropic/claude-sonnet-4-6', key: 'ANTHROPIC_KEY' },
   { model: 'openai/gpt-4o-mini',          key: 'OPENAI_KEY'    },
 ];
 
-// ─── Evidence-image helpers ───────────────────────────────────────────────────
+// ─── CORS helpers ──────────────────────────────────────────────────────────────
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, X-PitBoss-Key',
+};
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
+  });
+}
+
+// ─── Evidence-image / evidence-video helpers ──────────────────────────────────
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)(\?.*)?$/i;
+// Direct video FILE urls only — e.g. Discord CDN attachments
+// (cdn.discordapp.com/attachments/.../clip.mp4). Webpage links to
+// YouTube/Streamable/Medal.tv do NOT match this and are not resolvable
+// to a raw video file without a separate scraping step — those still
+// fall through to text-only treatment below, same as before.
+const VIDEO_EXT_RE = /\.(mp4|mov|webm)(\?.*)?$/i;
 
-function isLikelyImageUrl(url: string): boolean {
+function isLikelyImageUrl(url) {
   return IMAGE_EXT_RE.test(url.split('?')[0]);
 }
 
-// Evidence images add real latency/cost per request, and free vision
-// models have modest limits — cap how many go in as image blocks.
+function isLikelyVideoFileUrl(url) {
+  return VIDEO_EXT_RE.test(url.split('?')[0]);
+}
+
+// Evidence images/videos add real latency/cost per request, and free
+// models have modest limits — cap how many go in per pass.
 const MAX_EVIDENCE_IMAGES = 4;
+const MAX_EVIDENCE_VIDEOS = 2;
 
 // ─── Mode → pool mapping ──────────────────────────────────────────────────────
 
-type Mode = 'fast' | 'primary' | 'reasoning' | 'certgen' | 'quick' | 'steward' | 'coding' | 'vision';
-
-function poolForMode(mode: Mode, hasImage: boolean): readonly string[] {
+function poolForMode(mode, hasImage) {
   if (hasImage) return MODELS.vision;
   switch (mode) {
     case 'reasoning':
@@ -108,13 +125,11 @@ function poolForMode(mode: Mode, hasImage: boolean): readonly string[] {
 }
 
 // ─── Core inference with waterfall ───────────────────────────────────────────
+// Returns a plain object (not a Response) so callers can inspect/transform
+// the result before deciding how to respond.
 
-async function inferWithWaterfall(
-  pool: readonly string[],
-  body: object,
-  openrouterKey: string
-): Promise<Response> {
-  const errors: string[] = [];
+async function inferWithWaterfall(pool, body, openrouterKey) {
+  const errors = [];
 
   for (const model of pool) {
     try {
@@ -140,14 +155,14 @@ async function inferWithWaterfall(
         continue;
       }
 
-      const data: any = await res.json();
-      return Response.json({
+      const data = await res.json();
+      return {
         response: data.choices[0].message.content,
         model: data.model ?? model,
         provider: 'openrouter:free',
         free: true,
         usage: data.usage ?? null,
-      });
+      };
 
     } catch (err) {
       errors.push(`${model}: ${String(err)}`);
@@ -155,54 +170,17 @@ async function inferWithWaterfall(
     }
   }
 
-  // All free failed — log and return error list for client to handle paid fallback
-  return Response.json({
-    error: 'all_free_models_failed',
-    tried: errors,
-  }, { status: 503 });
+  // All free failed — return error list for client to handle paid fallback
+  return { error: 'all_free_models_failed', tried: errors };
 }
 
-// ─── /infer endpoint ──────────────────────────────────────────────────────────
-
-app.post('/infer', async (c) => {
-  const body: any = await c.req.json();
-  const mode: Mode = body.mode ?? 'primary';
-  const hasImage = Array.isArray(body.messages) &&
-    body.messages.some((m: any) =>
-      Array.isArray(m.content) &&
-      m.content.some((p: any) => p.type === 'image_url')
-    );
-
-  const pool = poolForMode(mode, hasImage);
-  const inferBody = {
-    messages: body.messages ?? [
-      ...(body.system  ? [{ role: 'system', content: body.system }]  : []),
-      ...(body.prompt  ? [{ role: 'user',   content: body.prompt }]  : []),
-    ],
-    max_tokens:  body.max_tokens  ?? 1024,
-    temperature: body.temperature ?? 0.3,
-  };
-
-  return inferWithWaterfall(pool, inferBody, c.env.OPENROUTER_KEY);
-});
-
 // ─── Image-description pass (used by /steward) ───────────────────────────────
-
-type ImageDescriptionResult = {
-  description: string;
-  model: string;
-  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
-};
-
-// Pass 1: ask a vision model to describe what's visible in each image,
+// Pass 1a: ask a vision model to describe what's visible in each image,
 // purely factually — no verdict, no rule interpretation. Keeps the
 // vision model in its lane and hands the reasoning model clean text
 // it can actually reason well over.
-async function describeEvidenceImages(
-  imageUrls: string[],
-  incidentContext: string,
-  openrouterKey: string
-): Promise<ImageDescriptionResult | null> {
+
+async function describeEvidenceImages(imageUrls, incidentContext, openrouterKey) {
   const system = `You are a factual image-description assistant for motorsport incident evidence.
 Describe ONLY what is visibly happening in the image(s) — car positions, contact, track position, timing/HUD overlays if visible, any visible damage.
 Do NOT render a verdict, cite rules, or speculate about intent. Stick to what's observable.
@@ -212,7 +190,7 @@ If an image fails to load or is unrelated to racing, say so plainly instead of g
 
 Describe what's visible in the attached image(s), in order.`;
 
-  const res = await inferWithWaterfall(
+  const data = await inferWithWaterfall(
     MODELS.vision,
     {
       messages: [
@@ -231,47 +209,135 @@ Describe what's visible in the attached image(s), in order.`;
     openrouterKey
   );
 
-  const data: any = await res.json();
   if (data.error) return null; // caller falls back to text-only reasoning
 
   return {
-    description: data.response as string,
-    model: data.model as string,
+    description: data.response,
+    model: data.model,
     usage: data.usage ?? null,
   };
 }
 
-// ─── /steward endpoint ────────────────────────────────────────────────────────
+// ─── Video-description pass (used by /steward) ────────────────────────────────
+// Pass 1b: same idea as the image pass above, but for direct video file
+// URLs using OpenRouter's video_url content type. Only fires for URLs
+// that are actual video files (Discord CDN attachments, etc.) — webpage
+// links to YouTube/Streamable/Medal.tv aren't resolvable here and stay
+// text-only, same as before this change.
 
-app.post('/steward', async (c) => {
-  const { incident, regulations = [], league = 'AWC' } = await c.req.json();
+async function describeEvidenceVideos(videoUrls, incidentContext, openrouterKey) {
+  const system = `You are a factual video-description assistant for motorsport incident evidence.
+Describe ONLY what is visibly happening across the clip — car positions and movement, contact, track position, timing/HUD overlays if visible, any visible damage, and how the situation develops over the duration of the clip.
+Do NOT render a verdict, cite rules, or speculate about intent. Stick to what's observable.
+If a video fails to load or is unrelated to racing, say so plainly instead of guessing.`;
+
+  const prompt = `INCIDENT CONTEXT (for reference only, not for you to judge): ${incidentContext}
+
+Describe what happens in the attached video clip(s), in order, including how the situation develops over time.`;
+
+  const data = await inferWithWaterfall(
+    MODELS.video,
+    {
+      messages: [
+        { role: 'system', content: system },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            ...videoUrls.map((url) => ({ type: 'video_url', video_url: { url } })),
+          ],
+        },
+      ],
+      max_tokens: 900,
+      temperature: 0.1,
+    },
+    openrouterKey
+  );
+
+  if (data.error) return null; // caller falls back to text-only reasoning
+
+  return {
+    description: data.response,
+    model: data.model,
+    usage: data.usage ?? null,
+  };
+}
+
+// ─── Route handlers ────────────────────────────────────────────────────────────
+
+async function handleInfer(request, env) {
+  const body = await request.json();
+  const mode = body.mode ?? 'primary';
+  const hasImage = Array.isArray(body.messages) &&
+    body.messages.some((m) =>
+      Array.isArray(m.content) &&
+      m.content.some((p) => p.type === 'image_url')
+    );
+
+  const pool = poolForMode(mode, hasImage);
+  const inferBody = {
+    messages: body.messages ?? [
+      ...(body.system ? [{ role: 'system', content: body.system }] : []),
+      ...(body.prompt ? [{ role: 'user', content: body.prompt }] : []),
+    ],
+    max_tokens: body.max_tokens ?? 1024,
+    temperature: body.temperature ?? 0.3,
+  };
+
+  const data = await inferWithWaterfall(pool, inferBody, env.OPENROUTER_API_KEY);
+  if (data.error) return jsonResponse(data, 503);
+  return jsonResponse(data);
+}
+
+async function handleSteward(request, env) {
+  const { incident, regulations = [], league = 'AWC' } = await request.json();
 
   const regsBlock = regulations.length > 0
-    ? regulations.map((r: any) => `Article ${r.article_number} — ${r.title}:\n${r.body}`).join('\n\n')
+    ? regulations.map((r) => `Article ${r.article_number} — ${r.title}:\n${r.body}`).join('\n\n')
     : 'No specific regulations provided. Apply standard racing conduct rules.';
 
-  const reporterEvidence: string[] = incident.reporter_evidence_urls ?? [];
-  const accusedEvidence: string[] = incident.accused_evidence_urls ?? [];
-  const imageUrls = [...reporterEvidence, ...accusedEvidence]
-    .filter(isLikelyImageUrl)
-    .slice(0, MAX_EVIDENCE_IMAGES);
+  // incident.reporter_evidence / incident.accused_evidence are arrays of
+  // { url, label, source } objects (upload vs link), not flat URL
+  // strings — steward.ts's getIncidentEvidence resolves signed URLs for
+  // Supabase-stored uploads before sending these over.
+  const reporterEvidence = incident.reporter_evidence ?? [];
+  const accusedEvidence = incident.accused_evidence ?? [];
+  const allEvidence = [...reporterEvidence, ...accusedEvidence];
 
-  // Pass 1 — describe images, if any. A failure here (bad URL, expired
-  // Discord CDN link, vision pool down) just means the verdict pass
-  // proceeds without image context rather than failing the whole request.
-  let imageAnalysis: ImageDescriptionResult | null = null;
+  const imageEvidence = allEvidence
+    .filter((e) => isLikelyImageUrl(e.url))
+    .slice(0, MAX_EVIDENCE_IMAGES);
+  const imageUrls = imageEvidence.map((e) => e.url);
+
+  const videoEvidence = allEvidence
+    .filter((e) => isLikelyVideoFileUrl(e.url))
+    .slice(0, MAX_EVIDENCE_VIDEOS);
+  const videoUrls = videoEvidence.map((e) => e.url);
+
+  // Evidence that's neither an image nor a directly-analyzable video file
+  // (e.g. YouTube/Streamable/Medal.tv page links) — still noted for the
+  // reasoning model as a link, same as the original behavior.
+  const unanalyzedLinkCount = allEvidence.length - imageUrls.length - videoUrls.length;
+
+  const incidentContext = `${incident.incident_type} incident, lap ${incident.lap ?? '?'}`;
+
+  // Passes 1a/1b — describe images and videos, if any. A failure in
+  // either just means that section is omitted from the verdict pass
+  // rather than failing the whole request.
+  let imageAnalysis = null;
   if (imageUrls.length > 0) {
-    imageAnalysis = await describeEvidenceImages(
-      imageUrls,
-      `${incident.incident_type} incident, lap ${incident.lap ?? '?'}`,
-      c.env.OPENROUTER_KEY
-    );
+    imageAnalysis = await describeEvidenceImages(imageUrls, incidentContext, env.OPENROUTER_API_KEY);
+  }
+
+  let videoAnalysis = null;
+  if (videoUrls.length > 0) {
+    videoAnalysis = await describeEvidenceVideos(videoUrls, incidentContext, env.OPENROUTER_API_KEY);
   }
 
   const system = `You are an impartial racing steward AI for ${league}.
 Return ONLY valid JSON — no markdown, no preamble.
 Shape: { "verdict": "guilty"|"not_guilty"|"inconclusive", "confidence": "high"|"medium"|"low", "reasoning": string, "cited_articles": string[], "pp_recommendation": {"min": number, "max": number}, "mitigating_factors": string[], "aggravating_factors": string[], "steward_notes": string }
-Base your verdict on ALL evidence provided — the reporter's account, the accused driver's defense (if any), evidence links, the full ticket conversation transcript if included, and the image description if provided. The image description was produced by a separate vision pass and reflects only what is visibly observable — treat it as a factual account, not a verdict.`;
+Base your verdict on ALL evidence provided — the reporter's account, the accused driver's defense (if any), evidence links, the full ticket conversation transcript if included, and the image/video descriptions if provided. Those descriptions were produced by separate vision/video passes and reflect only what is visibly observable — treat them as factual accounts, not a verdict.`;
 
   // Build the prompt incrementally so sections with no data (no defense
   // yet, no transcript yet, no evidence) are simply omitted rather than
@@ -283,7 +349,9 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
   ];
 
   if (reporterEvidence.length > 0) {
-    promptParts.push(`REPORTER EVIDENCE LINKS:\n${reporterEvidence.map((u: string) => `- ${u}`).join('\n')}`);
+    promptParts.push(
+      `REPORTER EVIDENCE LINKS:\n${reporterEvidence.map((e) => `- ${e.label ? `${e.label}: ` : ''}${e.url}`).join('\n')}`
+    );
   }
 
   if (incident.accused_response) {
@@ -291,13 +359,25 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
   }
 
   if (accusedEvidence.length > 0) {
-    promptParts.push(`ACCUSED EVIDENCE LINKS:\n${accusedEvidence.map((u: string) => `- ${u}`).join('\n')}`);
+    promptParts.push(
+      `ACCUSED EVIDENCE LINKS:\n${accusedEvidence.map((e) => `- ${e.label ? `${e.label}: ` : ''}${e.url}`).join('\n')}`
+    );
   }
 
   if (imageAnalysis) {
     promptParts.push(`IMAGE EVIDENCE DESCRIPTION (from vision pass):\n${imageAnalysis.description}`);
   } else if (imageUrls.length > 0) {
     promptParts.push(`Note: ${imageUrls.length} evidence image(s) were submitted but could not be analyzed (link may have expired or failed to load).`);
+  }
+
+  if (videoAnalysis) {
+    promptParts.push(`VIDEO EVIDENCE DESCRIPTION (from video pass):\n${videoAnalysis.description}`);
+  } else if (videoUrls.length > 0) {
+    promptParts.push(`Note: ${videoUrls.length} evidence video(s) were submitted but could not be analyzed (link may have expired or failed to load).`);
+  }
+
+  if (unanalyzedLinkCount > 0) {
+    promptParts.push(`Note: ${unanalyzedLinkCount} additional evidence link(s) were submitted as webpage links (e.g. YouTube/Streamable/Medal.tv) rather than direct files, and were not visually analyzed — only the URL itself was available.`);
   }
 
   if (incident.ticket_transcript) {
@@ -311,57 +391,60 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
 
   const prompt = promptParts.join('\n\n');
 
-  const res = await inferWithWaterfall(
+  const data = await inferWithWaterfall(
     MODELS.reasoning,
     {
       messages: [
         { role: 'system', content: system },
-        { role: 'user',   content: prompt },
+        { role: 'user', content: prompt },
       ],
       max_tokens: 1500,
       temperature: 0.1,
     },
-    c.env.OPENROUTER_KEY
+    env.OPENROUTER_API_KEY
   );
 
-  const data: any = await res.json();
-  if (data.error) return Response.json(data, { status: 503 });
+  if (data.error) return jsonResponse(data, 503);
 
   const imageAnalysisMeta = imageAnalysis
     ? { model: imageAnalysis.model, usage: imageAnalysis.usage, image_count: imageUrls.length }
     : null;
 
+  const videoAnalysisMeta = videoAnalysis
+    ? { model: videoAnalysis.model, usage: videoAnalysis.usage, video_count: videoUrls.length }
+    : null;
+
   try {
     const raw = data.response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     const suggestion = JSON.parse(raw);
-    return Response.json({
+    return jsonResponse({
       ...data,
       league,
       suggestion,
       image_analysis: imageAnalysisMeta,
+      video_analysis: videoAnalysisMeta,
       disclaimer: 'AI suggestion only. Human steward decision required.',
     });
   } catch {
-    return Response.json({
+    return jsonResponse({
       ...data,
       league,
       suggestion: { verdict: 'inconclusive', confidence: 'low', parse_error: true, raw: data.response },
       image_analysis: imageAnalysisMeta,
+      video_analysis: videoAnalysisMeta,
       disclaimer: 'AI suggestion only. Human steward decision required.',
     });
   }
-});
+}
 
-// ─── /setup-feedback endpoint ─────────────────────────────────────────────────
-
-app.post('/setup-feedback', async (c) => {
-  const { feedback_text, known_param_keys = [], context = {}, league = 'AWC' } = await c.req.json();
+async function handleSetupFeedback(request, env) {
+  const { feedback_text, known_param_keys = [], context = {}, league = 'AWC' } = await request.json();
 
   if (!feedback_text || known_param_keys.length === 0) {
-    return c.json({ error: 'feedback_text and known_param_keys are required' }, 400);
+    return jsonResponse({ error: 'feedback_text and known_param_keys are required' }, 400);
   }
 
-  const paramKeysBlock = known_param_keys.map((k: string) => `- ${k}`).join('\n');
+  const paramKeysBlock = known_param_keys.map((k) => `- ${k}`).join('\n');
 
   const system = `You are a race engineering assistant for ${league} that converts driver setup feedback into structured parameter adjustments.
 Return ONLY valid JSON — no markdown, no preamble.
@@ -373,21 +456,20 @@ Rules: delta is signed (positive = increase, negative = decrease). If feedback d
   const prompt = `CONTEXT: ${JSON.stringify(context)}
 DRIVER FEEDBACK: "${feedback_text}"`;
 
-  const res = await inferWithWaterfall(
+  const data = await inferWithWaterfall(
     MODELS.reasoning,
     {
       messages: [
         { role: 'system', content: system },
-        { role: 'user',   content: prompt },
+        { role: 'user', content: prompt },
       ],
       max_tokens: 1024,
       temperature: 0.2,
     },
-    c.env.OPENROUTER_KEY
+    env.OPENROUTER_API_KEY
   );
 
-  const data: any = await res.json();
-  if (data.error) return Response.json(data, { status: 503 });
+  if (data.error) return jsonResponse(data, 503);
 
   const disclaimer = 'AI-generated suggestion. Review before applying to setup.';
 
@@ -396,13 +478,13 @@ DRIVER FEEDBACK: "${feedback_text}"`;
     const parsed = JSON.parse(raw);
 
     const validKeys = new Set(known_param_keys);
-    parsed.adjustments = (parsed.adjustments ?? []).filter((a: any) =>
+    parsed.adjustments = (parsed.adjustments ?? []).filter((a) =>
       a && typeof a.param_key === 'string' && validKeys.has(a.param_key) &&
       typeof a.delta === 'number' &&
       ['low', 'medium', 'high'].includes(a.confidence)
     );
 
-    return Response.json({
+    return jsonResponse({
       ...data,
       league,
       adjustments: parsed.adjustments,
@@ -410,7 +492,7 @@ DRIVER FEEDBACK: "${feedback_text}"`;
       disclaimer,
     });
   } catch {
-    return Response.json({
+    return jsonResponse({
       ...data,
       league,
       adjustments: [],
@@ -420,11 +502,9 @@ DRIVER FEEDBACK: "${feedback_text}"`;
       disclaimer,
     });
   }
-});
+}
 
-// ─── /health endpoint ─────────────────────────────────────────────────────────
-
-app.get('/health', async (c) => {
+async function handleHealth(request, env) {
   // Quick probe of the top model from each pool
   const probes = await Promise.allSettled(
     Object.entries(MODELS).map(async ([pool, models]) => {
@@ -433,7 +513,7 @@ app.get('/health', async (c) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${c.env.OPENROUTER_KEY}`,
+          'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
         },
         body: JSON.stringify({
           model: models[0],
@@ -445,12 +525,50 @@ app.get('/health', async (c) => {
     })
   );
 
-  return Response.json({
+  return jsonResponse({
     status: 'ok',
     source: 'pitboss-proxy',
-    pools: probes.map(p => p.status === 'fulfilled' ? p.value : { error: String(p.reason) }),
+    pools: probes.map((p) => (p.status === 'fulfilled' ? p.value : { error: String(p.reason) })),
     models: MODELS,
   });
-});
+}
 
-export default app;
+// ─── Router ─────────────────────────────────────────────────────────────────────
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const { pathname } = url;
+    const method = request.method;
+
+    // CORS preflight
+    if (method === 'OPTIONS') {
+      return new Response(null, { headers: CORS_HEADERS });
+    }
+
+    // Auth — applies to every route below
+    const key = request.headers.get('X-PitBoss-Key');
+    if (key !== env.PITBOSS_INTERNAL_KEY) {
+      return jsonResponse({ error: 'Unauthorized' }, 401);
+    }
+
+    try {
+      if (pathname === '/infer' && method === 'POST') {
+        return await handleInfer(request, env);
+      }
+      if (pathname === '/steward' && method === 'POST') {
+        return await handleSteward(request, env);
+      }
+      if (pathname === '/setup-feedback' && method === 'POST') {
+        return await handleSetupFeedback(request, env);
+      }
+      if (pathname === '/health' && method === 'GET') {
+        return await handleHealth(request, env);
+      }
+
+      return jsonResponse({ error: 'Not found' }, 404);
+    } catch (err) {
+      return jsonResponse({ error: 'internal_error', message: String(err) }, 500);
+    }
+  },
+};
