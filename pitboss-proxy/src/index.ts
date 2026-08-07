@@ -89,11 +89,9 @@ function jsonResponse(body, status = 200) {
 // ─── Evidence-image / evidence-video helpers ──────────────────────────────────
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)(\?.*)?$/i;
-// Direct video FILE urls only — e.g. Discord CDN attachments
-// (cdn.discordapp.com/attachments/.../clip.mp4). Webpage links to
-// YouTube/Streamable/Medal.tv do NOT match this and are not resolvable
-// to a raw video file without a separate scraping step — those still
-// fall through to text-only treatment below, same as before.
+// Direct video FILE urls — e.g. Discord CDN attachments
+// (cdn.discordapp.com/attachments/.../clip.mp4), or a video file URL
+// resolved from a webpage's og:video tag below.
 const VIDEO_EXT_RE = /\.(mp4|mov|webm)(\?.*)?$/i;
 
 function isLikelyImageUrl(url) {
@@ -108,6 +106,69 @@ function isLikelyVideoFileUrl(url) {
 // models have modest limits — cap how many go in per pass.
 const MAX_EVIDENCE_IMAGES = 4;
 const MAX_EVIDENCE_VIDEOS = 2;
+// Webpage-link resolutions (YouTube/Streamable/Medal.tv/etc.) are an
+// extra network hop each — cap how many we attempt per request so a
+// pile of links can't blow the function's time budget.
+const MAX_LINK_RESOLUTIONS = 6;
+const LINK_RESOLUTION_TIMEOUT_MS = 4000;
+
+// ─── Webpage-link resolver ─────────────────────────────────────────────────────
+// For evidence submitted as a page link (YouTube, Streamable, Medal.tv,
+// etc.) rather than a direct file, fetch the page and read its Open
+// Graph tags: og:video(:url/:secure_url) gives a real playable file
+// (Streamable/Medal.tv usually have this — genuine video analysis is
+// possible), og:image gives a static thumbnail as a fallback (YouTube
+// only offers this — no direct file access, so YouTube evidence is
+// always thumbnail-only, never true video). Returns null if neither tag
+// is present or the fetch fails/times out — caller treats that evidence
+// as an unanalyzed link, same as before this change.
+
+class MetaTagCollector {
+  constructor() {
+    this.tags = {};
+  }
+  element(element) {
+    const property = element.getAttribute('property');
+    const name = element.getAttribute('name');
+    const content = element.getAttribute('content');
+    if (property && content) this.tags[property] = content;
+    if (name && content) this.tags[name] = content;
+  }
+}
+
+async function resolveEvidenceLink(pageUrl) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LINK_RESOLUTION_TIMEOUT_MS);
+
+    const res = await fetch(pageUrl, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PitBossBot/1.0)' },
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) return null;
+
+    const collector = new MetaTagCollector();
+    const rewritten = new HTMLRewriter().on('meta', collector).transform(res);
+    await rewritten.text(); // drain the body to actually fire the element() callbacks
+
+    const tags = collector.tags;
+    const videoUrl =
+      tags['og:video:secure_url'] || tags['og:video:url'] || tags['og:video'];
+    const imageUrl = tags['og:image:secure_url'] || tags['og:image'];
+
+    if (videoUrl && /^https?:\/\//i.test(videoUrl)) {
+      return { type: 'video', url: videoUrl };
+    }
+    if (imageUrl && /^https?:\/\//i.test(imageUrl)) {
+      return { type: 'image', url: imageUrl };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 // ─── Mode → pool mapping ──────────────────────────────────────────────────────
 
@@ -220,10 +281,9 @@ Describe what's visible in the attached image(s), in order.`;
 
 // ─── Video-description pass (used by /steward) ────────────────────────────────
 // Pass 1b: same idea as the image pass above, but for direct video file
-// URLs using OpenRouter's video_url content type. Only fires for URLs
-// that are actual video files (Discord CDN attachments, etc.) — webpage
-// links to YouTube/Streamable/Medal.tv aren't resolvable here and stay
-// text-only, same as before this change.
+// URLs using OpenRouter's video_url content type — either submitted
+// directly (Discord CDN attachments) or resolved from a webpage's
+// og:video tag by resolveEvidenceLink() above.
 
 async function describeEvidenceVideos(videoUrls, incidentContext, openrouterKey) {
   const system = `You are a factual video-description assistant for motorsport incident evidence.
@@ -304,20 +364,28 @@ async function handleSteward(request, env) {
   const accusedEvidence = incident.accused_evidence ?? [];
   const allEvidence = [...reporterEvidence, ...accusedEvidence];
 
-  const imageEvidence = allEvidence
-    .filter((e) => isLikelyImageUrl(e.url))
-    .slice(0, MAX_EVIDENCE_IMAGES);
-  const imageUrls = imageEvidence.map((e) => e.url);
+  // Bucket 1 — already-direct files, no resolution needed.
+  const directImageUrls = allEvidence.filter((e) => isLikelyImageUrl(e.url)).map((e) => e.url);
+  const directVideoUrls = allEvidence.filter((e) => isLikelyVideoFileUrl(e.url)).map((e) => e.url);
 
-  const videoEvidence = allEvidence
-    .filter((e) => isLikelyVideoFileUrl(e.url))
-    .slice(0, MAX_EVIDENCE_VIDEOS);
-  const videoUrls = videoEvidence.map((e) => e.url);
+  // Bucket 2 — everything else is a webpage link (YouTube/Streamable/
+  // Medal.tv/etc.). Try to resolve each to a real video file or, failing
+  // that, a thumbnail image, via Open Graph tags. Capped and run
+  // concurrently so a pile of links doesn't blow the time budget.
+  const linkEvidence = allEvidence
+    .filter((e) => !isLikelyImageUrl(e.url) && !isLikelyVideoFileUrl(e.url))
+    .slice(0, MAX_LINK_RESOLUTIONS);
 
-  // Evidence that's neither an image nor a directly-analyzable video file
-  // (e.g. YouTube/Streamable/Medal.tv page links) — still noted for the
-  // reasoning model as a link, same as the original behavior.
-  const unanalyzedLinkCount = allEvidence.length - imageUrls.length - videoUrls.length;
+  const resolved = await Promise.all(
+    linkEvidence.map((e) => resolveEvidenceLink(e.url))
+  );
+
+  const resolvedImageUrls = resolved.filter((r) => r?.type === 'image').map((r) => r.url);
+  const resolvedVideoUrls = resolved.filter((r) => r?.type === 'video').map((r) => r.url);
+  const unresolvedLinkCount = resolved.filter((r) => r === null).length;
+
+  const imageUrls = [...directImageUrls, ...resolvedImageUrls].slice(0, MAX_EVIDENCE_IMAGES);
+  const videoUrls = [...directVideoUrls, ...resolvedVideoUrls].slice(0, MAX_EVIDENCE_VIDEOS);
 
   const incidentContext = `${incident.incident_type} incident, lap ${incident.lap ?? '?'}`;
 
@@ -376,8 +444,8 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
     promptParts.push(`Note: ${videoUrls.length} evidence video(s) were submitted but could not be analyzed (link may have expired or failed to load).`);
   }
 
-  if (unanalyzedLinkCount > 0) {
-    promptParts.push(`Note: ${unanalyzedLinkCount} additional evidence link(s) were submitted as webpage links (e.g. YouTube/Streamable/Medal.tv) rather than direct files, and were not visually analyzed — only the URL itself was available.`);
+  if (unresolvedLinkCount > 0) {
+    promptParts.push(`Note: ${unresolvedLinkCount} additional evidence link(s) could not be resolved to a video or image (page fetch failed, timed out, or had no video/thumbnail available) — only the URL itself was available.`);
   }
 
   if (incident.ticket_transcript) {
