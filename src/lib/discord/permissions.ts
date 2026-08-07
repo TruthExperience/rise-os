@@ -88,7 +88,7 @@ export function hasAnyFlag(
   return flags.some((flag) => membership.flags[flag]);
 }
 
-const ADMINISTRATOR = 1n << 3n;
+const ADMINISTRATOR = BigInt(1) << BigInt(3);
 
 /**
  * Discord-role-based steward check: does the invoking member either
@@ -105,7 +105,7 @@ export function hasDiscordStewardAccess(
   stewardRoleId: string | null
 ): boolean {
   const permissions = BigInt(ctx.memberPermissions || "0");
-  const isOwnerOrAdmin = (permissions & ADMINISTRATOR) !== 0n;
+  const isOwnerOrAdmin = (permissions & ADMINISTRATOR) !== BigInt(0);
   const isSteward = stewardRoleId ? ctx.memberRoles.includes(stewardRoleId) : false;
   return isOwnerOrAdmin || isSteward;
 }
