@@ -1,3 +1,5 @@
+const path = require("path");
+
 const withPWA = require("@ducanh2912/next-pwa").default({
   dest: "public",
   cacheOnFrontEndNav: true,
@@ -84,6 +86,18 @@ const withPWA = require("@ducanh2912/next-pwa").default({
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  webpack: (config) => {
+    // Every existing useSession()/signIn()/signOut()/SessionProvider
+    // import across the app keeps resolving to "next-auth/react" as
+    // written — this alias swaps the implementation underneath to a
+    // Supabase-backed shim (lib/compat/next-auth-react.tsx) instead of
+    // requiring every page to be edited individually.
+    config.resolve.alias["next-auth/react"] = path.resolve(
+      __dirname,
+      "lib/compat/next-auth-react.tsx"
+    );
+    return config;
+  },
 };
 
 module.exports = withPWA(nextConfig);
