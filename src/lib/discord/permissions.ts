@@ -109,4 +109,3 @@ export function hasDiscordStewardAccess(
   const isSteward = stewardRoleId ? ctx.memberRoles.includes(stewardRoleId) : false;
   return isOwnerOrAdmin || isSteward;
 }
-  
