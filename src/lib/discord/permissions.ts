@@ -87,3 +87,26 @@ export function hasAnyFlag(
   if (!membership) return false;
   return flags.some((flag) => membership.flags[flag]);
 }
+
+const ADMINISTRATOR = 1n << 3n;
+
+/**
+ * Discord-role-based steward check: does the invoking member either
+ * hold the league's configured steward role, or have ADMINISTRATOR
+ * (which Discord's interaction payload always includes for the guild
+ * owner, regardless of their roles)? Unlike getLeagueMembership/
+ * hasAnyFlag, this needs no pitboss.driver_leagues row to exist --
+ * it reads straight off the interaction, so a brand-new league needs
+ * no manual per-driver flag grants before its owner can use steward
+ * commands.
+ */
+export function hasDiscordStewardAccess(
+  ctx: { memberRoles: string[]; memberPermissions: string },
+  stewardRoleId: string | null
+): boolean {
+  const permissions = BigInt(ctx.memberPermissions || "0");
+  const isOwnerOrAdmin = (permissions & ADMINISTRATOR) !== 0n;
+  const isSteward = stewardRoleId ? ctx.memberRoles.includes(stewardRoleId) : false;
+  return isOwnerOrAdmin || isSteward;
+}
+  
