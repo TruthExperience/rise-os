@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 
@@ -18,7 +18,7 @@ interface UploadState {
   questionsGenerated: number
 }
 
-export default function PitBossAdminPage() {
+function PitBossAdminInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { data: session, status } = useSession()
@@ -323,5 +323,19 @@ export default function PitBossAdminPage() {
         </div>
       )}
     </main>
+  )
+}
+
+export default function PitBossAdminPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center bg-rise-black">
+          <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+        </main>
+      }
+    >
+      <PitBossAdminInner />
+    </Suspense>
   )
 }
