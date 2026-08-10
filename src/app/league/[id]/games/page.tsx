@@ -137,12 +137,21 @@ export default function LeagueGamesPage() {
         ← Back
       </button>
 
-      <div className="mb-8">
-        <h1 className="text-2xl font-black text-white">Games</h1>
-        <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
-          Schedule & Standings
-        </p>
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-black text-white">Games</h1>
+          <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
+            Schedule & Standings
+          </p>
+        </div>
       </div>
+
+      <button
+        onClick={() => router.push(`/league/${id}/games/bulk`)}
+        className="text-white/30 text-xs mb-6"
+      >
+        + Bulk Add Games
+      </button>
 
       {/* Standings */}
       {standings.length > 0 && (
