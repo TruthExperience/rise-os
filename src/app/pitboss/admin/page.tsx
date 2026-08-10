@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 
 interface League {
@@ -20,6 +20,7 @@ interface UploadState {
 
 export default function PitBossAdminPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { data: session, status } = useSession()
   const [leagues, setLeagues]         = useState<League[]>([])
   const [selectedLeague, setSelectedLeague] = useState<string>('')
@@ -45,9 +46,15 @@ export default function PitBossAdminPage() {
       .then((data) => {
         const all = data.leagues ?? data
         setLeagues(all)
-        if (all.length > 0) setSelectedLeague(all[0].id)
+
+        const leagueIdParam = searchParams.get('league_id')
+        if (leagueIdParam && all.some((l: League) => l.id === leagueIdParam)) {
+          setSelectedLeague(leagueIdParam)
+        } else if (all.length > 0) {
+          setSelectedLeague(all[0].id)
+        }
       })
-  }, [status])
+  }, [status, searchParams])
 
   async function handleUpload() {
     if (!file || !selectedLeague || !roleCode) {
