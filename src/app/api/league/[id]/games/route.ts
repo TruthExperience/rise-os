@@ -1,209 +1,282 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
-import { createClient } from '@supabase/supabase-js'
+import { NextRequest, NextResponse } from "next/server";
+import { createClient, createAdminClient } from "@/lib/supabase/server";
 
-export const dynamic = 'force-dynamic'
+// ─── Types ──────────────────────────────────────────────────────────────────
 
-// Same admin-tier roles as the rulebook upload route (src/app/api/league/[id]/rules/route.ts),
-// plus 'owner' — that route's list was missing it, which caused a real bug
-// (league owner locked out of uploading their own rulebook). Included here
-// from the start so games/results uploads don't repeat that.
-const UPLOAD_ROLES = ['owner', 'commissioner', 'co_owner', 'admin', 'head_steward']
-
-function noStoreFetch(url: RequestInfo | URL, options: RequestInit = {}) {
-  return fetch(url, { ...options, cache: 'no-store' })
+interface FranchiseLite {
+  id: string;
+  name: string;
+  abbreviation: string;
+  logo_url: string | null;
+  wins: number;
+  losses: number;
 }
 
-function getRiseOs() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    {
-      db: { schema: 'rise_os' },
-      global: { fetch: noStoreFetch },
-    }
-  )
+interface GameRow {
+  id: string;
+  season_id: string | null;
+  week: number;
+  home_franchise_id: string;
+  away_franchise_id: string;
+  home_score: number;
+  away_score: number;
+  played_at: string | null;
 }
 
-function getPitboss() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    {
-      db: { schema: 'pitboss' },
-      global: { fetch: noStoreFetch },
-    }
-  )
-}
+// ─── GET ────────────────────────────────────────────────────────────────────
+// Returns { games, standings } for the league. Franchise objects are
+// enriched onto each game (same pattern as /api/franchises/[leagueId]),
+// since rise_os.games only stores the FK ids, not nested rows.
 
-async function requireUploadAccess(leagueId: string) {
-  const session = await getServerSession(authOptions)
-  if (!session?.user?.discordId) {
-    return { error: NextResponse.json({ error: 'Unauthenticated' }, { status: 401 }) }
-  }
+export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+  const admin = createAdminClient();
 
-  const pitboss = getPitboss()
-  const { data: driver } = await pitboss
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', session.user.discordId)
-    .single()
-
-  if (!driver) {
-    return { error: NextResponse.json({ error: 'Driver not found' }, { status: 403 }) }
-  }
-
-  const { data: membership } = await pitboss
-    .from('driver_leagues')
-    .select('role')
-    .eq('driver_id', driver.id)
-    .eq('league_id', leagueId)
-    .single()
-
-  if (!membership) {
-    return { error: NextResponse.json({ error: 'Not a member of this league' }, { status: 403 }) }
-  }
-
-  const roles = membership.role.split(',').map((r: string) => r.trim().toLowerCase())
-  const hasAccess = roles.some((r: string) => UPLOAD_ROLES.includes(r))
-  if (!hasAccess) {
-    return { error: NextResponse.json({ error: 'Insufficient permissions to upload results' }, { status: 403 }) }
-  }
-
-  return { discordUserId: session.user.discordId }
-}
-
-// GET — games for a league, filterable by season_id/week, plus computed
-// standings (wins/losses straight off rise_os.franchises).
-export async function GET(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  const riseOs = getRiseOs()
-
-  const seasonId = req.nextUrl.searchParams.get('season_id')
-  const week = req.nextUrl.searchParams.get('week')
-
-  let query = riseOs
-    .from('games')
+  const { data: games, error: gamesError } = await admin
+    .schema("rise_os")
+    .from("games")
     .select(
-      'id, season_id, week, home_franchise_id, away_franchise_id, home_score, away_score, played_at, created_at'
+      "id, season_id, week, home_franchise_id, away_franchise_id, home_score, away_score, played_at"
     )
-    .eq('league_id', params.id)
-    .order('week', { ascending: true })
+    .eq("league_id", params.id)
+    .order("week", { ascending: true });
 
-  if (seasonId) query = query.eq('season_id', seasonId)
-  if (week) query = query.eq('week', parseInt(week))
+  if (gamesError) {
+    return NextResponse.json({ error: gamesError.message }, { status: 500 });
+  }
 
-  const { data: games, error } = await query
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  const { data: standings, error: standingsError } = await admin
+    .schema("rise_os")
+    .from("franchises")
+    .select("id, name, abbreviation, logo_url, wins, losses")
+    .eq("league_id", params.id)
+    .order("wins", { ascending: false });
 
-  const { data: franchises, error: franchiseError } = await riseOs
-    .from('franchises')
-    .select('id, name, abbreviation, logo_url, wins, losses')
-    .eq('league_id', params.id)
+  if (standingsError) {
+    return NextResponse.json({ error: standingsError.message }, { status: 500 });
+  }
 
-  if (franchiseError) return NextResponse.json({ error: franchiseError.message }, { status: 500 })
+  const franchiseMap: Record<string, FranchiseLite> = Object.fromEntries(
+    ((standings ?? []) as FranchiseLite[]).map((f) => [f.id, f])
+  );
 
-  const franchiseMap = Object.fromEntries((franchises ?? []).map((f) => [f.id, f]))
-  const enriched = (games ?? []).map((g) => ({
+  const enrichedGames = ((games ?? []) as GameRow[]).map((g) => ({
     ...g,
     home_franchise: franchiseMap[g.home_franchise_id] ?? null,
     away_franchise: franchiseMap[g.away_franchise_id] ?? null,
-  }))
+  }));
 
-  const standings = (franchises ?? [])
-    .map((f) => ({ id: f.id, name: f.name, abbreviation: f.abbreviation, logo_url: f.logo_url, wins: f.wins, losses: f.losses }))
-    .sort((a, b) => (b.wins ?? 0) - (a.wins ?? 0) || (a.losses ?? 0) - (b.losses ?? 0))
-
-  return NextResponse.json(
-    { games: enriched, standings },
-    { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache' } }
-  )
+  return NextResponse.json({ games: enrichedGames, standings: standings ?? [] });
 }
 
-// POST — bulk insert games for a league (admin/commissioner/steward tier only)
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  const access = await requireUploadAccess(params.id)
-  if ('error' in access) return access.error
+// ─── PUT ────────────────────────────────────────────────────────────────────
+// Body: { game_id, home_score, away_score }
+//
+// Permission tiers:
+//   - rise_os.league_admins (commissioner / co_commissioner / admin) can
+//     edit any game in the league.
+//   - rise_os.league_members with role in
+//     [coach, co_commissioner, admin, commissioner] and status 'active' can
+//     also edit — but if their role is 'coach', they're restricted to games
+//     involving their own franchise (via rise_os.coaches.current_franchise_id).
+//
+// On save, reverses any previously-counted result for the two franchises
+// (if this game was already played) and applies the new result's
+// wins/losses. Ties are not counted toward either side's record.
 
-  const body = await req.json()
-  const { rows } = body
+export async function PUT(req: NextRequest, { params }: { params: { id: string } }) {
+  const supabase = await createClient();
+  const { data: authData } = await supabase.auth.getUser();
+  const authUser = authData?.user;
 
-  if (!Array.isArray(rows) || rows.length === 0) {
-    return NextResponse.json({ error: 'rows[] required' }, { status: 400 })
+  if (!authUser) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  const riseOs = getRiseOs()
+  const admin = createAdminClient();
 
-  const inserts = rows.map((r: any) => ({
-    league_id: params.id,
-    season_id: r.season_id,
-    week: r.week,
-    home_franchise_id: r.home_franchise_id,
-    away_franchise_id: r.away_franchise_id,
-    home_score: r.home_score ?? null,
-    away_score: r.away_score ?? null,
-    played_at: r.played_at ?? null,
-  }))
+  const { data: profile } = await admin
+    .from("users")
+    .select("id")
+    .eq("auth_user_id", authUser.id)
+    .maybeSingle();
 
-  const { data, error } = await riseOs.from('games').insert(inserts).select()
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (!profile) {
+    return NextResponse.json({ error: "No matching user profile" }, { status: 403 });
+  }
 
-  const { error: recomputeError } = await riseOs.rpc('recompute_franchise_records', {
-    p_league_id: params.id,
-  })
+  const { data: adminRow } = await admin
+    .schema("rise_os")
+    .from("league_admins")
+    .select("role")
+    .eq("league_id", params.id)
+    .eq("user_id", profile.id)
+    .maybeSingle();
 
-  if (recomputeError) {
+  let canEdit = !!adminRow;
+  let coachFranchiseId: string | null = null;
+
+  if (!canEdit) {
+    const { data: memberRow } = await admin
+      .schema("rise_os")
+      .from("league_members")
+      .select("role, status")
+      .eq("league_id", params.id)
+      .eq("user_id", profile.id)
+      .eq("status", "active")
+      .maybeSingle();
+
+    const eligibleRole =
+      !!memberRow && ["coach", "co_commissioner", "admin", "commissioner"].includes(memberRow.role);
+
+    if (eligibleRole && memberRow!.role === "coach") {
+      // Coaches are only permitted to edit games involving their own franchise.
+      const { data: coachRow } = await admin
+        .schema("rise_os")
+        .from("coaches")
+        .select("current_franchise_id")
+        .eq("league_id", params.id)
+        .eq("user_id", profile.id)
+        .maybeSingle();
+
+      coachFranchiseId = coachRow?.current_franchise_id ?? null;
+      canEdit = !!coachFranchiseId;
+    } else {
+      canEdit = eligibleRole;
+    }
+  }
+
+  if (!canEdit) {
     return NextResponse.json(
-      { games: data, warning: `Games saved, but standings recompute failed: ${recomputeError.message}` },
-      { status: 201 }
-    )
+      { error: "You don't have permission to edit games in this league." },
+      { status: 403 }
+    );
   }
 
-  return NextResponse.json({ games: data }, { status: 201 })
+  const body = await req.json();
+  const { game_id, home_score, away_score } = body;
+
+  if (!game_id || typeof game_id !== "string") {
+    return NextResponse.json({ error: "game_id is required" }, { status: 400 });
+  }
+  if (
+    home_score === undefined ||
+    away_score === undefined ||
+    typeof home_score !== "number" ||
+    typeof away_score !== "number"
+  ) {
+    return NextResponse.json(
+      { error: "home_score and away_score must be numbers" },
+      { status: 400 }
+    );
+  }
+
+  // Fetch the existing game row (and confirm it belongs to this league)
+  // so we can reverse its old result before applying the new one.
+  const { data: existingGame, error: fetchError } = await admin
+    .schema("rise_os")
+    .from("games")
+    .select("id, league_id, home_franchise_id, away_franchise_id, home_score, away_score, played_at")
+    .eq("id", game_id)
+    .eq("league_id", params.id)
+    .maybeSingle();
+
+  if (fetchError) {
+    return NextResponse.json({ error: fetchError.message }, { status: 500 });
+  }
+  if (!existingGame) {
+    return NextResponse.json({ error: "Game not found in this league" }, { status: 404 });
+  }
+
+  if (
+    coachFranchiseId &&
+    existingGame.home_franchise_id !== coachFranchiseId &&
+    existingGame.away_franchise_id !== coachFranchiseId
+  ) {
+    return NextResponse.json(
+      { error: "You can only edit games involving your own franchise." },
+      { status: 403 }
+    );
+  }
+
+  const now = new Date().toISOString();
+
+  const { data: updatedGame, error: updateError } = await admin
+    .schema("rise_os")
+    .from("games")
+    .update({
+      home_score,
+      away_score,
+      played_at: existingGame.played_at ?? now,
+      updated_at: now,
+    })
+    .eq("id", game_id)
+    .select()
+    .single();
+
+  if (updateError) {
+    return NextResponse.json({ error: updateError.message }, { status: 500 });
+  }
+
+  // Reverse the old result if this game had already been counted.
+  if (existingGame.played_at) {
+    await adjustFranchiseRecord(
+      admin,
+      existingGame.home_franchise_id,
+      existingGame.away_franchise_id,
+      existingGame.home_score,
+      existingGame.away_score,
+      -1
+    );
+  }
+
+  // Apply the new result.
+  await adjustFranchiseRecord(
+    admin,
+    existingGame.home_franchise_id,
+    existingGame.away_franchise_id,
+    home_score,
+    away_score,
+    1
+  );
+
+  return NextResponse.json(updatedGame);
 }
 
-// PUT — edit a single game's score
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: { id: string } }
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Adjusts wins/losses on the two franchises involved in a game by `delta`
+ * (+1 to apply a result, -1 to reverse a previously-applied one). Ties
+ * (home_score === away_score) don't move either side's record.
+ */
+async function adjustFranchiseRecord(
+  admin: ReturnType<typeof createAdminClient>,
+  homeFranchiseId: string,
+  awayFranchiseId: string,
+  homeScore: number,
+  awayScore: number,
+  delta: 1 | -1
 ) {
-  const access = await requireUploadAccess(params.id)
-  if ('error' in access) return access.error
+  if (homeScore === awayScore) return; // tie — no record change
 
-  const body = await req.json()
-  const { game_id, ...updates } = body
+  const winnerId = homeScore > awayScore ? homeFranchiseId : awayFranchiseId;
+  const loserId = homeScore > awayScore ? awayFranchiseId : homeFranchiseId;
 
-  if (!game_id) {
-    return NextResponse.json({ error: 'game_id required' }, { status: 400 })
-  }
+  const [{ data: winner }, { data: loser }] = await Promise.all([
+    admin.schema("rise_os").from("franchises").select("wins").eq("id", winnerId).maybeSingle(),
+    admin.schema("rise_os").from("franchises").select("losses").eq("id", loserId).maybeSingle(),
+  ]);
 
-  const allowed = ['home_score', 'away_score', 'played_at', 'week']
-  const patch = Object.fromEntries(Object.entries(updates).filter(([k]) => allowed.includes(k)))
-
-  const riseOs = getRiseOs()
-  const { data, error } = await riseOs
-    .from('games')
-    .update(patch)
-    .eq('id', game_id)
-    .eq('league_id', params.id)
-    .select()
-    .single()
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-  const { error: recomputeError } = await riseOs.rpc('recompute_franchise_records', {
-    p_league_id: params.id,
-  })
-
-  if (recomputeError) {
-    return NextResponse.json({ game: data, warning: `Game updated, but standings recompute failed: ${recomputeError.message}` })
-  }
-
-  return NextResponse.json({ game: data })
+  await Promise.all([
+    admin
+      .schema("rise_os")
+      .from("franchises")
+      .update({ wins: Math.max(0, (winner?.wins ?? 0) + delta) })
+      .eq("id", winnerId),
+    admin
+      .schema("rise_os")
+      .from("franchises")
+      .update({ losses: Math.max(0, (loser?.losses ?? 0) + delta) })
+      .eq("id", loserId),
+  ]);
 }
