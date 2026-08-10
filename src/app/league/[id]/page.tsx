@@ -217,6 +217,14 @@ export default function LeagueDetailPage() {
             onClick={() => router.push(`/pitboss/steward?league_id=${id}`)}
           />
         )}
+        {showPitboss && canSeeStewards && (
+          <NavCard
+            icon="🛠️"
+            label="Admin"
+            sub="Rulebook & certs"
+            onClick={() => router.push(`/pitboss/admin?league_id=${id}`)}
+          />
+        )}
       </div>
 
       {/* Info rows */}
