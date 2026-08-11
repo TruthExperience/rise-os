@@ -4,27 +4,27 @@ import { createClient } from "@/lib/supabase/server";
  * Resolves the current request's authenticated Supabase Auth user to the
  * corresponding public.users.id (UUID).
  *
- * This used to take a NextAuth `Session` and resolve via session.user.discordId.
- * Auth is now handled entirely by Supabase Auth (see src/app/login/page.tsx
- * and src/app/auth/callback/route.ts) — getServerSession(authOptions) has
- * had no session to read since that migration, since login only ever
- * writes a Supabase Auth session, not a NextAuth one.
+ * Uses getClaims() rather than getUser() — this matches middleware.ts,
+ * which verifies sessions the same way and is the one thing confirmed to
+ * work reliably. getUser() requires a live round-trip to the Auth server
+ * and was returning 401 even immediately after a fresh sign-in, while
+ * getClaims() verifies the token locally against the cached JWKS and
+ * doesn't have that dependency.
  */
 export async function getSupabaseUserId(): Promise<string | null> {
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { data, error } = await supabase.auth.getClaims();
+  const authUserId = data?.claims?.sub;
 
-  if (!user) return null;
+  if (error || !authUserId) return null;
 
-  const { data, error } = await supabase
+  const { data: profile, error: profileError } = await supabase
     .from("users")
     .select("id")
-    .eq("auth_user_id", user.id)
+    .eq("auth_user_id", authUserId)
     .maybeSingle();
 
-  if (error || !data) return null;
-  return data.id as string;
+  if (profileError || !profile) return null;
+  return profile.id as string;
 }
