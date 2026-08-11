@@ -1,12 +1,8 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { getSupabaseUserId } from "@/lib/getSupabaseUserId";
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
-
   const { data: leagues, error } = await supabaseServer
     .schema("rise_os")
     .from("leagues")
@@ -19,7 +15,7 @@ export async function GET() {
   }
 
   let memberships: string[] = [];
-  const userId = await getSupabaseUserId(session);
+  const userId = await getSupabaseUserId();
   if (userId) {
     const { data: rows } = await supabaseServer
       .schema("rise_os")
