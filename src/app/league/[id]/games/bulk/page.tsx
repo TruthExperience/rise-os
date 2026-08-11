@@ -10,6 +10,11 @@ interface Franchise {
   abbreviation: string;
 }
 
+interface WeekLabel {
+  week: number;
+  label: string;
+}
+
 interface Row {
   week: string;
   home: string;
@@ -24,6 +29,7 @@ export default function BulkGamesPage() {
   const { id } = useParams<{ id: string }>();
 
   const [franchises, setFranchises] = useState<Franchise[]>([]);
+  const [weekLabels, setWeekLabels] = useState<WeekLabel[]>([]);
   const [rows, setRows] = useState<Row[]>([
     { week: "", home: "", away: "", homeScore: "", awayScore: "" },
   ]);
@@ -35,7 +41,10 @@ export default function BulkGamesPage() {
   useState(() => {
     fetch(`/api/league/${id}/games`)
       .then((r) => r.json())
-      .then((data) => setFranchises(data.standings ?? []))
+      .then((data) => {
+        setFranchises(data.standings ?? []);
+        setWeekLabels(data.weekLabels ?? []);
+      })
       .catch(() => {})
       .finally(() => setLoadingFranchises(false));
   });
@@ -63,9 +72,23 @@ export default function BulkGamesPage() {
     setError(null);
     setSuccess(null);
 
-    const validRows = rows.filter((r) => r.week && r.home && r.away);
+    const validRows = rows.filter(
+      (r) => r.week !== "" && r.home !== "" && r.away !== ""
+    );
+
     if (validRows.length === 0) {
-      setError("Add at least one row with week, home, and away teams.");
+      setError("Add at least one row with week, home, and away teams selected.");
+      return;
+    }
+    if (validRows.length < rows.length) {
+      setError(
+        `${rows.length - validRows.length} row(s) are missing a week, home team, or away team — fix or remove them before saving.`
+      );
+      return;
+    }
+    const sameTeamRow = validRows.find((r) => r.home === r.away);
+    if (sameTeamRow) {
+      setError("Home and away team can't be the same franchise on any row.");
       return;
     }
 
@@ -161,13 +184,18 @@ export default function BulkGamesPage() {
               )}
             </div>
 
-            <input
-              type="number"
-              placeholder="Week"
+            <select
               value={row.week}
               onChange={(e) => updateRow(i, "week", e.target.value)}
-              className="w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-white placeholder-white/20 text-sm focus:outline-none focus:border-rise-red"
-            />
+              className="w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-white text-sm focus:outline-none focus:border-rise-red"
+            >
+              <option value="" className="bg-[#1A1A1A]">Week</option>
+              {weekLabels.map((w) => (
+                <option key={w.week} value={w.week} className="bg-[#1A1A1A]">
+                  {w.label}
+                </option>
+              ))}
+            </select>
 
             <div className="grid grid-cols-2 gap-2">
               <select
