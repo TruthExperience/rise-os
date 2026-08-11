@@ -1,22 +1,28 @@
-import { Session } from "next-auth";
-import { supabaseServer } from "./supabaseServer";
+import { createClient } from "@/lib/supabase/server";
 
 /**
- * session.user.id is NOT the public.users.id UUID — with the JWT strategy
- * and no database adapter, NextAuth sets token.sub (and thus session.user.id)
- * from the Discord OAuth profile id, i.e. it's the Discord snowflake ID.
- * The actual Supabase UUID has to be looked up via discord_id.
+ * Resolves the current request's authenticated Supabase Auth user to the
+ * corresponding public.users.id (UUID).
+ *
+ * This used to take a NextAuth `Session` and resolve via session.user.discordId.
+ * Auth is now handled entirely by Supabase Auth (see src/app/login/page.tsx
+ * and src/app/auth/callback/route.ts) — getServerSession(authOptions) has
+ * had no session to read since that migration, since login only ever
+ * writes a Supabase Auth session, not a NextAuth one.
  */
-export async function getSupabaseUserId(
-  session: Session | null
-): Promise<string | null> {
-  const discordId = (session?.user as any)?.discordId as string | undefined;
-  if (!discordId) return null;
+export async function getSupabaseUserId(): Promise<string | null> {
+  const supabase = await createClient();
 
-  const { data, error } = await supabaseServer
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) return null;
+
+  const { data, error } = await supabase
     .from("users")
     .select("id")
-    .eq("discord_id", discordId)
+    .eq("auth_user_id", user.id)
     .maybeSingle();
 
   if (error || !data) return null;
