@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth"; // adjust import path as needed
 import { supabaseServer } from "@/lib/supabaseServer";
 import { getSupabaseUserId } from "@/lib/getSupabaseUserId";
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  const userId = await getSupabaseUserId(session);
+  const userId = await getSupabaseUserId();
 
   if (!userId) {
     return NextResponse.json({ error: "Not signed in" }, { status: 401 });
