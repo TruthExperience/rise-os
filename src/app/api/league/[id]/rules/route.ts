@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
 import { createClient } from '@supabase/supabase-js'
+import { getSupabaseUserId } from '@/lib/getSupabaseUserId'
 
 export const dynamic = 'force-dynamic'
 
-const UPLOAD_ROLES = ['commissioner', 'co_owner', 'admin', 'head_steward']
+// rise_os equivalent of the old UPLOAD_ROLES tier — commissioner-level
+// access only. Coaches are intentionally excluded: rulebook uploads are
+// a league-governance action, not a per-team one.
+const UPLOAD_ROLES = ['commissioner', 'co_commissioner', 'admin']
 
 // Next.js caches individual fetch() calls (Data Cache) independently of the
 // route's `dynamic` config. supabase-js uses fetch() under the hood and
@@ -28,6 +30,17 @@ function getPitboss() {
   )
 }
 
+function getRiseOs() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    {
+      db: { schema: 'rise_os' },
+      global: { fetch: noStoreFetch },
+    }
+  )
+}
+
 function getStorage() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -36,6 +49,43 @@ function getStorage() {
       global: { fetch: noStoreFetch },
     }
   )
+}
+
+async function requireUploadAccess(leagueId: string) {
+  const userId = await getSupabaseUserId()
+  if (!userId) {
+    return { error: NextResponse.json({ error: 'Unauthenticated' }, { status: 401 }) }
+  }
+
+  const riseOs = getRiseOs()
+
+  const { data: adminRow } = await riseOs
+    .from('league_admins')
+    .select('role')
+    .eq('league_id', leagueId)
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (adminRow) return { userId }
+
+  const { data: memberRow } = await riseOs
+    .from('league_members')
+    .select('role, status')
+    .eq('league_id', leagueId)
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .maybeSingle()
+
+  if (memberRow && UPLOAD_ROLES.includes(memberRow.role)) {
+    return { userId }
+  }
+
+  return {
+    error: NextResponse.json(
+      { error: 'Insufficient permissions to upload documents' },
+      { status: 403 }
+    ),
+  }
 }
 
 export async function GET(
@@ -69,46 +119,11 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const session = await getServerSession(authOptions)
-  if (!session?.user?.discordId) {
-    return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
-  }
+  const access = await requireUploadAccess(params.id)
+  if ('error' in access) return access.error
+  const { userId } = access
 
   const pitboss = getPitboss()
-  const publicClient = getStorage()
-
-  const { data: driver } = await pitboss
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', session.user.discordId)
-    .single()
-
-  if (!driver) {
-    return NextResponse.json({ error: 'Driver not found' }, { status: 403 })
-  }
-
-  const { data: userRecord } = await publicClient
-    .from('users')
-    .select('id')
-    .eq('discord_id', session.user.discordId)
-    .single()
-
-  const { data: membership } = await pitboss
-    .from('driver_leagues')
-    .select('role')
-    .eq('driver_id', driver.id)
-    .eq('league_id', params.id)
-    .single()
-
-  if (!membership) {
-    return NextResponse.json({ error: 'Not a member of this league' }, { status: 403 })
-  }
-
-  const roles = membership.role.split(',').map((r: string) => r.trim().toLowerCase())
-  const hasAccess = roles.some((r: string) => UPLOAD_ROLES.includes(r))
-  if (!hasAccess) {
-    return NextResponse.json({ error: 'Insufficient permissions to upload documents' }, { status: 403 })
-  }
 
   const formData = await req.formData()
   const file = formData.get('file') as File | null
@@ -164,7 +179,7 @@ export async function PUT(
       document_size_bytes:  file.size,
       document_mime_type:   file.type,
       document_uploaded_at: new Date().toISOString(),
-      document_uploaded_by: userRecord?.id ?? null,
+      document_uploaded_by: userId,
     })
     .eq('id', ruleBookId)
     .eq('league_id', params.id)
