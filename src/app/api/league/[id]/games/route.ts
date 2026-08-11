@@ -23,10 +23,21 @@ interface GameRow {
   played_at: string | null;
 }
 
+interface BulkGameInput {
+  season_id: string | null;
+  week: number;
+  home_franchise_id: string;
+  away_franchise_id: string;
+  home_score: number | null;
+  away_score: number | null;
+}
+
 // ─── GET ────────────────────────────────────────────────────────────────────
-// Returns { games, standings } for the league. Franchise objects are
-// enriched onto each game (same pattern as /api/franchises/[leagueId]),
-// since rise_os.games only stores the FK ids, not nested rows.
+// Returns { games, standings, weekLabels } for the league. Franchise objects
+// are enriched onto each game (same pattern as /api/franchises/[leagueId]),
+// since rise_os.games only stores the FK ids, not nested rows. weekLabels
+// drives the week picker on the frontend (e.g. week 15 -> "Conference
+// Championship") instead of raw integers — editable via rise_os.week_labels.
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
   const admin = createAdminClient();
@@ -55,6 +66,16 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: standingsError.message }, { status: 500 });
   }
 
+  const { data: weekLabels, error: weekLabelsError } = await admin
+    .schema("rise_os")
+    .from("week_labels")
+    .select("week, label")
+    .order("week", { ascending: true });
+
+  if (weekLabelsError) {
+    return NextResponse.json({ error: weekLabelsError.message }, { status: 500 });
+  }
+
   const franchiseMap: Record<string, FranchiseLite> = Object.fromEntries(
     ((standings ?? []) as FranchiseLite[]).map((f) => [f.id, f])
   );
@@ -65,7 +86,146 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     away_franchise: franchiseMap[g.away_franchise_id] ?? null,
   }));
 
-  return NextResponse.json({ games: enrichedGames, standings: standings ?? [] });
+  return NextResponse.json({
+    games: enrichedGames,
+    standings: standings ?? [],
+    weekLabels: weekLabels ?? [],
+  });
+}
+
+// ─── POST ───────────────────────────────────────────────────────────────────
+// Body: { rows: BulkGameInput[] }
+//
+// Bulk-inserts games for this league (used by the Bulk Add Games page).
+// Same permission tiers as PUT below. For any row that already has both
+// scores filled in, marks it played (played_at = now) and immediately
+// applies the win/loss result to both franchises via adjustFranchiseRecord —
+// mirroring what PUT does for a single edited game. Rows with one or both
+// scores left null are inserted as scheduled-but-unplayed games and don't
+// touch any franchise record.
+
+export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+  const supabase = await createClient();
+  const { data: authData } = await supabase.auth.getUser();
+  const authUser = authData?.user;
+
+  if (!authUser) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  const admin = createAdminClient();
+
+  const { data: profile } = await admin
+    .from("users")
+    .select("id")
+    .eq("auth_user_id", authUser.id)
+    .maybeSingle();
+
+  if (!profile) {
+    return NextResponse.json({ error: "No matching user profile" }, { status: 403 });
+  }
+
+  const { data: adminRow } = await admin
+    .schema("rise_os")
+    .from("league_admins")
+    .select("role")
+    .eq("league_id", params.id)
+    .eq("user_id", profile.id)
+    .maybeSingle();
+
+  let canEdit = !!adminRow;
+
+  if (!canEdit) {
+    const { data: memberRow } = await admin
+      .schema("rise_os")
+      .from("league_members")
+      .select("role, status")
+      .eq("league_id", params.id)
+      .eq("user_id", profile.id)
+      .eq("status", "active")
+      .maybeSingle();
+
+    canEdit =
+      !!memberRow && ["coach", "co_commissioner", "admin", "commissioner"].includes(memberRow.role);
+  }
+
+  if (!canEdit) {
+    return NextResponse.json(
+      { error: "You don't have permission to add games in this league." },
+      { status: 403 }
+    );
+  }
+
+  const body = await req.json();
+  const rows: BulkGameInput[] = Array.isArray(body?.rows) ? body.rows : [];
+
+  if (rows.length === 0) {
+    return NextResponse.json({ error: "rows is required and must be a non-empty array" }, { status: 400 });
+  }
+
+  for (const r of rows) {
+    if (
+      typeof r.week !== "number" ||
+      typeof r.home_franchise_id !== "string" ||
+      typeof r.away_franchise_id !== "string" ||
+      !r.home_franchise_id ||
+      !r.away_franchise_id
+    ) {
+      return NextResponse.json(
+        { error: "Each row requires week, home_franchise_id, and away_franchise_id" },
+        { status: 400 }
+      );
+    }
+    if (r.home_franchise_id === r.away_franchise_id) {
+      return NextResponse.json(
+        { error: `Home and away team can't be the same franchise (week ${r.week})` },
+        { status: 400 }
+      );
+    }
+  }
+
+  const now = new Date().toISOString();
+
+  const toInsert = rows.map((r) => {
+    const isPlayed = r.home_score !== null && r.away_score !== null;
+    return {
+      league_id: params.id,
+      season_id: r.season_id,
+      week: r.week,
+      home_franchise_id: r.home_franchise_id,
+      away_franchise_id: r.away_franchise_id,
+      home_score: r.home_score,
+      away_score: r.away_score,
+      played_at: isPlayed ? now : null,
+    };
+  });
+
+  const { data: inserted, error: insertError } = await admin
+    .schema("rise_os")
+    .from("games")
+    .insert(toInsert)
+    .select();
+
+  if (insertError) {
+    return NextResponse.json({ error: insertError.message }, { status: 500 });
+  }
+
+  const playedGames = (inserted ?? []).filter(
+    (g) => g.home_score !== null && g.away_score !== null
+  );
+
+  for (const g of playedGames) {
+    await adjustFranchiseRecord(
+      admin,
+      g.home_franchise_id,
+      g.away_franchise_id,
+      g.home_score,
+      g.away_score,
+      1
+    );
+  }
+
+  return NextResponse.json({ games: inserted ?? [] }, { status: 201 });
 }
 
 // ─── PUT ────────────────────────────────────────────────────────────────────
@@ -129,7 +289,6 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
       !!memberRow && ["coach", "co_commissioner", "admin", "commissioner"].includes(memberRow.role);
 
     if (eligibleRole && memberRow!.role === "coach") {
-      // Coaches are only permitted to edit games involving their own franchise.
       const { data: coachRow } = await admin
         .schema("rise_os")
         .from("coaches")
@@ -170,8 +329,6 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
     );
   }
 
-  // Fetch the existing game row (and confirm it belongs to this league)
-  // so we can reverse its old result before applying the new one.
   const { data: existingGame, error: fetchError } = await admin
     .schema("rise_os")
     .from("games")
@@ -217,7 +374,6 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
 
-  // Reverse the old result if this game had already been counted.
   if (existingGame.played_at) {
     await adjustFranchiseRecord(
       admin,
@@ -229,7 +385,6 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
     );
   }
 
-  // Apply the new result.
   await adjustFranchiseRecord(
     admin,
     existingGame.home_franchise_id,
