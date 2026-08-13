@@ -24,6 +24,9 @@ async function requireSteward(ctx: {
   return null;
 }
 
+// Same pattern as steward.ts's getOrCreateDriverId — a driver row may
+// not exist yet if this is someone's first time touching any command
+// that needs one.
 async function getOrCreateDriverId(
   discordId: string,
   username?: string
@@ -58,7 +61,8 @@ async function getOrCreateDriverId(
 
 // Appeals happen after an incident's ticket channel may already be
 // closed or deleted, so lookup is by the displayed ticket label
-// (option input) rather than by channel context.
+// (option input) rather than by channel context like steward.ts's
+// findIncidentByChannel.
 //
 // Sequential ticket numbers take priority: "7" and "0007" both match
 // ticket_number = 7 numerically, so leading zeros in the input don't
@@ -93,6 +97,11 @@ async function findIncidentByShortId(leagueId: string, shortId: string) {
   );
 }
 
+// Merges the legacy flat evidence arrays on incidents with the newer
+// per-row incident_evidence table — per pitboss-platform notes, the
+// table supersedes the arrays going forward but the arrays are kept
+// for backward compatibility on older incidents, so both need to be
+// checked for a complete picture.
 async function gatherIncidentEvidence(
   incidentId: string,
   reporterEvidenceUrls: unknown,
@@ -148,6 +157,8 @@ registerCommand("appeal_file", async (ctx) => {
 
   const supabase = createAdminClient();
 
+  // Confirm the caller is actually a party to this incident — the
+  // reporter or the accused driver, same posture as /steward respond.
   const reporterDiscordId = (incident as any).drivers?.discord_id as
     | string
     | undefined;
@@ -172,6 +183,7 @@ registerCommand("appeal_file", async (ctx) => {
     };
   }
 
+  // One open appeal per incident at a time.
   const { data: existingAppeal } = await supabase
     .schema("pitboss")
     .from("incident_appeals")
@@ -251,7 +263,7 @@ registerCommand("appeal_file", async (ctx) => {
       categoryId: leagueConfig.discord_ticket_category_id,
       stewardRoleId: leagueConfig.discord_steward_role_id,
       appellantDiscordId: ctx.discordUserId,
-      shortId: ticketLabel,
+      ticketLabel,
       appealReason: reason,
       originalVerdict: incident.verdict,
       originalPenalty: incident.penalty,
@@ -271,6 +283,11 @@ registerCommand("appeal_file", async (ctx) => {
     }
   }
 
+  // Ping the steward role somewhere durable and discoverable, not just
+  // the new per-appeal ticket. Prefer the dedicated appeals channel if
+  // this league has one configured; fall back to the general incident
+  // channel for leagues that haven't set one up yet (e.g. TRL, WSC,
+  // AWC as of this writing).
   const appealsPointerChannel =
     leagueConfig?.discord_appeals_channel_id ?? leagueConfig?.discord_incident_channel_id;
 
@@ -320,9 +337,7 @@ registerCommand("appeal_status", async (ctx) => {
 
   const lines = data.map((a) => {
     const nested = (a as any).incidents;
-    const label = nested
-      ? getTicketLabel(nested)
-      : a.incident_id.slice(0, 8);
+    const label = nested ? getTicketLabel(nested) : a.incident_id.slice(0, 8);
     return `**${label}** — ${a.reason.slice(0, 80)}`;
   });
 
@@ -408,6 +423,10 @@ registerCommand("appeal_review", async (ctx) => {
     console.error("[appeal_review] incident update failed:", incidentUpdateError);
   }
 
+  // On overturn: retire the original penalty_ledger row(s) via the
+  // existing soft-delete pattern (removed_at/removed_by) rather than
+  // mutating history in place, then issue a fresh row for the revised
+  // points if any are owed.
   if (decision === "overturned" && incident.accused_driver_id) {
     const { data: existingLedgerRows } = await supabase
       .schema("pitboss")
@@ -441,6 +460,7 @@ registerCommand("appeal_review", async (ctx) => {
     }
   }
 
+  // Notify whichever party filed the appeal.
   const { data: appealRow } = await supabase
     .schema("pitboss")
     .from("incident_appeals")
@@ -466,10 +486,17 @@ registerCommand("appeal_review", async (ctx) => {
     await sendDirectMessage(appellantDiscordId, decisionLines.join("\n"));
   }
 
+  // Also post the outcome into the appeal ticket channel itself, if
+  // one was created — otherwise that channel never hears the result.
   if (appeal.ticket_channel_id) {
     await postTicketMessage(appeal.ticket_channel_id, decisionLines.join("\n"));
   }
 
+  // And post it into the league's dedicated appeals channel too, if
+  // configured — this is the one place a decision is guaranteed to be
+  // visible even after a per-appeal ticket channel gets deleted, and
+  // it's where /appeal_file's "filed" pointer already goes, so the
+  // full filed → decided history lives in one place.
   const { data: leagueConfig } = await supabase
     .schema("rise_os")
     .from("leagues")
