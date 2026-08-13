@@ -46,9 +46,12 @@ const MODELS = {
   ],
 
   // Video — genuine video_url support, not just image frames.
-  // NOTE: verify this model ID and free-tier availability against
-  // OpenRouter's live model list before relying on it — video support
+  // NOTE: verify these model IDs and free-tier availability against
+  // OpenRouter's live model list before relying on them — video support
   // moves fast and per-model, unlike the stable image-vision pool above.
+  // Kept intentionally short since few free models support video_url at
+  // all; /health flags this pool by name so a bad ID surfaces loudly
+  // instead of silently degrading every video pass to "unanalyzed".
   video: [
     'google/gemma-4-26b-a4b-it:free',
   ],
@@ -64,8 +67,9 @@ const MODELS = {
 
 };
 
-// Only used if ALL free models fail (not currently invoked below — kept for parity
-// with the original file; wire in a paid-fallback call here if/when needed).
+// Used when ALL free models in a pool fail. Requires the matching env key
+// to be set (ANTHROPIC_KEY / OPENAI_KEY) — entries without a configured
+// key are skipped rather than attempted and failing.
 const PAID_FALLBACK = [
   { model: 'anthropic/claude-sonnet-4-6', key: 'ANTHROPIC_KEY' },
   { model: 'openai/gpt-4o-mini',          key: 'OPENAI_KEY'    },
@@ -124,8 +128,10 @@ const LINK_RESOLUTION_TIMEOUT_MS = 4000;
 // as an unanalyzed link, same as before this change.
 
 class MetaTagCollector {
-  constructor() {
+  constructor(onComplete) {
     this.tags = {};
+    this.onComplete = onComplete;
+    this.done = false;
   }
   element(element) {
     const property = element.getAttribute('property');
@@ -133,6 +139,18 @@ class MetaTagCollector {
     const content = element.getAttribute('content');
     if (property && content) this.tags[property] = content;
     if (name && content) this.tags[name] = content;
+  }
+}
+
+// Bails out of the </head> boundary instead of draining the whole page —
+// OG tags always live in <head>, and YouTube's full HTML is large enough
+// that reading it in full can eat meaningfully into the 4s timeout.
+class HeadBoundary {
+  constructor(onHeadClose) {
+    this.onHeadClose = onHeadClose;
+  }
+  element(element) {
+    element.onEndTag(() => this.onHeadClose());
   }
 }
 
@@ -145,13 +163,27 @@ async function resolveEvidenceLink(pageUrl) {
       signal: controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PitBossBot/1.0)' },
     });
-    clearTimeout(timeout);
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      clearTimeout(timeout);
+      return null;
+    }
 
     const collector = new MetaTagCollector();
-    const rewritten = new HTMLRewriter().on('meta', collector).transform(res);
-    await rewritten.text(); // drain the body to actually fire the element() callbacks
+    let stopped = false;
+    const rewritten = new HTMLRewriter()
+      .on('meta', collector)
+      .on('head', new HeadBoundary(() => { stopped = true; controller.abort(); }))
+      .transform(res);
+
+    try {
+      await rewritten.text();
+    } catch {
+      // Expected once we abort at </head> — the tags were already collected.
+      if (!stopped) throw new Error('stream aborted unexpectedly');
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const tags = collector.tags;
     const videoUrl =
@@ -172,24 +204,76 @@ async function resolveEvidenceLink(pageUrl) {
 
 // ─── Mode → pool mapping ──────────────────────────────────────────────────────
 
+const VISION_CAPABLE = new Set(MODELS.vision);
+
+// When a request carries an image AND a non-general mode (reasoning/coding/
+// etc.), a hard switch to the plain vision pool throws away the mode's
+// quality ordering entirely. Instead, build a blended pool: models from the
+// target mode that are also vision-capable come first (best available
+// reasoning/coding + can read the image), then the rest of the vision pool
+// fills in as a fallback for coverage.
+function blendedVisionPool(basePool) {
+  const preferred = basePool.filter((m) => VISION_CAPABLE.has(m));
+  const rest = MODELS.vision.filter((m) => !preferred.includes(m));
+  const blended = [...preferred, ...rest];
+  return blended.length > 0 ? blended : MODELS.vision;
+}
+
 function poolForMode(mode, hasImage) {
-  if (hasImage) return MODELS.vision;
+  let basePool;
   switch (mode) {
     case 'reasoning':
     case 'steward':
-    case 'certgen':   return MODELS.reasoning;
-    case 'coding':    return MODELS.coding;
+    case 'certgen':   basePool = MODELS.reasoning; break;
+    case 'coding':    basePool = MODELS.coding; break;
     case 'fast':
-    case 'quick':     return MODELS.fast;
-    default:          return MODELS.general;
+    case 'quick':     basePool = MODELS.fast; break;
+    default:          basePool = MODELS.general;
   }
+  if (!hasImage) return basePool;
+  return blendedVisionPool(basePool);
 }
 
 // ─── Core inference with waterfall ───────────────────────────────────────────
 // Returns a plain object (not a Response) so callers can inspect/transform
 // the result before deciding how to respond.
 
-async function inferWithWaterfall(pool, body, openrouterKey) {
+async function callPaidFallback(body, env) {
+  for (const { model, key } of PAID_FALLBACK) {
+    const apiKey = env[key];
+    if (!apiKey) continue; // key not configured — skip rather than attempt+fail
+
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${env.OPENROUTER_API_KEY ?? apiKey}`,
+          'HTTP-Referer': 'https://rise-os.app',
+          'X-Title': 'PitBoss Internal LLM (paid fallback)',
+        },
+        body: JSON.stringify({ ...body, model }),
+      });
+
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      return {
+        response: data.choices[0].message.content,
+        model: data.model ?? model,
+        provider: 'openrouter:paid-fallback',
+        free: false,
+        usage: data.usage ?? null,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function inferWithWaterfall(pool, body, env) {
+  const openrouterKey = env.OPENROUTER_API_KEY ?? env;
   const errors = [];
 
   for (const model of pool) {
@@ -231,7 +315,14 @@ async function inferWithWaterfall(pool, body, openrouterKey) {
     }
   }
 
-  // All free failed — return error list for client to handle paid fallback
+  // All free failed — try paid fallback if env has keys configured, and
+  // env itself was passed (not just a bare key string, as some internal
+  // callers still do).
+  if (env && typeof env === 'object' && env.OPENROUTER_API_KEY) {
+    const paidResult = await callPaidFallback(body, env);
+    if (paidResult) return paidResult;
+  }
+
   return { error: 'all_free_models_failed', tried: errors };
 }
 
@@ -241,7 +332,7 @@ async function inferWithWaterfall(pool, body, openrouterKey) {
 // vision model in its lane and hands the reasoning model clean text
 // it can actually reason well over.
 
-async function describeEvidenceImages(imageUrls, incidentContext, openrouterKey) {
+async function describeEvidenceImages(imageUrls, incidentContext, env) {
   const system = `You are a factual image-description assistant for motorsport incident evidence.
 Describe ONLY what is visibly happening in the image(s) — car positions, contact, track position, timing/HUD overlays if visible, any visible damage.
 Do NOT render a verdict, cite rules, or speculate about intent. Stick to what's observable.
@@ -267,7 +358,7 @@ Describe what's visible in the attached image(s), in order.`;
       max_tokens: 700,
       temperature: 0.1,
     },
-    openrouterKey
+    env
   );
 
   if (data.error) return null; // caller falls back to text-only reasoning
@@ -285,7 +376,7 @@ Describe what's visible in the attached image(s), in order.`;
 // directly (Discord CDN attachments) or resolved from a webpage's
 // og:video tag by resolveEvidenceLink() above.
 
-async function describeEvidenceVideos(videoUrls, incidentContext, openrouterKey) {
+async function describeEvidenceVideos(videoUrls, incidentContext, env) {
   const system = `You are a factual video-description assistant for motorsport incident evidence.
 Describe ONLY what is visibly happening across the clip — car positions and movement, contact, track position, timing/HUD overlays if visible, any visible damage, and how the situation develops over the duration of the clip.
 Do NOT render a verdict, cite rules, or speculate about intent. Stick to what's observable.
@@ -311,7 +402,7 @@ Describe what happens in the attached video clip(s), in order, including how the
       max_tokens: 900,
       temperature: 0.1,
     },
-    openrouterKey
+    env
   );
 
   if (data.error) return null; // caller falls back to text-only reasoning
@@ -344,13 +435,49 @@ async function handleInfer(request, env) {
     temperature: body.temperature ?? 0.3,
   };
 
-  const data = await inferWithWaterfall(pool, inferBody, env.OPENROUTER_API_KEY);
+  const data = await inferWithWaterfall(pool, inferBody, env);
   if (data.error) return jsonResponse(data, 503);
   return jsonResponse(data);
 }
 
+function validateStewardBody(body) {
+  const errors = [];
+  const incident = body?.incident;
+
+  if (!incident || typeof incident !== 'object') {
+    return ['incident object is required'];
+  }
+  if (!incident.description || typeof incident.description !== 'string') {
+    errors.push('incident.description is required');
+  }
+  if (!incident.incident_type || typeof incident.incident_type !== 'string') {
+    errors.push('incident.incident_type is required');
+  }
+  for (const field of ['reporter_evidence', 'accused_evidence']) {
+    if (incident[field] !== undefined && !Array.isArray(incident[field])) {
+      errors.push(`incident.${field} must be an array if provided`);
+    }
+  }
+  if (body.regulations !== undefined && !Array.isArray(body.regulations)) {
+    errors.push('regulations must be an array if provided');
+  }
+  return errors;
+}
+
 async function handleSteward(request, env) {
-  const { incident, regulations = [], league = 'AWC' } = await request.json();
+  let parsed;
+  try {
+    parsed = await request.json();
+  } catch {
+    return jsonResponse({ error: 'invalid_json' }, 400);
+  }
+
+  const validationErrors = validateStewardBody(parsed);
+  if (validationErrors.length > 0) {
+    return jsonResponse({ error: 'invalid_request', details: validationErrors }, 400);
+  }
+
+  const { incident, regulations = [], league = 'AWC' } = parsed;
 
   const regsBlock = regulations.length > 0
     ? regulations.map((r) => `Article ${r.article_number} — ${r.title}:\n${r.body}`).join('\n\n')
@@ -372,9 +499,14 @@ async function handleSteward(request, env) {
   // Medal.tv/etc.). Try to resolve each to a real video file or, failing
   // that, a thumbnail image, via Open Graph tags. Capped and run
   // concurrently so a pile of links doesn't blow the time budget.
-  const linkEvidence = allEvidence
-    .filter((e) => !isLikelyImageUrl(e.url) && !isLikelyVideoFileUrl(e.url))
-    .slice(0, MAX_LINK_RESOLUTIONS);
+  // Total is tallied BEFORE the cap so evidence beyond the cap is still
+  // accounted for in the note sent to the reasoning model, rather than
+  // silently vanishing.
+  const allLinkEvidence = allEvidence.filter(
+    (e) => !isLikelyImageUrl(e.url) && !isLikelyVideoFileUrl(e.url)
+  );
+  const linkEvidence = allLinkEvidence.slice(0, MAX_LINK_RESOLUTIONS);
+  const skippedLinkCount = allLinkEvidence.length - linkEvidence.length;
 
   const resolved = await Promise.all(
     linkEvidence.map((e) => resolveEvidenceLink(e.url))
@@ -382,25 +514,22 @@ async function handleSteward(request, env) {
 
   const resolvedImageUrls = resolved.filter((r) => r?.type === 'image').map((r) => r.url);
   const resolvedVideoUrls = resolved.filter((r) => r?.type === 'video').map((r) => r.url);
-  const unresolvedLinkCount = resolved.filter((r) => r === null).length;
+  const unresolvedLinkCount = resolved.filter((r) => r === null).length + skippedLinkCount;
 
   const imageUrls = [...directImageUrls, ...resolvedImageUrls].slice(0, MAX_EVIDENCE_IMAGES);
   const videoUrls = [...directVideoUrls, ...resolvedVideoUrls].slice(0, MAX_EVIDENCE_VIDEOS);
 
   const incidentContext = `${incident.incident_type} incident, lap ${incident.lap ?? '?'}`;
 
-  // Passes 1a/1b — describe images and videos, if any. A failure in
-  // either just means that section is omitted from the verdict pass
-  // rather than failing the whole request.
-  let imageAnalysis = null;
-  if (imageUrls.length > 0) {
-    imageAnalysis = await describeEvidenceImages(imageUrls, incidentContext, env.OPENROUTER_API_KEY);
-  }
-
-  let videoAnalysis = null;
-  if (videoUrls.length > 0) {
-    videoAnalysis = await describeEvidenceVideos(videoUrls, incidentContext, env.OPENROUTER_API_KEY);
-  }
+  // Passes 1a/1b — run concurrently rather than sequentially. They hit
+  // different model pools (vision vs video) and don't depend on each
+  // other's output, so there's no reason to pay their latency twice. A
+  // failure in either just means that section is omitted from the
+  // verdict pass rather than failing the whole request.
+  const [imageAnalysis, videoAnalysis] = await Promise.all([
+    imageUrls.length > 0 ? describeEvidenceImages(imageUrls, incidentContext, env) : null,
+    videoUrls.length > 0 ? describeEvidenceVideos(videoUrls, incidentContext, env) : null,
+  ]);
 
   const system = `You are an impartial racing steward AI for ${league}.
 Return ONLY valid JSON — no markdown, no preamble.
@@ -445,7 +574,7 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
   }
 
   if (unresolvedLinkCount > 0) {
-    promptParts.push(`Note: ${unresolvedLinkCount} additional evidence link(s) could not be resolved to a video or image (page fetch failed, timed out, or had no video/thumbnail available) — only the URL itself was available.`);
+    promptParts.push(`Note: ${unresolvedLinkCount} additional evidence link(s) could not be resolved to a video or image (page fetch failed, timed out, had no video/thumbnail available, or exceeded the per-request resolution limit) — only the URL itself was available.`);
   }
 
   if (incident.ticket_transcript) {
@@ -469,7 +598,7 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
       max_tokens: 1500,
       temperature: 0.1,
     },
-    env.OPENROUTER_API_KEY
+    env
   );
 
   if (data.error) return jsonResponse(data, 503);
@@ -506,7 +635,14 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
 }
 
 async function handleSetupFeedback(request, env) {
-  const { feedback_text, known_param_keys = [], context = {}, league = 'AWC' } = await request.json();
+  let parsed;
+  try {
+    parsed = await request.json();
+  } catch {
+    return jsonResponse({ error: 'invalid_json' }, 400);
+  }
+
+  const { feedback_text, known_param_keys = [], context = {}, league = 'AWC' } = parsed;
 
   if (!feedback_text || known_param_keys.length === 0) {
     return jsonResponse({ error: 'feedback_text and known_param_keys are required' }, 400);
@@ -534,7 +670,7 @@ DRIVER FEEDBACK: "${feedback_text}"`;
       max_tokens: 1024,
       temperature: 0.2,
     },
-    env.OPENROUTER_API_KEY
+    env
   );
 
   if (data.error) return jsonResponse(data, 503);
@@ -543,10 +679,10 @@ DRIVER FEEDBACK: "${feedback_text}"`;
 
   try {
     const raw = data.response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    const parsed = JSON.parse(raw);
+    const parsedResponse = JSON.parse(raw);
 
     const validKeys = new Set(known_param_keys);
-    parsed.adjustments = (parsed.adjustments ?? []).filter((a) =>
+    parsedResponse.adjustments = (parsedResponse.adjustments ?? []).filter((a) =>
       a && typeof a.param_key === 'string' && validKeys.has(a.param_key) &&
       typeof a.delta === 'number' &&
       ['low', 'medium', 'high'].includes(a.confidence)
@@ -555,8 +691,8 @@ DRIVER FEEDBACK: "${feedback_text}"`;
     return jsonResponse({
       ...data,
       league,
-      adjustments: parsed.adjustments,
-      summary: parsed.summary ?? '',
+      adjustments: parsedResponse.adjustments,
+      summary: parsedResponse.summary ?? '',
       disclaimer,
     });
   } catch {
@@ -589,7 +725,13 @@ async function handleHealth(request, env) {
           max_tokens: 3,
         }),
       });
-      return { pool, model: models[0], status: res.ok ? 'ok' : res.status, latencyMs: Date.now() - start };
+      return {
+        pool,
+        model: models[0],
+        status: res.ok ? 'ok' : res.status,
+        latencyMs: Date.now() - start,
+        singleModelPool: models.length === 1, // flags e.g. `video` — no fallback if this ID is wrong
+      };
     })
   );
 
@@ -598,6 +740,7 @@ async function handleHealth(request, env) {
     source: 'pitboss-proxy',
     pools: probes.map((p) => (p.status === 'fulfilled' ? p.value : { error: String(p.reason) })),
     models: MODELS,
+    paid_fallback_configured: PAID_FALLBACK.map((p) => ({ model: p.model, key_present: Boolean(env[p.key]) })),
   });
 }
 
