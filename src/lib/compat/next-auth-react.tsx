@@ -27,8 +27,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const supabase = createClient();
     let mounted = true;
 
-    async function loadSession(authUser: any) {
-      if (!authUser) {
+    async function loadSession() {
+      const { data, error } = await supabase.auth.getClaims();
+      const claims = data?.claims;
+      const authUserId = claims?.sub;
+
+      if (error || !authUserId) {
         if (mounted) {
           setSession(null);
           setStatus("unauthenticated");
@@ -39,26 +43,26 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const { data: profile } = await supabase
         .from("users")
         .select("id, username, avatar, email")
-        .eq("auth_user_id", authUser.id)
+        .eq("auth_user_id", authUserId)
         .single();
 
       if (!mounted) return;
       setSession({
         user: {
-          id: profile?.id ?? authUser.id,
-          name: profile?.username ?? authUser.email,
-          username: profile?.username ?? authUser.email,
-          email: profile?.email ?? authUser.email,
+          id: profile?.id ?? authUserId,
+          name: profile?.username ?? claims?.email,
+          username: profile?.username ?? claims?.email,
+          email: profile?.email ?? claims?.email,
           image: profile?.avatar ?? null,
         },
       });
       setStatus("authenticated");
     }
 
-    supabase.auth.getUser().then(({ data }) => loadSession(data.user));
+    loadSession();
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, sessionData) => {
-      loadSession(sessionData?.user ?? null);
+    const { data: listener } = supabase.auth.onAuthStateChange(() => {
+      loadSession();
     });
 
     return () => {
