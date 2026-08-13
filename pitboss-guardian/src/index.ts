@@ -11,6 +11,11 @@
 // bot token gets one gateway session covering all its guilds, not one
 // session per guild. Per-guild state (config, raid/nuke scoring windows) is
 // kept in Maps keyed by guild_id inside that one instance.
+//
+// PATCH (review pass): stewards are now whitelisted alongside admins, so
+// they don't get auto-banned for doing their job during a real incident.
+// Delete-spam nukes now trigger the same guild-wide lockdown as raids,
+// instead of only reverting role-permission changes.
 
 var src_default = {
   async fetch(req, env) {
@@ -206,24 +211,32 @@ var GuildGuardian = class {
 
     const ownerDiscordId = guild.owner_id;
 
-    // Whitelist: owner + anyone holding a role with ADMINISTRATOR.
-    const adminRoleIds = new Set(
-      roles.filter((r) => (BigInt(r.permissions) & DANGEROUS_PERMISSIONS.ADMINISTRATOR) !== 0n).map((r) => r.id)
-    );
-    const whitelistedActorIds = new Set([ownerDiscordId]);
-    for (const member of members) {
-      if (member.roles?.some((rid) => adminRoleIds.has(rid))) {
-        whitelistedActorIds.add(member.user.id);
-      }
-    }
-
     // Steward role: first name-pattern match, preferring earlier patterns.
+    // (Moved above the whitelist derivation below, since stewards are now
+    // whitelisted too — this is used for both.)
     let stewardRoleId = null;
     for (const pattern of STEWARD_ROLE_NAME_PATTERNS) {
       const match = roles.find((r) => pattern.test(r.name) && r.name !== "@everyone");
       if (match) {
         stewardRoleId = match.id;
         break;
+      }
+    }
+
+    // Whitelist: owner + anyone holding a role with ADMINISTRATOR + anyone
+    // holding the steward role. Stewards routinely ban/kick raiders and
+    // revoke invites as part of normal moderation — without this, an
+    // actively-defending steward can trip nuke detection on themselves
+    // (e.g. NUKE_BAN_KICK_THRESHOLD) and get auto-banned mid-incident.
+    const adminRoleIds = new Set(
+      roles.filter((r) => (BigInt(r.permissions) & DANGEROUS_PERMISSIONS.ADMINISTRATOR) !== 0n).map((r) => r.id)
+    );
+    const whitelistedActorIds = new Set([ownerDiscordId]);
+    for (const member of members) {
+      const hasAdminRole = member.roles?.some((rid) => adminRoleIds.has(rid));
+      const hasStewardRole = stewardRoleId && member.roles?.includes(stewardRoleId);
+      if (hasAdminRole || hasStewardRole) {
+        whitelistedActorIds.add(member.user.id);
       }
     }
 
@@ -310,7 +323,13 @@ var GuildGuardian = class {
     if (!guildId) {
       return Response.json({ ok: false, error: "guildId is required in the request body." }, { status: 400 });
     }
+    return this.lockdownGuild(guildId, { reason: body.reason ?? null, triggeredBy: body.triggeredBy ?? null });
+  }
 
+  // Shared lockdown implementation used by both the manual /lockdown route
+  // and the automated delete-spam nuke response below. Returns a
+  // Response so the manual route can pass results straight through.
+  async lockdownGuild(guildId, meta = {}) {
     const lockdownKey = `manual_lockdown_state:${guildId}`;
     const existing = await this.state.storage.get(lockdownKey);
     if (existing?.active) {
@@ -371,8 +390,8 @@ var GuildGuardian = class {
 
     await this.state.storage.put(lockdownKey, {
       active: true,
-      reason: body.reason ?? null,
-      triggeredBy: body.triggeredBy ?? null,
+      reason: meta.reason ?? null,
+      triggeredBy: meta.triggeredBy ?? null,
       startedAt: Date.now(),
       channelBackups
     });
@@ -685,12 +704,12 @@ var GuildGuardian = class {
       const createCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.CHANNEL_CREATE || e.actionType === AUDIT_ACTION.ROLE_CREATE).length;
       const roleGrantCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.MEMBER_ROLE_UPDATE).length;
 
-      const fire = async (reason, score) => {
-        await this.respondToThreat(guildId, "nuke", { reason, score, actorIds: [actorId], detail: { entries: pruned } });
+      const fire = async (reason, score, isDeleteSpam = false) => {
+        await this.respondToThreat(guildId, "nuke", { reason, score, actorIds: [actorId], detail: { entries: pruned }, isDeleteSpam });
         guildActorMap.delete(actorId);
       };
 
-      if (deleteCount >= NUKE_DELETE_THRESHOLD) await fire(`${deleteCount} channel/role deletions by one actor in ${NUKE_WINDOW_MS / 1000}s`, deleteCount);
+      if (deleteCount >= NUKE_DELETE_THRESHOLD) await fire(`${deleteCount} channel/role deletions by one actor in ${NUKE_WINDOW_MS / 1000}s`, deleteCount, true);
       else if (banKickCount >= NUKE_BAN_KICK_THRESHOLD) await fire(`${banKickCount} bans/kicks by one actor in ${NUKE_WINDOW_MS / 1000}s`, banKickCount);
       else if (createCount >= NUKE_CREATE_THRESHOLD) await fire(`${createCount} channel/role creations by one actor in ${NUKE_WINDOW_MS / 1000}s (spam)`, createCount);
       else if (roleGrantCount >= NUKE_ROLE_GRANT_THRESHOLD) await fire(`${roleGrantCount} role grants to members by one actor in ${NUKE_WINDOW_MS / 1000}s`, roleGrantCount);
@@ -769,7 +788,13 @@ var GuildGuardian = class {
 
   async autoLockdown(guildId, type, ctx) {
     const token = this.env.DISCORD_BOT_TOKEN?.trim();
-    if (type === "raid") {
+
+    // Raids, and now delete-spam nukes, get the full guild-wide lockdown:
+    // verification bump + invite revocation + channel send/invite lock.
+    // Delete-spam is the most damaging nuke pattern and has no undo for
+    // already-deleted channels/roles, so the priority is stopping any
+    // other compromised session from doing more damage.
+    if (type === "raid" || ctx.isDeleteSpam) {
       await fetch(`https://discord.com/api/v10/guilds/${guildId}`, {
         method: "PATCH",
         headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
@@ -784,7 +809,13 @@ var GuildGuardian = class {
           invites.map((inv) => fetch(`https://discord.com/api/v10/invites/${inv.code}`, { method: "DELETE", headers: { Authorization: `Bot ${token}` } }))
         );
       }
-    } else {
+      await this.lockdownGuild(guildId, {
+        reason: `auto-lockdown: ${type}${ctx.isDeleteSpam ? " (delete-spam)" : ""} — ${ctx.reason}`,
+        triggeredBy: "pitboss-guardian:auto"
+      }).catch((err) => console.error("[guardian] auto channel lockdown failed:", err));
+    }
+
+    if (type === "nuke") {
       const entries = ctx.detail?.entries ?? [ctx.detail?.entry];
       for (const entry of entries) {
         if (entry?.action_type === AUDIT_ACTION.ROLE_UPDATE && entry.target_id) {
@@ -805,11 +836,12 @@ var GuildGuardian = class {
     const config = this.guildConfigs.get(guildId);
     const emoji = type === "raid" ? "🚨" : "💣";
     const rolePrefix = config?.stewardRoleId ? `<@&${config.stewardRoleId}> ` : "";
+    const lockdownApplied = type === "raid" || ctx.isDeleteSpam;
     const lines = [
       `${emoji} ${rolePrefix}**${type.toUpperCase()} DETECTED**`,
       ctx.reason,
       ctx.actorIds.length > 0 ? `Accounts banned: ${ctx.actorIds.map((id) => `<@${id}>`).join(", ")}` : null,
-      `Auto-lockdown applied. Full detail logged.`
+      lockdownApplied ? `Auto-lockdown applied. Full detail logged.` : `Full detail logged.`
     ].filter(Boolean);
 
     if (!config?.alertsChannelId) {
@@ -878,7 +910,7 @@ var GuildGuardian = class {
         trigger_reason: ctx.reason,
         actor_discord_id: ctx.actorIds[0] ?? null,
         score: ctx.score ?? null,
-        action_taken: "ban+lockdown+alert",
+        action_taken: (type === "raid" || ctx.isDeleteSpam) ? "ban+lockdown+alert" : "ban+alert",
         detail: { actorIds: ctx.actorIds, ...ctx.detail }
       })
     });
