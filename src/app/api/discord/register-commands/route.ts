@@ -168,6 +168,32 @@ export async function GET() {
             },
           ],
         },
+        {
+          type: 1,
+          name: "adduser",
+          description: "Add a user to this incident ticket channel (run inside the ticket)",
+          options: [
+            {
+              type: 6, // USER
+              name: "user",
+              description: "User to add to the ticket",
+              required: true,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "removeuser",
+          description: "Remove a user from this incident ticket channel (run inside the ticket)",
+          options: [
+            {
+              type: 6, // USER
+              name: "user",
+              description: "User to remove from the ticket",
+              required: true,
+            },
+          ],
+        },
       ],
     },
     {
