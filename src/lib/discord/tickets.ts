@@ -1,3 +1,4 @@
+// tickets.ts
 const VIEW_CHANNEL = 1 << 10; // 1024
 const SEND_MESSAGES = 1 << 11; // 2048
 const READ_MESSAGE_HISTORY = 1 << 16; // 65536
@@ -8,7 +9,7 @@ interface CreateIncidentTicketArgs {
   stewardRoleId: string;
   reporterDiscordId: string;
   accusedDiscordId?: string | null;
-  shortId: string;
+  ticketLabel: string;
   incidentType: string;
   description: string;
   lap?: number | null;
@@ -75,7 +76,7 @@ export async function createIncidentTicket(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        name: `incident-${args.shortId}`,
+        name: `incident-${args.ticketLabel}`,
         type: 0, // GUILD_TEXT
         parent_id: args.categoryId,
         permission_overwrites: permissionOverwrites,
@@ -95,7 +96,7 @@ export async function createIncidentTicket(
   const channel = await channelRes.json();
 
   const lines = [
-    `**Incident ${args.shortId}** — ${args.incidentType}`,
+    `**Incident ${args.ticketLabel}** — ${args.incidentType}`,
     `Reported by <@${args.reporterDiscordId}>${
       args.accusedDiscordId ? ` against <@${args.accusedDiscordId}>` : ""
     }`,
@@ -144,7 +145,7 @@ interface CreateAppealTicketArgs {
   categoryId: string;
   stewardRoleId: string;
   appellantDiscordId: string;
-  shortId: string; // short ID of the incident being appealed
+  ticketLabel: string; // ticket label of the incident being appealed
   appealReason: string;
   originalVerdict?: string | null;
   originalPenalty?: string | null;
@@ -201,7 +202,7 @@ export async function createAppealTicket(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        name: `appeal-${args.shortId}`,
+        name: `appeal-${args.ticketLabel}`,
         type: 0, // GUILD_TEXT
         parent_id: args.categoryId,
         permission_overwrites: permissionOverwrites,
@@ -221,7 +222,7 @@ export async function createAppealTicket(
   const channel = await channelRes.json();
 
   const headerLines = [
-    `**Appeal — Incident ${args.shortId}**`,
+    `**Appeal — Incident ${args.ticketLabel}**`,
     `Filed by <@${args.appellantDiscordId}>`,
     `\n${args.appealReason}`,
     `\nOriginal verdict: ${args.originalVerdict ?? "—"}`,
