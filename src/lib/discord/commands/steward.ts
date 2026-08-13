@@ -170,7 +170,7 @@ registerCommand("steward_report", async (ctx) => {
       stewardRoleId: leagueConfig.discord_steward_role_id,
       reporterDiscordId: ctx.discordUserId,
       accusedDiscordId: accusedDiscordId ?? null,
-      shortId: ticketLabel,
+      ticketLabel: ticketLabel,
       incidentType,
       description,
       lap,
