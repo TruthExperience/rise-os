@@ -12,10 +12,15 @@
 // session per guild. Per-guild state (config, raid/nuke scoring windows) is
 // kept in Maps keyed by guild_id inside that one instance.
 //
-// PATCH (review pass): stewards are now whitelisted alongside admins, so
-// they don't get auto-banned for doing their job during a real incident.
-// Delete-spam nukes now trigger the same guild-wide lockdown as raids,
-// instead of only reverting role-permission changes.
+// PATCH (review pass):
+//   1. Added missing GUILDS intent bit — without it, GUILD_CREATE payloads
+//      don't include populated roles/channels/members, so provisionGuild()
+//      never had real data to auto-provision from. This was silently
+//      breaking whitelist/steward-role/alerts-channel setup for every guild.
+//   2. Stewards are now whitelisted alongside admins, so they don't get
+//      auto-banned for doing their job during a real incident.
+//   3. Delete-spam nukes now trigger the same guild-wide lockdown as raids,
+//      instead of only reverting role-permission changes.
 
 var src_default = {
   async fetch(req, env) {
@@ -510,7 +515,12 @@ var GuildGuardian = class {
         op: 2,
         d: {
           token: this.env.DISCORD_BOT_TOKEN?.trim(),
-          intents: (1 << 1) | (1 << 2), // GUILD_MEMBERS, GUILD_MODERATION
+          // GUILDS is required for GUILD_CREATE to include populated roles/
+          // channels/members — without it, provisionGuild() never had real
+          // data to work with (no steward role, no alerts channel, no
+          // whitelist). This was the root cause of provisioning silently
+          // no-op'ing since intents were introduced.
+          intents: (1 << 0) | (1 << 1) | (1 << 2), // GUILDS, GUILD_MEMBERS, GUILD_MODERATION
           properties: { os: "cloudflare-workers", browser: "pitboss-guardian", device: "pitboss-guardian" }
         }
       })
