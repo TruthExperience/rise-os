@@ -1,6 +1,16 @@
-name = "pitboss-proxy"
-main = "src/index.ts"
-compatibility_date = "2024-01-01"
+ name = "pitboss-proxy"
+ main = "src/index.ts"
+ compatibility_date = "2024-01-01"
 
-[vars]
-# non-secret vars here if needed
+ [vars]
+ # non-secret vars here if needed
++
++[observability]
++enabled = true
++head_sampling_rate = 1
++
++[observability.logs]
++enabled = true
++head_sampling_rate = 1
++persist = true
++invocation_logs = true
