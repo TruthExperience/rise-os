@@ -33,18 +33,35 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'incident required' }, { status: 400 });
       }
 
+      // The incident always carries its own league_id (set at creation
+      // time in pitboss.incidents). This is the source of truth for
+      // scoping regulations — `league` above is just a display label
+      // passed through to the LLM prompt, not a filter key.
+      const leagueId: string | undefined = incident.league_id ?? payload.league_id;
+
       let regulations: RuleArticle[] = [];
 
       if (fetch_regulations && incident.incident_type) {
-        const { data } = await supabase
-          .schema('pitboss')
-          .from('rule_articles')
-          .select('article_number, title, body, category, league_id, rule_book_id')
-          .eq('active', true)
-          .or('category.eq.sporting,category.eq.penalties,category.eq.governance')
-          .limit(10);
+        if (!leagueId) {
+          console.error(
+            '[pitboss/llm] steward action called without incident.league_id — regulations cannot be safely scoped, skipping fetch'
+          );
+        } else {
+          const { data, error } = await supabase
+            .schema('pitboss')
+            .from('rule_articles')
+            .select('article_number, title, body, category, league_id, rule_book_id')
+            .eq('active', true)
+            .eq('league_id', leagueId)
+            .or('category.eq.sporting,category.eq.penalties,category.eq.governance')
+            .limit(10);
 
-        if (data) regulations = data as RuleArticle[];
+          if (error) {
+            console.error('[pitboss/llm] rule_articles fetch failed:', error.message);
+          } else if (data) {
+            regulations = data as RuleArticle[];
+          }
+        }
       }
 
       const result = await pbSteward(incident, regulations, league);
@@ -52,20 +69,30 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'reg_qa') {
-      const { question, league = 'AWC' } = payload;
+      const { question, league = 'AWC', league_id } = payload;
 
       if (!question) {
         return NextResponse.json({ error: 'question required' }, { status: 400 });
       }
 
-      const { data: articles } = await supabase
+      let articlesQuery = supabase
         .schema('pitboss')
         .from('rule_articles')
         .select('article_number, title, body, category')
         .eq('active', true)
         .limit(30);
 
-      const regsContext = articles
+      if (league_id) {
+        articlesQuery = articlesQuery.eq('league_id', league_id);
+      } else {
+        console.error(
+          '[pitboss/llm] reg_qa action called without league_id — falling back to unscoped regulations'
+        );
+      }
+
+      const { data: articles } = await articlesQuery;
+
+      const regsContext = articles && articles.length > 0
         ? articles.map((a) => `[${a.article_number}] ${a.title}: ${a.body}`).join('\n\n')
         : 'No regulations available.';
 
