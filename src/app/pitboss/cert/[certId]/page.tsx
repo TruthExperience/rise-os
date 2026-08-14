@@ -37,8 +37,9 @@ export default function CertExamPage() {
 
   // Load session from sessionStorage (set by /pitboss/cert on start).
   // If it's missing or corrupted — app backgrounded, tab closed, page
-  // reopened later — fall back to rebuilding it from the server using
-  // the certification's persisted question_ids.
+  // reopened later, or a WebView (e.g. in-app browsers) isolating/clearing
+  // storage between navigations — fall back to rebuilding it from the
+  // server using the certification's persisted question_ids.
   useEffect(() => {
     if (!certId) {
       setError('No certification ID provided.')
@@ -62,26 +63,39 @@ export default function CertExamPage() {
       }
     }
 
-    fetch(`/api/pitboss/cert/start?certification_id=${certId}`)
-      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
-      .then(({ ok, data }) => {
-        if (!ok) {
-          setError(data.error ?? 'No active session found — please restart the exam.')
+    // The session cookie can occasionally not be fully readable server-side
+    // on the very first request right after a page load (webview/mobile
+    // session bridge timing) — the same race /pitboss/cert's start flow
+    // already guards against. Retry once before surfacing an error, rather
+    // than dead-ending the driver on a false "Unauthorized".
+    const loadFromServer = (retried = false) => {
+      fetch(`/api/pitboss/cert/start?certification_id=${certId}`)
+        .then((res) => res.json().then((data) => ({ ok: res.ok, status: res.status, data })))
+        .then(({ ok, status, data }) => {
+          if (!ok) {
+            if (status === 401 && !retried) {
+              setTimeout(() => loadFromServer(true), 400)
+              return
+            }
+            setError(data.error ?? 'No active session found — please restart the exam.')
+            setLoading(false)
+            return
+          }
+          sessionStorage.setItem(`cert:${certId}`, JSON.stringify(data))
+          setSession(data)
+          const elapsed = Math.floor(
+            (Date.now() - new Date(data.started_at).getTime()) / 1000
+          )
+          setSecondsLeft(Math.max(0, TIME_LIMIT_SECONDS - elapsed))
           setLoading(false)
-          return
-        }
-        sessionStorage.setItem(`cert:${certId}`, JSON.stringify(data))
-        setSession(data)
-        const elapsed = Math.floor(
-          (Date.now() - new Date(data.started_at).getTime()) / 1000
-        )
-        setSecondsLeft(Math.max(0, TIME_LIMIT_SECONDS - elapsed))
-        setLoading(false)
-      })
-      .catch(() => {
-        setError('Network error — could not load exam session.')
-        setLoading(false)
-      })
+        })
+        .catch(() => {
+          setError('Network error — could not load exam session.')
+          setLoading(false)
+        })
+    }
+
+    loadFromServer()
   }, [certId])
 
   // Countdown timer
