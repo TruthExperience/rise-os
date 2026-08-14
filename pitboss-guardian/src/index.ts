@@ -21,6 +21,14 @@
 //      auto-banned for doing their job during a real incident.
 //   3. Delete-spam nukes now trigger the same guild-wide lockdown as raids,
 //      instead of only reverting role-permission changes.
+//
+// PATCH (2026-08-14): every Supabase REST call below was missing the
+// Accept-Profile / Content-Profile header needed to target the pitboss
+// schema (guardian_guild_config, security_events, guardian_banned_ids all
+// live in pitboss, not public — PostgREST defaults to public without an
+// explicit profile header even though pitboss is in the exposed-schemas
+// list). This was causing config load, config persistence, security event
+// logging, and banned-ID recording to silently 404 in production.
 
 var src_default = {
   async fetch(req, env) {
@@ -183,7 +191,8 @@ var GuildGuardian = class {
       const res = await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_guild_config?select=*`, {
         headers: {
           apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`
+          Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
+          "Accept-Profile": "pitboss"
         }
       });
       if (res.ok) {
@@ -298,6 +307,7 @@ var GuildGuardian = class {
         apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
         Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
         "Content-Type": "application/json",
+        "Content-Profile": "pitboss",
         Prefer: "resolution=merge-duplicates,return=minimal"
       },
       body: JSON.stringify({
@@ -912,6 +922,7 @@ var GuildGuardian = class {
         apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
         Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
         "Content-Type": "application/json",
+        "Content-Profile": "pitboss",
         Prefer: "return=minimal"
       },
       body: JSON.stringify({
@@ -933,6 +944,7 @@ var GuildGuardian = class {
         apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
         Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
         "Content-Type": "application/json",
+        "Content-Profile": "pitboss",
         Prefer: "return=minimal"
       },
       body: JSON.stringify({ discord_id: discordId, guild_id: guildId, trigger_type: triggerType, reason })
