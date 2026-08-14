@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 
 const CERT_WINDOW_MS = 60 * 60 * 1000
 const LOCKOUT_HOURS  = 24
@@ -9,13 +8,9 @@ const LOCKOUT_HOURS  = 24
 export async function POST(req: NextRequest) {
   const supabase = createAdminClient()
 
-  const session = await getServerSession(authOptions)
-  if (!session?.user) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-  const discordId = (session.user as any).discordId as string
-  if (!discordId) {
-    return NextResponse.json({ error: 'Discord ID missing from session' }, { status: 401 })
   }
 
   let body: { certification_id: string; answers: Record<string, string> }
@@ -31,21 +26,6 @@ export async function POST(req: NextRequest) {
       { error: 'certification_id and answers are required' },
       { status: 400 }
     )
-  }
-
-  const { data: driver, error: driverError } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .maybeSingle()
-
-  if (driverError) {
-    console.error('[cert/submit] driver lookup', driverError)
-    return NextResponse.json({ error: driverError.message }, { status: 500 })
-  }
-  if (!driver) {
-    return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
   }
 
   const { data: cert, error: certError } = await supabase
