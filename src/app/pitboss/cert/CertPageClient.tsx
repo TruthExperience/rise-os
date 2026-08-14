@@ -23,6 +23,20 @@ interface RoleRequirement {
   certification_id?: string | null
 }
 
+interface CertStatusEntry {
+  role_code: string
+  status: string
+  certification_id: string
+  score: number | null
+  pass_mark: number
+  started_at: string | null
+  completed_at: string | null
+  locked_until: string | null
+  attempt_number: number
+  token: string | null
+  licence: any
+}
+
 export default function CertPageClient() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -80,17 +94,33 @@ export default function CertPageClient() {
       const statusData = await statusRes.json()
 
       if (!reqRes.ok) throw new Error(reqData.error ?? 'Failed to load roles')
+      // cert/status returning non-ok (e.g. a stale-session 401) used to be
+      // silently ignored, since only reqRes.ok was checked. Every role
+      // would then quietly fall back to "eligible" even for a passed or
+      // in-progress cert, only surfacing as an error once the user tapped
+      // Begin and hit cert/start's own checks. Surface it here instead.
+      if (!statusRes.ok) throw new Error(statusData.error ?? 'Failed to load certification status')
 
       const requirements: RoleRequirement[] = reqData.requirements ?? []
 
-      // Merge cert status into each role
-      const enriched = requirements.map((role) => ({
-        ...role,
-        status:           statusData.status ?? 'eligible',
-        attempt_number:   statusData.attempt_number ?? 0,
-        locked_until:     statusData.locked_until ?? null,
-        certification_id: statusData.certification_id ?? null,
-      }))
+      // cert/status returns { statuses: CertStatusEntry[] }, one entry per
+      // role_code the driver has ever attempted — not a single flat status
+      // object. Match each requirement to its entry by role_code; roles
+      // with no entry at all (never attempted) default to "eligible".
+      const statusByRole = new Map<string, CertStatusEntry>(
+        (statusData.statuses ?? []).map((s: CertStatusEntry) => [s.role_code, s])
+      )
+
+      const enriched = requirements.map((role) => {
+        const s = statusByRole.get(role.role_code)
+        return {
+          ...role,
+          status:           s?.status ?? 'eligible',
+          attempt_number:   s?.attempt_number ?? 0,
+          locked_until:     s?.locked_until ?? null,
+          certification_id: s?.certification_id ?? null,
+        }
+      })
 
       setRoles(enriched)
     } catch (e: any) {
@@ -100,7 +130,7 @@ export default function CertPageClient() {
     }
   }
 
-  async function handleStart(leagueId: string, roleCode: string) {
+  async function handleStart(leagueId: string, roleCode: string, retried = false) {
     setStarting(roleCode)
     setError(null)
     try {
@@ -112,6 +142,17 @@ export default function CertPageClient() {
       const data = await res.json()
 
       if (!res.ok) {
+        // The session cookie can occasionally not be fully readable
+        // server-side on the very first request right after the page
+        // loads (webview/mobile session bridge timing), producing a
+        // one-off 401 that a moment later succeeds. Retry once before
+        // surfacing an error, rather than making the user manually
+        // reload and tap Begin again.
+        if (res.status === 401 && !retried) {
+          setStarting(null)
+          await new Promise((r) => setTimeout(r, 400))
+          return handleStart(leagueId, roleCode, true)
+        }
         if (res.status === 409 && data.certification_id) {
           router.push(`/pitboss/cert/${data.certification_id}`)
           return
