@@ -705,14 +705,21 @@ registerCommand("steward_analyse", async (ctx) => {
         ? `\n_${ai.image_analysis.image_count} evidence image(s) reviewed._`
         : null;
 
-      const totalEvidenceCount = reporterEvidence.length + accusedEvidence.length;
-      const videoCount = [...reporterEvidence, ...accusedEvidence].filter(
+            const totalEvidenceCount = reporterEvidence.length + accusedEvidence.length;
+      // pitboss-proxy now runs a real video-description pass (direct video
+      // files, or webpage links resolved via og:video) and reports it back
+      // as ai.video_analysis, exactly parallel to ai.image_analysis. This
+      // used to unconditionally claim videos were never analyzed --
+      // reflect what actually happened on this specific request instead.
+      const nonImageCount = [...reporterEvidence, ...accusedEvidence].filter(
         (e) => !/\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(e.url.split("?")[0])
       ).length;
-      const videoNote =
-        videoCount > 0
-          ? `\n_${videoCount} video/link evidence item(s) noted but not visually analyzed — only still images go through AI vision review right now._`
+      const videoNote = ai.video_analysis
+        ? `\n_${ai.video_analysis.video_count} evidence video(s) reviewed._`
+        : nonImageCount > 0
+          ? `\n_${nonImageCount} video/link evidence item(s) noted but not visually analyzed (link may have expired, failed to load, or had no playable video/thumbnail available)._`
           : null;
+
 
       const lines = [
         `**AI Steward Analysis**`,
