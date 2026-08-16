@@ -29,6 +29,28 @@
 // explicit profile header even though pitboss is in the exposed-schemas
 // list). This was causing config load, config persistence, security event
 // logging, and banned-ID recording to silently 404 in production.
+//
+// PATCH (2026-08-16): guild config was loaded from Supabase exactly once
+// per Durable Object lifetime, guarded by a one-shot `configsLoaded`
+// boolean that never got reset. Since this DO holds a single long-lived
+// Gateway connection (by design — can run for days), any edit made
+// directly to pitboss.guardian_guild_config (e.g. adding someone to
+// whitelisted_actor_ids) was invisible to the running instance until it
+// happened to restart. Concretely: a whitelisted actor could still get
+// auto-banned for bot_add/nuke triggers minutes after being whitelisted,
+// because scoreAuditEntry() was checking a stale in-memory copy.
+// Fixed by:
+//   1. Replacing the one-shot flag with a TTL (`configsLoadedAt` +
+//      CONFIG_REFRESH_INTERVAL_MS) so config is periodically re-pulled
+//      from Supabase instead of cached forever.
+//   2. Calling ensureConfigsLoaded() at the top of scoreJoin() and
+//      scoreAuditEntry() too, not just in the HTTP fetch() handler — the
+//      cron's /start ping alone wasn't reaching the Gateway-event code
+//      path where staleness actually mattered.
+//   3. Adding a guarded /reload-config endpoint so whitelist edits can be
+//      pushed instantly instead of waiting out the TTL.
+
+var CONFIG_REFRESH_INTERVAL_MS = 30_000;
 
 var src_default = {
   async fetch(req, env) {
@@ -36,7 +58,7 @@ var src_default = {
     const id = env.GUARDIAN.idFromName("guardian-singleton");
     const stub = env.GUARDIAN.get(id);
 
-    const guardedPaths = ["/start", "/status", "/lockdown", "/endlockdown", "/guilds"];
+    const guardedPaths = ["/start", "/status", "/lockdown", "/endlockdown", "/guilds", "/reload-config"];
     if (guardedPaths.includes(url.pathname)) {
       const provided = req.headers.get("X-Guardian-Key")?.trim();
       if (provided !== env.DISCORD_BOT_TOKEN?.trim()) {
@@ -125,7 +147,11 @@ var GuildGuardian = class {
   // Per-guild config, loaded from Supabase at startup and refreshed on
   // every GUILD_CREATE. Map<guildId, GuildConfig>
   guildConfigs = new Map();
-  configsLoaded = false;
+  // Timestamp (ms) of the last successful config load. 0 means never
+  // loaded. Replaces the old one-shot `configsLoaded` boolean so config
+  // gets periodically refreshed instead of cached for the DO's entire
+  // lifetime — see PATCH note at top of file.
+  configsLoadedAt = 0;
 
   // Per-guild scoring windows. Short-lived by design — losing these on a
   // DO restart/eviction is an acceptable tradeoff vs. persisting a rolling
@@ -164,6 +190,7 @@ var GuildGuardian = class {
         sequence: this.sequence,
         guildsProvisioned: this.guildConfigs.size,
         consecutiveAuthFailures: this.consecutiveAuthFailures,
+        configLastLoadedAt: this.configsLoadedAt ? new Date(this.configsLoadedAt).toISOString() : null,
         tokenDiagnostic: {
           length: token.length,
           startsWithBotPrefix: token.startsWith("Bot "),
@@ -180,13 +207,29 @@ var GuildGuardian = class {
       return this.handleManualEndLockdown(req);
     }
 
+    // Manual cache-bust: call this right after editing
+    // pitboss.guardian_guild_config (e.g. adding someone to
+    // whitelisted_actor_ids) to make it take effect immediately instead
+    // of waiting up to CONFIG_REFRESH_INTERVAL_MS.
+    if (url.pathname === "/reload-config") {
+      await this.ensureConfigsLoaded(true);
+      return Response.json({ ok: true, guildsLoaded: this.guildConfigs.size, loadedAt: new Date(this.configsLoadedAt).toISOString() });
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
   // ─── Config loading / provisioning ──────────────────────────────────────
 
-  async ensureConfigsLoaded() {
-    if (this.configsLoaded) return;
+  // TTL-based instead of one-shot: reloads from Supabase if never loaded,
+  // forced, or the last load is older than CONFIG_REFRESH_INTERVAL_MS.
+  // Called both from the HTTP fetch() handler and from the Gateway event
+  // path (scoreJoin / scoreAuditEntry) so live moderation decisions never
+  // run against arbitrarily stale config.
+  async ensureConfigsLoaded(force = false) {
+    if (!force && this.configsLoadedAt && Date.now() - this.configsLoadedAt < CONFIG_REFRESH_INTERVAL_MS) {
+      return;
+    }
     try {
       const res = await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_guild_config?select=*`, {
         headers: {
@@ -206,13 +249,13 @@ var GuildGuardian = class {
             alertsChannelId: row.alerts_channel_id
           });
         }
+        this.configsLoadedAt = Date.now();
       } else {
         console.error("[guardian] failed to load guild configs:", res.status, await res.text());
       }
     } catch (err) {
       console.error("[guardian] error loading guild configs:", err);
     }
-    this.configsLoaded = true;
   }
 
   // Called on GUILD_CREATE. Idempotent — safe to re-run on every reconnect;
@@ -612,6 +655,10 @@ var GuildGuardian = class {
   // ─── Raid scoring (per guild) ───────────────────────────────────────────
 
   async scoreJoin(guildId, member) {
+    // Refresh config if stale before scoring — see PATCH note at top of
+    // file. Cheap no-op most of the time (TTL check short-circuits).
+    await this.ensureConfigsLoaded();
+
     const now = Date.now();
     const user = member.user;
     const createdAt = snowflakeToTimestamp(user.id);
@@ -656,6 +703,12 @@ var GuildGuardian = class {
   // ─── Nuke scoring (per guild) ───────────────────────────────────────────
 
   async scoreAuditEntry(guildId, entry) {
+    // Refresh config if stale before scoring — see PATCH note at top of
+    // file. This is the check that mattered for the whitelist bug: a
+    // freshly-whitelisted actor's bot_add would otherwise still get
+    // banned against the DO's stale in-memory config.
+    await this.ensureConfigsLoaded();
+
     const config = this.guildConfigs.get(guildId);
     if (!config) return;
 
