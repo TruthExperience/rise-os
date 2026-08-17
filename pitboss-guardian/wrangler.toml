@@ -14,6 +14,14 @@ new_sqlite_classes = ["GuildGuardian"]
 # calls always reach the same running Durable Object, rather than
 # needing to know an ID up front.
 
+# Version metadata binding — required so guardianDurableObjectId() can
+# derive a fresh DO id per deploy (env.CF_VERSION_METADATA.id). Without
+# this, CF_VERSION_METADATA is undefined and the id falls back to the
+# static "unversioned" string, meaning every deploy reuses the same DO
+# instance and the self-retirement/freshness mechanism never triggers.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 # Cron Trigger: self-healing kick to /start every 5 minutes.
 # Harmless no-op if the Gateway connection is already alive.
 [triggers]
