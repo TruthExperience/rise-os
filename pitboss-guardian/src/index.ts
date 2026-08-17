@@ -6,12 +6,11 @@
 // on every gateway reconnect for guilds already joined), and its config is
 // persisted to pitboss.guardian_guild_config so it survives DO restarts.
 //
-// One Durable Object instance ("guardian-singleton-v2") holds the single
-// Gateway connection for the whole bot — this is correct Discord
-// architecture: one bot token gets one gateway session covering all its
-// guilds, not one session per guild. Per-guild state (config, raid/nuke
-// scoring windows) is kept in Maps keyed by guild_id inside that one
-// instance.
+// A single Durable Object instance holds the one Gateway connection for the
+// whole bot — this is correct Discord architecture: one bot token gets one
+// gateway session covering all its guilds, not one session per guild.
+// Per-guild state (config, raid/nuke scoring windows) is kept in Maps keyed
+// by guild_id inside that one instance.
 //
 // PATCH (review pass):
 //   1. Added missing GUILDS intent bit — without it, GUILD_CREATE payloads
@@ -57,28 +56,57 @@
 // code into an already-running DO instance on redeploy; it only picks up
 // new code the next time that instance's isolate actually restarts, which
 // doesn't happen on any predictable timeline for a continuously-active
-// object like this one. Confirmed in production: Harry and FreshTok kept
-// getting auto-banned by scoreAuditEntry() well after both were added to
-// pitboss.guardian_guild_config.whitelisted_actor_ids and after this fixed
-// script was deployed — the running guardian-singleton instance was still
-// executing the pre-fix in-memory class, unaware the DB and the deployed
-// script had already changed underneath it.
-// Fixed by renaming the Durable Object id seed from "guardian-singleton"
-// to "guardian-singleton-v2". A new name has no existing instance to fall
-// back to, so Cloudflare must allocate a brand-new isolate the next time
-// it's addressed — guaranteed to run the code that's live at deploy time.
-// The orphaned old "guardian-singleton" instance is left holding a stale
-// Gateway session on the old bot token; rotate DISCORD_BOT_TOKEN in the
-// Discord Developer Portal and update the Cloudflare secret immediately
-// after this deploy so that orphan's session gets invalidated rather than
-// continuing to run indefinitely in the background.
+// object like this one. Confirmed in production: whitelisted actors kept
+// getting auto-banned by scoreAuditEntry() well after the whitelist and
+// the fixed script were both already correct — the running instance was
+// still executing the pre-fix in-memory class, unaware anything had
+// changed underneath it. One-time fix at the time: renamed the DO id seed
+// to force a fresh isolate, then rotated DISCORD_BOT_TOKEN to invalidate
+// the orphaned old instance's Gateway session.
+//
+// PATCH (2026-08-17): replaced the manual id-seed rename with a permanent
+// mechanism so this class of bug can't recur and doesn't require touching
+// the bot token on every deploy:
+//   1. The DO's id is now derived from env.CF_VERSION_METADATA.id (bound
+//      below), which changes on every deploy. Every push therefore gets
+//      an automatically fresh Durable Object instance running whatever
+//      code is live at that moment — no more manually bumping a suffix.
+//   2. That alone would just leave the *previous* instance orphaned and
+//      running forever instead of the crash-once bug from before, so each
+//      instance now self-retires: on every successful READY/RESUMED, it
+//      upserts its own version id into pitboss.guardian_active_version
+//      (single row, id='singleton'). A watchdog timer, running on the
+//      same cadence as the config TTL refresh, checks that row — if it
+//      ever finds a different version id there (meaning a newer instance
+//      has since become READY and overwritten it), this instance closes
+//      its own Gateway connection and does not reconnect. No external
+//      signal forces this; the old instance retires itself once it
+//      notices it's obsolete.
+//   Requires wrangler.jsonc / wrangler.toml to bind version metadata:
+//     { "version_metadata": { "binding": "CF_VERSION_METADATA" } }
+//   Trade-off: there's a short window (up to VERSION_WATCHDOG_INTERVAL_MS)
+//   after a deploy where both the old and new instance are connected to
+//   the Gateway on the same bot token, so a raid/nuke event landing in
+//   that window could theoretically be double-processed (duplicate ban
+//   attempts are harmless no-ops, duplicate alerts are the only visible
+//   side effect). Given the alternative — an orphan that can run for
+//   hours undetected — this is the right trade.
+//   The watchdog fails open: if the Supabase check itself fails (network
+//   blip, transient 5xx), the instance does NOT retire on that tick. Only
+//   an explicit, successfully-read mismatch triggers retirement.
 
 var CONFIG_REFRESH_INTERVAL_MS = 30_000;
+var VERSION_WATCHDOG_INTERVAL_MS = 30_000;
+
+function guardianDurableObjectId(env) {
+  const versionId = env.CF_VERSION_METADATA?.id ?? "unversioned";
+  return env.GUARDIAN.idFromName(`guardian-singleton-${versionId.slice(0, 8)}`);
+}
 
 var src_default = {
   async fetch(req, env) {
     const url = new URL(req.url);
-    const id = env.GUARDIAN.idFromName("guardian-singleton-v2");
+    const id = guardianDurableObjectId(env);
     const stub = env.GUARDIAN.get(id);
 
     const guardedPaths = ["/start", "/status", "/lockdown", "/endlockdown", "/guilds", "/reload-config"];
@@ -97,7 +125,7 @@ var src_default = {
   // Harmless no-op if already connected; recovers automatically if the
   // Gateway connection ever silently dies without a clean close.
   async scheduled(_event, env, ctx) {
-    const id = env.GUARDIAN.idFromName("guardian-singleton-v2");
+    const id = guardianDurableObjectId(env);
     const stub = env.GUARDIAN.get(id);
     ctx.waitUntil(
       stub.fetch("https://internal/start", {
@@ -161,11 +189,19 @@ var GuildGuardian = class {
   env;
   ws = null;
   heartbeatInterval = null;
+  versionWatchdogInterval = null;
   sequence = null;
   sessionId = null;
   resumeGatewayUrl = null;
   heartbeatAckReceived = true;
   consecutiveAuthFailures = 0;
+
+  // This instance's own deploy version, used for the self-retirement
+  // check below. Stable for the lifetime of this isolate.
+  myVersionId = null;
+  // Set true once this instance has voluntarily hung up because a newer
+  // instance has taken over — from that point on it must never reconnect.
+  retired = false;
 
   // Per-guild config, loaded from Supabase at startup and refreshed on
   // every GUILD_CREATE. Map<guildId, GuildConfig>
@@ -185,6 +221,7 @@ var GuildGuardian = class {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this.myVersionId = env.CF_VERSION_METADATA?.id ?? "unversioned";
   }
 
   async fetch(req) {
@@ -192,6 +229,9 @@ var GuildGuardian = class {
     const url = new URL(req.url);
 
     if (url.pathname === "/start") {
+      if (this.retired) {
+        return new Response("This instance has retired in favor of a newer deployment.", { status: 410 });
+      }
       if (!this.ws || this.ws.readyState !== WebSocket.READY_STATE_OPEN) {
         await this.connectGateway();
         return new Response("Gateway connection starting.", { status: 200 });
@@ -209,6 +249,8 @@ var GuildGuardian = class {
       const token = this.env.DISCORD_BOT_TOKEN ?? "";
       return Response.json({
         connected: this.ws?.readyState === WebSocket.READY_STATE_OPEN,
+        retired: this.retired,
+        myVersionId: this.myVersionId,
         sessionId: this.sessionId,
         sequence: this.sequence,
         guildsProvisioned: this.guildConfigs.size,
@@ -279,6 +321,92 @@ var GuildGuardian = class {
     } catch (err) {
       console.error("[guardian] error loading guild configs:", err);
     }
+  }
+
+  // ─── Version watchdog / self-retirement ─────────────────────────────────
+
+  // Called once this instance has a genuinely live Gateway session (READY
+  // or RESUMED) — claims the "active" row for this instance's version.
+  async announceActiveVersion() {
+    try {
+      const res = await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_active_version`, {
+        method: "POST",
+        headers: {
+          apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
+          "Content-Type": "application/json",
+          "Content-Profile": "pitboss",
+          Prefer: "resolution=merge-duplicates,return=minimal"
+        },
+        body: JSON.stringify({
+          id: "singleton",
+          version_id: this.myVersionId,
+          session_id: this.sessionId,
+          updated_at: new Date().toISOString()
+        })
+      });
+      if (!res.ok) {
+        console.error("[guardian] failed to announce active version:", res.status, await res.text());
+      }
+    } catch (err) {
+      console.error("[guardian] error announcing active version:", err);
+    }
+  }
+
+  startVersionWatchdog() {
+    if (this.versionWatchdogInterval) return;
+    this.versionWatchdogInterval = setInterval(() => {
+      this.checkForNewerVersion();
+    }, VERSION_WATCHDOG_INTERVAL_MS);
+  }
+
+  stopVersionWatchdog() {
+    if (this.versionWatchdogInterval) {
+      clearInterval(this.versionWatchdogInterval);
+      this.versionWatchdogInterval = null;
+    }
+  }
+
+  // Fails open on purpose: any error reading the row means "don't know",
+  // not "retire". Only a successful read showing a different version id
+  // triggers retirement.
+  async checkForNewerVersion() {
+    if (this.retired) return;
+    try {
+      const res = await fetch(
+        `${this.env.SUPABASE_URL}/rest/v1/guardian_active_version?id=eq.singleton&select=version_id`,
+        {
+          headers: {
+            apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
+            Authorization: `Bearer ${this.env.SUPABASE_SERVICE_ROLE_KEY}`,
+            "Accept-Profile": "pitboss"
+          }
+        }
+      );
+      if (!res.ok) return;
+      const rows = await res.json();
+      const activeVersionId = rows[0]?.version_id;
+      if (activeVersionId && activeVersionId !== this.myVersionId) {
+        console.log(
+          `[guardian] newer version active (${activeVersionId}, this instance is ${this.myVersionId}) — retiring`
+        );
+        await this.retire();
+      }
+    } catch (err) {
+      console.error("[guardian] version watchdog check failed:", err);
+    }
+  }
+
+  // Voluntary, self-initiated shutdown. Closes the Gateway connection and
+  // flips `retired` so handleClose() knows not to schedule a reconnect.
+  async retire() {
+    this.retired = true;
+    this.stopVersionWatchdog();
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    this.ws?.close(1000, "retiring — newer instance active");
   }
 
   // Called on GUILD_CREATE. Idempotent — safe to re-run on every reconnect;
@@ -536,6 +664,7 @@ var GuildGuardian = class {
   // ─── Gateway connection ──────────────────────────────────────────────────
 
   async connectGateway(resumeUrl) {
+    if (this.retired) return;
     const rawUrl = resumeUrl ?? "wss://gateway.discord.gg/?v=10&encoding=json";
     const gatewayUrl = rawUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
     const res = await fetch(gatewayUrl, { headers: { Upgrade: "websocket" } });
@@ -629,6 +758,13 @@ var GuildGuardian = class {
   async handleClose(event) {
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
     console.error("[guardian] Gateway closed:", event.code, event.reason);
+
+    // Self-retired instances must never reconnect — that's the whole
+    // point. Without this check, connectGateway()'s own retired guard
+    // would still stop it, but scheduleReconnect() would otherwise sit in
+    // a pointless sleep-then-no-op loop forever.
+    if (this.retired) return;
+
     const noResumeCodes = [4004, 4010, 4011, 4012, 4013, 4014];
     if (noResumeCodes.includes(event.code)) {
       this.sessionId = null;
@@ -646,7 +782,9 @@ var GuildGuardian = class {
   }
 
   async scheduleReconnect(delayMs) {
+    if (this.retired) return;
     await new Promise((r) => setTimeout(r, delayMs));
+    if (this.retired) return;
     await this.connectGateway(this.resumeGatewayUrl ?? undefined);
   }
 
@@ -658,10 +796,14 @@ var GuildGuardian = class {
         this.sessionId = data.session_id;
         this.resumeGatewayUrl = data.resume_gateway_url;
         this.consecutiveAuthFailures = 0;
-        console.log("[guardian] READY — session established");
+        console.log(`[guardian] READY — session established (version ${this.myVersionId})`);
+        await this.announceActiveVersion();
+        this.startVersionWatchdog();
         break;
       case "RESUMED":
         console.log("[guardian] Session resumed");
+        await this.announceActiveVersion();
+        this.startVersionWatchdog();
         break;
       case "GUILD_CREATE":
         await this.provisionGuild(data);
