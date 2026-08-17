@@ -6,11 +6,12 @@
 // on every gateway reconnect for guilds already joined), and its config is
 // persisted to pitboss.guardian_guild_config so it survives DO restarts.
 //
-// One Durable Object instance ("guardian-singleton") holds the single Gateway
-// connection for the whole bot — this is correct Discord architecture: one
-// bot token gets one gateway session covering all its guilds, not one
-// session per guild. Per-guild state (config, raid/nuke scoring windows) is
-// kept in Maps keyed by guild_id inside that one instance.
+// One Durable Object instance ("guardian-singleton-v2") holds the single
+// Gateway connection for the whole bot — this is correct Discord
+// architecture: one bot token gets one gateway session covering all its
+// guilds, not one session per guild. Per-guild state (config, raid/nuke
+// scoring windows) is kept in Maps keyed by guild_id inside that one
+// instance.
 //
 // PATCH (review pass):
 //   1. Added missing GUILDS intent bit — without it, GUILD_CREATE payloads
@@ -49,13 +50,35 @@
 //      path where staleness actually mattered.
 //   3. Adding a guarded /reload-config endpoint so whitelist edits can be
 //      pushed instantly instead of waiting out the TTL.
+//
+// PATCH (2026-08-16, later same day): the fixes above were correct but
+// never took effect in production, because this is a long-lived Durable
+// Object holding an open Gateway WebSocket — Cloudflare doesn't hot-swap
+// code into an already-running DO instance on redeploy; it only picks up
+// new code the next time that instance's isolate actually restarts, which
+// doesn't happen on any predictable timeline for a continuously-active
+// object like this one. Confirmed in production: Harry and FreshTok kept
+// getting auto-banned by scoreAuditEntry() well after both were added to
+// pitboss.guardian_guild_config.whitelisted_actor_ids and after this fixed
+// script was deployed — the running guardian-singleton instance was still
+// executing the pre-fix in-memory class, unaware the DB and the deployed
+// script had already changed underneath it.
+// Fixed by renaming the Durable Object id seed from "guardian-singleton"
+// to "guardian-singleton-v2". A new name has no existing instance to fall
+// back to, so Cloudflare must allocate a brand-new isolate the next time
+// it's addressed — guaranteed to run the code that's live at deploy time.
+// The orphaned old "guardian-singleton" instance is left holding a stale
+// Gateway session on the old bot token; rotate DISCORD_BOT_TOKEN in the
+// Discord Developer Portal and update the Cloudflare secret immediately
+// after this deploy so that orphan's session gets invalidated rather than
+// continuing to run indefinitely in the background.
 
 var CONFIG_REFRESH_INTERVAL_MS = 30_000;
 
 var src_default = {
   async fetch(req, env) {
     const url = new URL(req.url);
-    const id = env.GUARDIAN.idFromName("guardian-singleton");
+    const id = env.GUARDIAN.idFromName("guardian-singleton-v2");
     const stub = env.GUARDIAN.get(id);
 
     const guardedPaths = ["/start", "/status", "/lockdown", "/endlockdown", "/guilds", "/reload-config"];
@@ -74,7 +97,7 @@ var src_default = {
   // Harmless no-op if already connected; recovers automatically if the
   // Gateway connection ever silently dies without a clean close.
   async scheduled(_event, env, ctx) {
-    const id = env.GUARDIAN.idFromName("guardian-singleton");
+    const id = env.GUARDIAN.idFromName("guardian-singleton-v2");
     const stub = env.GUARDIAN.get(id);
     ctx.waitUntil(
       stub.fetch("https://internal/start", {
