@@ -55,7 +55,7 @@ export async function getSupabaseUserId(): Promise<string | null> {
  */
 export async function getAuthedDriver(): Promise<{
   id: string;
-  discordId: string;
+  discordId: string | null;
   superLicenceStatus: string;
 } | null> {
   const supabase = await createClient();
@@ -64,11 +64,11 @@ export async function getAuthedDriver(): Promise<{
   const authUserId = data?.claims?.sub;
   if (error || !authUserId) return null;
 
-  let userRow: { discord_id: string | null } | null = null;
+  let userRow: { id: string; discord_id: string | null } | null = null;
   {
     const { data: row, error: rowError } = await supabase
       .from("users")
-      .select("discord_id")
+      .select("id, discord_id")
       .eq("auth_user_id", authUserId)
       .maybeSingle();
     if (!rowError && row) userRow = row;
@@ -83,20 +83,29 @@ export async function getAuthedDriver(): Promise<{
     const admin = createAdminClient();
     const { data: row } = await admin
       .from("users")
-      .select("discord_id")
+      .select("id, discord_id")
       .eq("id", healedId)
       .maybeSingle();
     userRow = row ?? null;
   }
 
-  if (!userRow?.discord_id) return null;
+  if (!userRow) return null;
 
+  // pitboss.drivers can be linked by discord_id (the original, bot-driven
+  // registration path) or by user_id (drivers_user_id_fkey -> public.users.id,
+  // which is the only link available for accounts with no Discord — e.g.
+  // email/password signups). Match on whichever is present; discord_id is
+  // no longer NOT NULL here (see migration allow_null_discord_id_on_pitboss_drivers),
+  // so a driver row can legitimately have only one of the two set.
   const admin = createAdminClient();
+  const orFilters = [`user_id.eq.${userRow.id}`];
+  if (userRow.discord_id) orFilters.push(`discord_id.eq.${userRow.discord_id}`);
+
   const { data: driver, error: driverError } = await admin
     .schema("pitboss")
     .from("drivers")
     .select("id, discord_id, super_licence_status")
-    .eq("discord_id", userRow.discord_id)
+    .or(orFilters.join(","))
     .maybeSingle();
 
   if (driverError || !driver) return null;
