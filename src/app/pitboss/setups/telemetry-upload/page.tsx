@@ -5,7 +5,7 @@ import { useRef, useState } from "react";
 const CAR_CLASSES = [
   { value: "F1_2025", label: "F1 2025" },
   { value: "F1_2026", label: "F1 2026" },
-  { value: "F2_2024", label: "F2 2024" },
+  { value: "F2_2024_F125", label: "F2 2024" },
   { value: "F2_2025", label: "F2 2025" },
 ];
 
@@ -32,13 +32,20 @@ type Status = "idle" | "submitting" | "success" | "error";
 // F1 season (2025 vs 2026) has no confirmed discriminating field yet —
 // both real samples are F1 25, so this is left as the current selection
 // until an actual F1 2026 capture surfaces a real signal.
+//
+// FIXED — this used to return the bare string "F2_2024", which does not
+// exist in pitboss.car_classes (the real code is "F2_2024_F125" — only
+// the 2024 F2 class carries that suffix; "F2_2025" doesn't). Every
+// F2-2024 upload was silently guessing an unknown car_class_code and
+// failing server-side with "Unknown car_class_code: F2_2024". Fixed to
+// the real code; see matching fix in CAR_CLASSES above.
 function inferCarClassCode(lap: any, current: string): string {
   const tyreCompound: string = lap?.tyres?.tyreCompound ?? "";
   const teamName: string = lap?.team?.name ?? "";
 
   if (tyreCompound.toLowerCase().startsWith("f2")) {
     const yearMatch = teamName.match(/\b(20\d{2})\b/);
-    if (yearMatch?.[1] === "2024") return "F2_2024";
+    if (yearMatch?.[1] === "2024") return "F2_2024_F125";
     if (yearMatch?.[1] === "2025") return "F2_2025";
     // F2 confirmed but no season year found in team name — default to
     // the more recent F2 class rather than silently picking one anyway.
