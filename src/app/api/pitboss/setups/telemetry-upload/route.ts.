@@ -18,6 +18,20 @@
 //      trend analysis, braking-point comparison, etc.) so laps don't need
 //      to be re-uploaded once those land.
 //
+// Accepts the request body in any of these forms:
+//   - Raw JSON POST (Content-Type: application/json): the lap object
+//     itself as the top-level body — { lapNum, track, carSetup,
+//     telemetry: [...], ... }. This is the actual output of the capture
+//     tool.
+//   - JSON file upload (Content-Type: multipart/form-data): a .json file
+//     attached under any field name, containing the same raw lap shape.
+//     Whichever form field on the request is a File is read and parsed.
+//   - Wrapped JSON: { telemetry: <lap object>, car_class_code?, league_id? }
+//     — kept for any caller that already sends it this way, in either
+//     raw-body or file-upload form.
+// Raw vs. wrapped is distinguished by checking for a top-level `lapNum`,
+// which only exists on the raw lap shape.
+//
 // Track resolution is name-based (pitboss.f1_track_name_aliases), not by
 // the numeric F1 game trackId in the payload — see that table's comment
 // for why. Car class is NOT inferred from the payload's `game` field
@@ -89,42 +103,90 @@ function averageCorners(frames: any[], key: string): number[] {
   return sums.map((s) => s / frames.length);
 }
 
-interface TelemetryUploadBody {
+interface LapPayload {
+  team: { id: number; name: string; shortName: string };
+  appVersion: string;
+  lapNum: number;
+  sector1Time: number;
+  sector2Time: number;
+  sector3Time: number;
+  lapTime: number;
+  lapValid: boolean;
+  sessionType: string;
+  sessionUID: number | string;
+  timestamp: number;
+  game: string;
+  track: { id: number; name: string; lengthInMeters: number };
+  weather: { weather: number; trackTemperature: number; airTemperature: number };
+  tyres: { tyres: string; tyreCompound: string };
+  driver: { id: number; name: string; shortName: string };
+  carSetup: any;
+  telemetry: any[];
+}
+
+interface WrappedBody {
   league_id?: string | null;
   car_class_code?: string;
-  telemetry: {
-    team: { id: number; name: string; shortName: string };
-    appVersion: string;
-    lapNum: number;
-    sector1Time: number;
-    sector2Time: number;
-    sector3Time: number;
-    lapTime: number;
-    lapValid: boolean;
-    sessionType: string;
-    sessionUID: number | string;
-    timestamp: number;
-    game: string;
-    track: { id: number; name: string; lengthInMeters: number };
-    weather: { weather: number; trackTemperature: number; airTemperature: number };
-    tyres: { tyres: string; tyreCompound: string };
-    driver: { id: number; name: string; shortName: string };
-    carSetup: any;
-    telemetry: any[];
-  };
+  telemetry: LapPayload;
+}
+
+// Reads and JSON-parses the request body regardless of how it was sent:
+// a raw application/json POST, or a multipart/form-data upload with a
+// .json file attached under any field name (browser file input, curl -F,
+// etc. all vary in what they name the field, so the first File found on
+// the form is used rather than requiring a specific field name).
+async function extractJsonBody(req: NextRequest): Promise<any> {
+  const contentType = req.headers.get('content-type') || '';
+
+  if (contentType.includes('multipart/form-data')) {
+    const formData = await req.formData();
+    let file: File | null = null;
+    for (const value of formData.values()) {
+      if (value instanceof File) {
+        file = value;
+        break;
+      }
+    }
+    if (!file) {
+      throw new Error('No file found in the uploaded form data');
+    }
+    const text = await file.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`Uploaded file "${file.name}" is not valid JSON`);
+    }
+  }
+
+  // Default: raw JSON body (Content-Type: application/json, or no
+  // content-type header at all — some tools omit it for raw JSON POSTs).
+  return req.json();
 }
 
 export async function POST(req: NextRequest) {
   const supabaseAdmin = createAdminClient();
 
-  let body: TelemetryUploadBody;
+  let rawBody: any;
   try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    rawBody = await extractJsonBody(req);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Invalid request body' },
+      { status: 400 }
+    );
   }
 
-  const { league_id = null, car_class_code = DEFAULT_CAR_CLASS_CODE, telemetry: lap } = body;
+  // The capture tool posts/uploads the lap object directly at the top
+  // level (identified by a top-level lapNum, which only the raw lap shape
+  // has). Some callers may still send the wrapped { telemetry,
+  // car_class_code, league_id } shape — support both rather than forcing
+  // every caller to match one specific envelope.
+  const isRawShape = typeof rawBody?.lapNum === 'number';
+  const lap: LapPayload | undefined = isRawShape ? rawBody : (rawBody as WrappedBody)?.telemetry;
+  const league_id: string | null = isRawShape ? null : (rawBody as WrappedBody)?.league_id ?? null;
+  const car_class_code: string = isRawShape
+    ? DEFAULT_CAR_CLASS_CODE
+    : (rawBody as WrappedBody)?.car_class_code ?? DEFAULT_CAR_CLASS_CODE;
 
   if (!lap || !lap.carSetup || !lap.track || !lap.telemetry || !Array.isArray(lap.telemetry)) {
     return NextResponse.json(
