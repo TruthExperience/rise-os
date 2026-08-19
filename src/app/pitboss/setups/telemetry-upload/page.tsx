@@ -108,7 +108,7 @@ export default function TelemetryUploadPage() {
     }
 
     try {
-      const res = await fetch("/api/pitboss/setups/telemetry-upload", {
+      const res = await fetch("/api/pitboss/setups/telemetry-ingest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -157,7 +157,7 @@ export default function TelemetryUploadPage() {
       formData.append("car_class_code", inferred);
       if (leagueId.trim()) formData.append("league_id", leagueId.trim());
 
-      const res = await fetch("/api/pitboss/setups/telemetry-upload", {
+      const res = await fetch("/api/pitboss/setups/telemetry-ingest", {
         method: "POST",
         body: formData,
       });
