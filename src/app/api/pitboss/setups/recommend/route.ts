@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
-import { getAuthedDriver } from '@/lib/pitbossAuth';
+import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import {
   buildRecommendation,
   applyTeamAndDriverBias,
@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
   // passed it straight to a discord_id -> driver_id lookup with no session
   // check, letting any caller generate/persist a recommendation (and pull
   // in another driver's private style profile) under an arbitrary driver's
-  // identity. See getAuthedDriver in lib/pitbossAuth.ts.
+  // identity. See getAuthedDriver in lib/getSupabaseUserId.ts.
   const authedDriver = await getAuthedDriver();
 
   const supabaseAdmin = createAdminClient();
