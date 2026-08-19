@@ -1,34 +1,21 @@
-import { createClient } from "@supabase/supabase-js";
+import { getAuthedDriver } from "@/lib/getSupabaseUserId";
+import { createAdminClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { db: { schema: "pitboss" } }
-  );
-}
-
 export async function GET() {
-  const supabaseAdmin = getSupabaseAdmin();
-  const session = await getServerSession(authOptions);
-  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const discordId = (session.user as any).discordId;
-  const { data: driver } = await supabaseAdmin
-    .from("drivers")
-    .select("id")
-    .eq("discord_id", discordId)
-    .single();
-  if (!driver) return NextResponse.json({ leagues: [] });
+  const authedDriver = await getAuthedDriver();
+  if (!authedDriver) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const supabaseAdmin = createAdminClient().schema("pitboss");
+
   const { data, error } = await supabaseAdmin
     .from("driver_leagues")
     .select("league_id, role, league:league_id(name, sport, logo_url)")
-    .eq("driver_id", driver.id);
+    .eq("driver_id", authedDriver.id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
   // LeaguePickerPage.tsx expects { leagues: [...] } with each row shaped
   // flat as { league_id, name, sport, logo_url, role } — the join above
   // nests the league row under `league`, so we flatten it here.
@@ -43,20 +30,15 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const supabaseAdmin = getSupabaseAdmin();
-  const session = await getServerSession(authOptions);
-  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const discordId = (session.user as any).discordId;
+  const authedDriver = await getAuthedDriver();
+  if (!authedDriver) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const supabaseAdmin = createAdminClient().schema("pitboss");
   const { league_id } = await req.json();
-  const { data: driver } = await supabaseAdmin
-    .from("drivers")
-    .select("id")
-    .eq("discord_id", discordId)
-    .single();
-  if (!driver) return NextResponse.json({ error: "Driver not found" }, { status: 404 });
+
   const { data, error } = await supabaseAdmin
     .from("driver_leagues")
-    .insert({ driver_id: driver.id, league_id, role: "driver" })
+    .insert({ driver_id: authedDriver.id, league_id, role: "driver" })
     .select()
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
