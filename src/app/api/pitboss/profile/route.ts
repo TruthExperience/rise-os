@@ -1,17 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { createAdminClient } from '@/lib/supabase/server'
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions)
-  if (!session?.user) {
+  const authedDriver = await getAuthedDriver()
+  if (!authedDriver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const discordId = (session.user as any).discordId as string
-  if (!discordId) {
-    return NextResponse.json({ error: 'Discord ID missing from session' }, { status: 401 })
   }
 
   const supabase = createAdminClient()
@@ -20,7 +14,7 @@ export async function GET(req: NextRequest) {
     .schema('pitboss')
     .from('drivers')
     .select('id, discord_id, discord_username, discord_avatar, display_name, tier, pp_total, super_licence_status, created_at')
-    .eq('discord_id', discordId)
+    .eq('discord_id', authedDriver.discordId)
     .maybeSingle()
 
   if (driverError) {
