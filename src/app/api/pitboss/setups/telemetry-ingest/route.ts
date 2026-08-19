@@ -49,6 +49,30 @@
 // see TelemetryUploadPage's inferCarClassCode for the signals that
 // actually do work) — callers pass car_class_code explicitly, defaulting
 // to F1_2025.
+//
+// sessionType translation: the raw F1 UDP m_sessionType enum only knows
+// "Nth race session this weekend" (race1/race2/race3) — it does NOT know
+// sprint vs. feature race vs. Grand Prix. What race2 actually means
+// depends on category and weekend format:
+//
+//   F2 (any weekend):      race1 = sprint,  race2 = feature race
+//   F1, sprint weekend:    race1 = sprint,  race2 = Grand Prix
+//   F1, standard weekend:  race1 = the only race (no race2 sent)
+//
+// resolveSessionType() below maps P1's raw sessionType string into our
+// canonical SessionType. Category is read from tyres.tyreCompound (e.g.
+// "f2SuperSoft" vs "soft"/"medium"/"hard") rather than `formula` or
+// `game` — both of those have been observed sending unreliable/generic
+// values ("other", inconsistent game builds — see mapCarSetupToParamValues
+// comment above and TelemetryUploadPage's inferCarClassCode).
+//
+// OPEN QUESTION — not yet resolved: what raw sessionType string P1 sends
+// for a *standard* (non-sprint) F1 race weekend's only race. If it's also
+// "race1", that's ambiguous with F2/sprint-weekend race1 (= sprint) the
+// same way race2 is, and resolveSessionType's race1 branch below would
+// need the same category-aware disambiguation race2 gets. Currently
+// race1 always resolves to "sprint" — confirm this before trusting
+// standard-weekend F1 race1 uploads.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
@@ -61,14 +85,65 @@ export const dynamic = 'force-dynamic';
 const DEFAULT_CAR_CLASS_CODE = 'F1_2025';
 const TELEMETRY_CONFIDENCE = 0.85;
 
-const VALID_SESSION_TYPES: SessionType[] = ['race', 'qualifying', 'sprint', 'time_trial', 'practice'];
-
 // F1 game weather enum: 0 clear, 1 light cloud, 2 overcast, 3 light rain,
 // 4 heavy rain, 5 storm. Mapped to the engine's dry/wet/mixed conditions.
 function conditionsFromWeatherCode(code: number): 'dry' | 'wet' | 'mixed' {
   if (code <= 2) return 'dry';
   if (code === 3) return 'mixed';
   return 'wet';
+}
+
+// True if the tyre compound string indicates an F2 car (e.g.
+// "f2SuperSoft"). Used to disambiguate sessionType, not currently used
+// for car_class_code resolution (that stays caller-supplied per the file
+// header — this is a narrower, session-type-only signal check).
+function isF2Compound(tyreCompound: string | undefined | null): boolean {
+  return typeof tyreCompound === 'string' && tyreCompound.toLowerCase().startsWith('f2');
+}
+
+// Maps whatever raw sessionType string P1 sends into our canonical
+// SessionType, disambiguating "race2" (and "race1") by category per the
+// file header. Returns null for anything unrecognized so the caller can
+// produce a clear 400 with the original raw value.
+function resolveSessionType(rawSessionType: string, tyreCompound: string | undefined | null): SessionType | null {
+  switch (rawSessionType) {
+    case 'race1':
+      // F2 and F1-sprint-weekend both use race1 = sprint. See the file
+      // header's OPEN QUESTION for the unconfirmed standard-F1-weekend
+      // case.
+      return 'sprint';
+    case 'race2':
+      // F2: feature race. F1 (only appears on a sprint weekend): Grand
+      // Prix. Either way it's our plain "race" SessionType.
+      return 'race';
+    case 'race':
+    case 'race3':
+      // Bare "race" (no race2 sent) is a standard F1 weekend's only race.
+      // race3 isn't currently produced by either category on payloads
+      // seen so far, but maps to "race" rather than being rejected.
+      return 'race';
+    case 'qualifying':
+    case 'q1':
+    case 'q2':
+    case 'q3':
+    case 'shortq':
+    case 'osq':
+      return 'qualifying';
+    case 'sprint':
+    case 'sprintqualifying':
+      return 'sprint';
+    case 'time_trial':
+    case 'timetrial':
+      return 'time_trial';
+    case 'practice':
+    case 'p1':
+    case 'p2':
+    case 'p3':
+    case 'shortp':
+      return 'practice';
+    default:
+      return null;
+  }
 }
 
 // carSetup (nested by category) -> flat param_key, matching
@@ -252,8 +327,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Could not resolve driver identity for this session' }, { status: 401 });
   }
 
-  const sessionType = lap.sessionType as SessionType;
-  if (!VALID_SESSION_TYPES.includes(sessionType)) {
+  const sessionType = resolveSessionType(lap.sessionType, lap.tyres?.tyreCompound);
+  if (!sessionType) {
     return NextResponse.json({ error: `Unrecognized session_type in payload: ${lap.sessionType}` }, { status: 400 });
   }
 
