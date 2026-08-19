@@ -258,7 +258,11 @@ export default function SetupsPage() {
     setRecommendation(null)
 
     try {
-      const res = await fetch('/api/setups/recommend', {
+      // Driver identity is now resolved server-side from the authenticated
+      // session (see getAuthedDriver in lib/pitbossAuth.ts) — discord_id is
+      // no longer sent from the client, since a client-supplied value could
+      // be spoofed to attribute the recommendation to an arbitrary driver.
+      const res = await fetch('/api/pitboss/setups/recommend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -266,11 +270,6 @@ export default function SetupsPage() {
           track_id:     trackId,
           conditions,
           session_type: sessionType,
-          // session.user.id is a Discord snowflake (next-auth jwt strategy,
-          // token.sub seeded from the Discord profile id) — NOT a
-          // pitboss.drivers.id. The API route resolves this server-side via
-          // resolveDriverIdFromSession() against pitboss.drivers.discord_id.
-          discord_id: session?.user?.discordId ?? null,
           car_team_id: teamId || null,
           car_driver_id: driverMode === 'league' ? (driverId || null) : null,
           car_driver_name_freetext:
@@ -327,6 +326,17 @@ export default function SetupsPage() {
           <div>
             <p className="text-white text-sm font-semibold">Driving Style</p>
             <p className="text-gray-500 text-xs mt-0.5">Car feel, race length, and assists — tunes every generated setup</p>
+          </div>
+          <span className="text-[#E8284A] text-lg">→</span>
+        </button>
+
+        <button
+          onClick={() => router.push('/pitboss/setups/telemetry-upload')}
+          className="w-full rounded-xl border border-gray-800 bg-gray-900 px-4 py-3 text-left flex items-center justify-between"
+        >
+          <div>
+            <p className="text-white text-sm font-semibold">Telemetry Upload</p>
+            <p className="text-gray-500 text-xs mt-0.5">Upload session data to sharpen community setup recommendations</p>
           </div>
           <span className="text-[#E8284A] text-lg">→</span>
         </button>
