@@ -1,3 +1,5 @@
+// src/app/api/pitboss/exam-session/progress/route.ts
+
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
@@ -11,7 +13,7 @@ function getSupabase() {
 
 export async function PATCH(req: NextRequest) {
   const body = await req.json()
-  const { session_id, question_id, selected_answer, is_correct, next_index } = body
+  const { session_id, question_id, selected_answer, is_correct } = body
 
   if (!session_id || !question_id || selected_answer === undefined) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
@@ -21,7 +23,7 @@ export async function PATCH(req: NextRequest) {
 
   const { data: session, error: fetchErr } = await supabase
     .from('exam_sessions')
-    .select('answers, question_ids, status, expires_at')
+    .select('answers, question_ids, status, expires_at, current_index')
     .eq('id', session_id)
     .single()
 
@@ -41,16 +43,34 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: 'Session expired' }, { status: 410 })
   }
 
+  // Idempotency guard: if this question was already answered (e.g. client retry
+  // due to a flaky connection), don't double-record it — just return current state.
+  const alreadyAnswered = session.answers.some(
+    (a: any) => a.question_id === question_id
+  )
+  if (alreadyAnswered) {
+    return NextResponse.json({
+      ok: true,
+      answers_saved: session.answers.length,
+      current_index: session.current_index,
+      duplicate: true,
+    })
+  }
+
   const updatedAnswers = [
     ...session.answers,
     { question_id, selected_answer, is_correct },
   ]
 
+  // current_index is always derived server-side from answers.length —
+  // never trusted from the client. This is what fixes the repeat-question bug.
+  const nextIndex = updatedAnswers.length
+
   const { error: updateErr } = await supabase
     .from('exam_sessions')
     .update({
       answers: updatedAnswers,
-      current_index: next_index,
+      current_index: nextIndex,
       last_active_at: new Date().toISOString(),
     })
     .eq('id', session_id)
@@ -59,7 +79,11 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: updateErr.message }, { status: 500 })
   }
 
-  return NextResponse.json({ ok: true, answers_saved: updatedAnswers.length })
+  return NextResponse.json({
+    ok: true,
+    answers_saved: updatedAnswers.length,
+    current_index: nextIndex,
+  })
 }
 
 export async function PUT(req: NextRequest) {
@@ -107,7 +131,9 @@ export async function PUT(req: NextRequest) {
       status: passed ? 'passed' : 'failed',
       score,
       completed_at: now,
-      locked_until: passed ? null : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      locked_until: passed
+        ? null
+        : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     })
     .eq('id', session.certification_id)
 
