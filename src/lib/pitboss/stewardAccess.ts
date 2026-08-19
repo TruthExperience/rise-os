@@ -1,36 +1,31 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
 const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward', 'bsac_chief']
 
-export async function getRequestingDriver(supabase: SupabaseClient, session: any) {
-  const user = session.user as any
-  const discordId: string | undefined = user.discordId ?? user.discord_id ?? user.id
-  const email: string | undefined = user.email ?? undefined
-
-  let driver = null
-
-  if (discordId) {
-    const { data } = await supabase
-      .schema('pitboss')
-      .from('drivers')
-      .select('id')
-      .eq('discord_id', discordId)
-      .maybeSingle()
-    driver = data
-  }
-
-  if (!driver && email) {
-    const { data } = await supabase
-      .schema('pitboss')
-      .from('drivers')
-      .select('id')
-      .eq('email', email)
-      .maybeSingle()
-    driver = data
-  }
-
-  return driver
+/**
+ * Resolves the requesting user's pitboss.drivers row.
+ *
+ * `session` is accepted but ignored — it's a leftover NextAuth-shaped
+ * parameter from before the Supabase Auth migration. getServerSession()
+ * now always returns null (nothing writes that session cookie anymore),
+ * so `session.user` was throwing on every call this reached. Resolution
+ * now happens via getAuthedDriver(), which reads the actual Supabase
+ * session from cookies and matches pitboss.drivers by discord_id OR
+ * user_id (see allow_null_discord_id_on_pitboss_drivers migration).
+ *
+ * Kept the (supabase, session) signature so existing call sites don't
+ * need to change. Safe to drop both params next time this file is
+ * touched, once callers are updated to call getRequestingDriver() bare.
+ */
+export async function getRequestingDriver(
+  _supabase?: SupabaseClient,
+  _session?: unknown
+): Promise<{ id: string } | null> {
+  const driver = await getAuthedDriver()
+  if (!driver) return null
+  return { id: driver.id }
 }
 
 export async function hasStewwardAccess(
