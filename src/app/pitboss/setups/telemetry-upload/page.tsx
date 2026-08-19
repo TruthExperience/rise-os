@@ -14,6 +14,7 @@ type Status = "idle" | "submitting" | "success" | "error";
 export default function TelemetryUploadPage() {
   const [raw, setRaw] = useState("");
   const [carClassCode, setCarClassCode] = useState("F1_2025");
+  const [leagueId, setLeagueId] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState<string | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
@@ -23,9 +24,9 @@ export default function TelemetryUploadPage() {
     setMessage(null);
     setDetail(null);
 
-    let parsed: unknown;
+    let parsedLap: unknown;
     try {
-      parsed = JSON.parse(raw);
+      parsedLap = JSON.parse(raw);
     } catch {
       setStatus("error");
       setMessage("That's not valid JSON.");
@@ -37,7 +38,11 @@ export default function TelemetryUploadPage() {
       const res = await fetch("/api/pitboss/setups/telemetry-upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...(parsed as Record<string, unknown>), car_class_code: carClassCode }),
+        body: JSON.stringify({
+          car_class_code: carClassCode,
+          league_id: leagueId.trim() || null,
+          telemetry: parsedLap,
+        }),
       });
 
       const body = await res.json().catch(() => null);
@@ -45,16 +50,22 @@ export default function TelemetryUploadPage() {
       if (!res.ok) {
         setStatus("error");
         setMessage(body?.error ?? `Upload failed (${res.status}).`);
-        setDetail(body?.detail ?? body?.message ?? null);
+        setDetail(null);
         return;
       }
 
       setStatus("success");
       setMessage("Lap uploaded and archived.");
       setDetail(
-        body?.submission_id
-          ? `Submission ${body.submission_id} — flowing into the weighted-average engine now.`
-          : null
+        [
+          body?.submission?.id ? `Submission ${body.submission.id}` : null,
+          body?.resolved?.conditions && body?.resolved?.session_type
+            ? `${body.resolved.session_type} · ${body.resolved.conditions}`
+            : null,
+          body?.telemetry_upload_id ? "Raw lap archived." : "Raw lap archive skipped (submission still saved).",
+        ]
+          .filter(Boolean)
+          .join(" — ")
       );
       setRaw("");
     } catch {
@@ -97,6 +108,21 @@ export default function TelemetryUploadPage() {
             </option>
           ))}
         </select>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <label htmlFor="league-id" className="text-sm font-medium text-white/80">
+          League ID <span className="text-white/40 font-normal">(optional)</span>
+        </label>
+        <input
+          id="league-id"
+          type="text"
+          value={leagueId}
+          onChange={(e) => setLeagueId(e.target.value)}
+          disabled={isSubmitting}
+          placeholder="Leave blank for none"
+          className="bg-gray-900 border border-white/10 rounded-lg px-3 py-3 text-sm text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-rise-red disabled:opacity-50"
+        />
       </section>
 
       <section className="flex flex-col gap-2">
