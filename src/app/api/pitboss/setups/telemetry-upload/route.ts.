@@ -24,8 +24,11 @@
 //     telemetry: [...], ... }. This is the actual output of the capture
 //     tool.
 //   - JSON file upload (Content-Type: multipart/form-data): a .json file
-//     attached under any field name, containing the same raw lap shape.
-//     Whichever form field on the request is a File is read and parsed.
+//     attached under any field name, containing the same raw lap shape,
+//     plus optional sibling form fields `car_class_code` and `league_id`
+//     (this is how TelemetryUploadPage's file picker sends it — the file
+//     itself has no car_class_code/league_id, those come from the form's
+//     dropdown/input next to the picker).
 //   - Wrapped JSON: { telemetry: <lap object>, car_class_code?, league_id? }
 //     — kept for any caller that already sends it this way, in either
 //     raw-body or file-upload form.
@@ -35,9 +38,10 @@
 // Track resolution is name-based (pitboss.f1_track_name_aliases), not by
 // the numeric F1 game trackId in the payload — see that table's comment
 // for why. Car class is NOT inferred from the payload's `game` field
-// (observed as "f123" even for a confirmed F1 25 capture, so it isn't a
-// reliable signal) — callers pass car_class_code explicitly, defaulting to
-// F1_2025.
+// (observed as inconsistent even within the same actual game version —
+// see TelemetryUploadPage's inferCarClassCode for the signals that
+// actually do work) — callers pass car_class_code explicitly, defaulting
+// to F1_2025.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
@@ -130,12 +134,23 @@ interface WrappedBody {
   telemetry: LapPayload;
 }
 
+interface ExtractedBody {
+  json: any;
+  // Only populated for multipart uploads — sibling form fields sent next
+  // to the file (see TelemetryUploadPage's handleFileSubmit). Undefined
+  // for raw/wrapped JSON POSTs, where these live inside the JSON itself
+  // instead.
+  formCarClassCode?: string;
+  formLeagueId?: string;
+}
+
 // Reads and JSON-parses the request body regardless of how it was sent:
 // a raw application/json POST, or a multipart/form-data upload with a
 // .json file attached under any field name (browser file input, curl -F,
 // etc. all vary in what they name the field, so the first File found on
-// the form is used rather than requiring a specific field name).
-async function extractJsonBody(req: NextRequest): Promise<any> {
+// the form is used rather than requiring a specific field name) plus
+// optional car_class_code / league_id sibling fields.
+async function extractBody(req: NextRequest): Promise<ExtractedBody> {
   const contentType = req.headers.get('content-type') || '';
 
   if (contentType.includes('multipart/form-data')) {
@@ -151,42 +166,61 @@ async function extractJsonBody(req: NextRequest): Promise<any> {
       throw new Error('No file found in the uploaded form data');
     }
     const text = await file.text();
+    let json: any;
     try {
-      return JSON.parse(text);
+      json = JSON.parse(text);
     } catch {
       throw new Error(`Uploaded file "${file.name}" is not valid JSON`);
     }
+
+    const formCarClassCode = formData.get('car_class_code');
+    const formLeagueId = formData.get('league_id');
+    return {
+      json,
+      formCarClassCode: typeof formCarClassCode === 'string' ? formCarClassCode : undefined,
+      formLeagueId: typeof formLeagueId === 'string' ? formLeagueId : undefined,
+    };
   }
 
   // Default: raw JSON body (Content-Type: application/json, or no
   // content-type header at all — some tools omit it for raw JSON POSTs).
-  return req.json();
+  return { json: await req.json() };
 }
 
 export async function POST(req: NextRequest) {
   const supabaseAdmin = createAdminClient();
 
-  let rawBody: any;
+  let extracted: ExtractedBody;
   try {
-    rawBody = await extractJsonBody(req);
+    extracted = await extractBody(req);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Invalid request body' },
       { status: 400 }
     );
   }
+  const rawBody = extracted.json;
 
   // The capture tool posts/uploads the lap object directly at the top
   // level (identified by a top-level lapNum, which only the raw lap shape
   // has). Some callers may still send the wrapped { telemetry,
   // car_class_code, league_id } shape — support both rather than forcing
   // every caller to match one specific envelope.
+  //
+  // For multipart uploads, car_class_code/league_id never live inside the
+  // file's JSON (the file is just the raw lap capture) — they come from
+  // the sibling form fields instead, falling back to the wrapped-body
+  // fields for non-multipart wrapped requests, then to defaults.
   const isRawShape = typeof rawBody?.lapNum === 'number';
   const lap: LapPayload | undefined = isRawShape ? rawBody : (rawBody as WrappedBody)?.telemetry;
-  const league_id: string | null = isRawShape ? null : (rawBody as WrappedBody)?.league_id ?? null;
-  const car_class_code: string = isRawShape
-    ? DEFAULT_CAR_CLASS_CODE
-    : (rawBody as WrappedBody)?.car_class_code ?? DEFAULT_CAR_CLASS_CODE;
+  const league_id: string | null =
+    extracted.formLeagueId?.trim() ||
+    (!isRawShape ? (rawBody as WrappedBody)?.league_id ?? null : null) ||
+    null;
+  const car_class_code: string =
+    extracted.formCarClassCode ||
+    (!isRawShape ? (rawBody as WrappedBody)?.car_class_code : undefined) ||
+    DEFAULT_CAR_CLASS_CODE;
 
   if (!lap || !lap.carSetup || !lap.track || !lap.telemetry || !Array.isArray(lap.telemetry)) {
     return NextResponse.json(
