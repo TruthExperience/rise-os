@@ -52,7 +52,8 @@ export interface ParamRationale {
     | "class_default"
     | "feedback_adjusted"
     | "trait_adjusted"
-    | "session_adjusted";
+    | "session_adjusted"
+    | "performance_adjusted";
   override_applied: boolean;
   contributors: ParamContributor[];
   adjustment?: {
@@ -190,10 +191,10 @@ export function buildRecommendation(params: {
 // Shared delta-application core
 // ---------------------------------------------------------------------------
 //
-// The LLM feedback loop, the deterministic team/driver trait bias, and the
-// deterministic session-type bias all move a generated setup by applying a
-// per-param delta on top of the current value, through the exact same
-// clamp/round/override pipeline.
+// The LLM feedback loop, the deterministic team/driver trait bias, the
+// deterministic session-type bias, and the telemetry performance bias all
+// move a generated setup by applying a per-param delta on top of the
+// current value, through the exact same clamp/round/override pipeline.
 
 export interface DeltaAdjustment {
   param_key: string;
@@ -366,7 +367,7 @@ const DRIVER_STAT_PARAM_MAP: Record<keyof DriverStats, ParamWeightMap> = {
   },
   racecraft: { diff_adjustment_on_throttle: -0.04, front_brake_bias: 0.02 },
   awareness: { rear_toe_in: 0.03, front_toe_out: -0.03 },
-  experience: { front_ride_height: -0.03, rear_ride_height: -0.03, brake_pressure: 0.02 }, 
+  experience: { front_ride_height: -0.03, rear_ride_height: -0.03, brake_pressure: 0.02 },
   // First-pass coefficient, same caveat as the others above — a high-focus
   // driver trusts a slightly less conservative brake setup since they're
   // less prone to lock-ups/mistakes under threshold braking.
@@ -679,5 +680,130 @@ export function applyDriverStyleBias(params: {
     maxDeltaFraction: MAX_STYLE_DELTA_FRACTION,
     modelSuffix: "style-bias-v1",
     confidenceMultiplier: 1.0,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry performance bias (deterministic, outcome-driven)
+// ---------------------------------------------------------------------------
+//
+// Every other layer above biases the setup toward what someone *ran* — a
+// stated trait, a session type, a driver's stated feel preference. This is
+// the first layer that biases toward what actually went *fast*.
+//
+// Only telemetry submissions (source: 'telemetry') carry a verified,
+// game-reported lap time — self-reported and community setups have no
+// outcome attached, so there's nothing to correlate for those. That filter
+// happens at the query layer (the calling route), not on this type — the
+// caller is expected to only pass telemetry-sourced submissions in here.
+//
+// Rank-based weighting, not a fitted trend line: telemetry sample sizes per
+// track/car_class/session_type/conditions bucket will be small for a long
+// time, and rank weighting is far more robust to a single outlier lap than
+// regression would be. Fastest lap in the bucket carries the most
+// influence, slowest the least; the existing confidence/verified weighting
+// from submissionWeight is layered on top so a fast-but-low-confidence lap
+// still doesn't dominate.
+//
+// Gated behind a minimum sample count — below that, telemetry is too thin
+// to trust over the general weighted average, and this layer is a no-op.
+// First-pass thresholds, same caveat as the trait/session coefficients
+// above — expect to tune once this has real data behind it.
+
+const MIN_TELEMETRY_SAMPLES_FOR_PERFORMANCE_BIAS = 5;
+const MAX_TELEMETRY_PERFORMANCE_DELTA_FRACTION = 0.20;
+
+export interface TelemetryPerformanceSample extends SetupSubmissionInput {
+  lap_time_seconds: number;
+}
+
+function computeTelemetryPerformanceAdjustments(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  samples: TelemetryPerformanceSample[];
+  requestingLeagueId: string | null;
+}): DeltaAdjustment[] {
+  const { base, paramRanges, samples, requestingLeagueId } = params;
+
+  const valid = samples.filter(
+    (s) => typeof s.lap_time_seconds === "number" && !Number.isNaN(s.lap_time_seconds)
+  );
+  if (valid.length < MIN_TELEMETRY_SAMPLES_FOR_PERFORMANCE_BIAS) return [];
+
+  const ranked = [...valid].sort((a, b) => a.lap_time_seconds - b.lap_time_seconds);
+  const n = ranked.length;
+  const perfWeightBySubmission = new Map<string, number>();
+  ranked.forEach((sample, i) => {
+    const rank = i + 1;
+    const perfWeight = (n - rank + 1) / n;
+    perfWeightBySubmission.set(
+      sample.id,
+      perfWeight * submissionWeight(sample, requestingLeagueId)
+    );
+  });
+
+  const adjustments: DeltaAdjustment[] = [];
+
+  for (const range of paramRanges) {
+    const currentValue = base.generated_setup[range.param_key];
+    if (typeof currentValue !== "number") continue;
+
+    let weightedSum = 0;
+    let weightTotal = 0;
+    for (const sample of valid) {
+      const raw = sample.setup_values[range.param_key];
+      if (typeof raw !== "number" || Number.isNaN(raw)) continue;
+      const w = perfWeightBySubmission.get(sample.id) ?? 0;
+      if (w <= 0) continue;
+      weightedSum += raw * w;
+      weightTotal += w;
+    }
+    if (weightTotal === 0) continue;
+
+    const performanceValue = weightedSum / weightTotal;
+    const delta = performanceValue - currentValue;
+
+    // Skip shifts that will round away to nothing — no point recording a
+    // rationale entry for a change smaller than the param's own step size.
+    if (Math.abs(delta) < range.step / 2) continue;
+
+    adjustments.push({
+      param_key: range.param_key,
+      delta,
+      reason: `Fastest telemetry laps ran ${range.param_key.replace(/_/g, " ")} closer to ${performanceValue.toFixed(2)}${range.unit ? " " + range.unit : ""} (${n} laps)`,
+    });
+  }
+
+  return adjustments;
+}
+
+export function applyTelemetryPerformanceBias(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  telemetrySamples: TelemetryPerformanceSample[];
+  requestingLeagueId: string | null;
+}): GeneratedRecommendation {
+  const { base, paramRanges, overrides, telemetrySamples, requestingLeagueId } = params;
+
+  const adjustments = computeTelemetryPerformanceAdjustments({
+    base,
+    paramRanges,
+    samples: telemetrySamples,
+    requestingLeagueId,
+  });
+  if (adjustments.length === 0) return base;
+
+  const confidenceMultiplier = clamp(1 + 0.01 * telemetrySamples.length, 1, 1.15);
+
+  return applyDeltas({
+    base,
+    paramRanges,
+    overrides,
+    adjustments,
+    origin: "performance_adjusted",
+    maxDeltaFraction: MAX_TELEMETRY_PERFORMANCE_DELTA_FRACTION,
+    modelSuffix: "telemetry-performance-v1",
+    confidenceMultiplier,
   });
 }
