@@ -149,4 +149,102 @@ export async function getAuthedDriver(): Promise<{
  * Links or creates the public.users row for an authenticated Supabase Auth
  * user, mirroring handle_new_auth_user()'s matching logic (discord_id ->
  * email -> create new) but callable from app code as a retry path. Uses
- * the adm
+ * the admin client to bypass RLS, same pattern as getAuthedDriver.
+ *
+ * Safe to call repeatedly / concurrently: the final step upserts on the
+ * auth_user_id unique constraint, so duplicate calls just no-op onto the
+ * same row rather than erroring or creating duplicates.
+ */
+async function healMissingProfileLink(authUserId: string): Promise<string | null> {
+  const admin = createAdminClient();
+
+  const { data: authUser, error: authUserError } = await admin.auth.admin.getUserById(authUserId);
+  if (authUserError || !authUser?.user?.email) {
+    console.error("healMissingProfileLink: could not load auth user", authUserId, authUserError);
+    return null;
+  }
+
+  const email = authUser.user.email;
+  const meta = authUser.user.user_metadata ?? {};
+  const discordId: string | null = meta.provider_id ?? meta.sub ?? null;
+  const username: string | null =
+    meta.user_name ?? meta.full_name ?? meta.name ?? email.split("@")[0];
+  const avatar: string | null = meta.avatar_url ?? null;
+
+  // 1. Try to link an existing unlinked row by discord_id, then email —
+  //    same precedence as handle_new_auth_user().
+  const matchColumn = discordId ? "discord_id" : "email";
+  const matchValue = discordId ?? email;
+
+  if (matchValue) {
+    const { data: existing } = await admin
+      .from("users")
+      .select("id")
+      .eq(matchColumn, matchValue)
+      .is("auth_user_id", null)
+      .maybeSingle();
+
+    if (existing) {
+      const { data: linked, error: linkError } = await admin
+        .from("users")
+        .update({ auth_user_id: authUserId })
+        .eq("id", existing.id)
+        .select("id")
+        .maybeSingle();
+
+      if (!linkError && linked) return linked.id as string;
+
+      console.error("healMissingProfileLink: failed to link existing row", existing.id, linkError);
+    }
+  }
+
+  // 2. Nobody to link to — create the row now, same fallback as
+  //    handle_new_auth_user()'s step 3.
+  const { data: created, error: createError } = await admin
+    .from("users")
+    .upsert(
+      {
+        auth_user_id: authUserId,
+        discord_id: discordId,
+        email,
+        username,
+        avatar,
+      },
+      { onConflict: "auth_user_id" }
+    )
+    .select("id")
+    .maybeSingle();
+
+  if (createError || !created) {
+    console.error("healMissingProfileLink: failed to create profile row", authUserId, createError);
+    return null;
+  }
+
+  return created.id as string;
+}
+
+// Service-role admin client — bypasses RLS.
+// Never expose this to the browser. Use only in trusted server contexts.
+//
+// The `global.fetch` override below forces every request this client makes
+// to skip Next.js's Data Cache (cache: 'no-store'). Without it, a route
+// handler that forgets `export const dynamic = 'force-dynamic'` can end up
+// serving a frozen response indefinitely — this data changes via direct
+// SQL/migrations, never via a revalidation path, so there's no downside to
+// always bypassing the cache here.
+export function createAdminClient() {
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+      global: {
+        fetch: (url, options = {}) =>
+          fetch(url, { ...options, cache: 'no-store' }),
+      },
+    }
+  )
+}
