@@ -41,11 +41,11 @@ const navItems = [
     ),
   },
   {
-    label: "Standings",
-    href: "/pitboss/standings",
+    label: "Telemetry",
+    href: "/pitboss/telemetry",
     icon: (active: boolean) => (
       <svg viewBox="0 0 24 24" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2} className="w-6 h-6">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M8 21h8m-4-4v4M6 4h12v3a6 6 0 01-6 6 6 6 0 01-6-6V4zM6 6H4a2 2 0 002 4M18 6h2a2 2 0 01-2 4" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 12h4l2-7 4 14 2-7h6" />
       </svg>
     ),
   },
