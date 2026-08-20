@@ -66,7 +66,9 @@ export async function getTelemetrySession(sessionUid: string): Promise<Telemetry
       sector3: Number(row.sector3_time_seconds),
       lapValid: row.lap_valid,
       tyres: row.tyre_compound,
-      track: payload?.track ?? "unknown",
+      // raw_payload.track is an object ({id, name, lengthInMeters, ...}),
+      // not a string — pull the name out here so consumers get a plain string.
+      track: payload?.track?.name ?? "unknown",
       trackTemp: Number(row.track_temperature),
       airTemp: Number(row.air_temperature),
       carSetup: payload?.carSetup ?? {},
@@ -137,7 +139,9 @@ export async function listTelemetrySessionsForDriver(
     } else {
       bySession.set(key, {
         driverId: row.driver_id,
-        track: row.raw_payload?.track ?? null,
+        // raw_payload.track is an object ({id, name, lengthInMeters, ...}),
+        // not a string — pull the name out here so consumers get a plain string.
+        track: row.raw_payload?.track?.name ?? null,
         uploadedAt: row.created_at,
         leagueId,
         lapCount: 1,
