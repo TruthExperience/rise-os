@@ -80,3 +80,86 @@ export async function getTelemetrySession(sessionUid: string): Promise<Telemetry
     laps,
   };
 }
+
+export interface TelemetrySessionSummary {
+  sessionUid: string;
+  driverId: string | null;
+  trackName: string | null;
+  lapCount: number;
+  uploadedAt: string;
+}
+
+/** League IDs where this driver is a steward or head steward. */
+export async function getStewardLeagueIds(driverId: string): Promise<string[]> {
+  const admin = createAdminClient();
+
+  const { data, error } = await admin
+    .schema("pitboss")
+    .from("driver_leagues")
+    .select("league_id")
+    .eq("driver_id", driverId)
+    .or("is_steward.eq.true,is_head_steward.eq.true");
+
+  if (error) throw error;
+  return (data ?? []).map((row) => row.league_id as string);
+}
+
+/**
+ * Sessions visible to this driver: their own uploads, plus any session
+ * belonging to a league where they're a steward.
+ */
+export async function listTelemetrySessionsForDriver(
+  driverId: string,
+  stewardLeagueIds: string[]
+): Promise<TelemetrySessionSummary[]> {
+  const admin = createAdminClient();
+
+  const { data, error } = await admin
+    .schema("pitboss")
+    .from("setup_telemetry_uploads")
+    .select("session_uid, driver_id, created_at, raw_payload, submission_id, setup_submissions(league_id)")
+    .order("created_at", { ascending: false });
+
+  if (error) throw error;
+  if (!data) return [];
+
+  const bySession = new Map<
+    string,
+    { driverId: string | null; track: string | null; uploadedAt: string; leagueId: string | null; lapCount: number }
+  >();
+
+  for (const row of data as any[]) {
+    const key = row.session_uid;
+    const leagueId = row.setup_submissions?.league_id ?? null;
+    const existing = bySession.get(key);
+    if (existing) {
+      existing.lapCount += 1;
+    } else {
+      bySession.set(key, {
+        driverId: row.driver_id,
+        track: row.raw_payload?.track ?? null,
+        uploadedAt: row.created_at,
+        leagueId,
+        lapCount: 1,
+      });
+    }
+  }
+
+  const results: TelemetrySessionSummary[] = [];
+  for (const [sessionUid, s] of bySession) {
+    const isOwn = s.driverId === driverId;
+    const isStewardVisible = s.leagueId != null && stewardLeagueIds.includes(s.leagueId);
+    if (isOwn || isStewardVisible) {
+      results.push({
+        sessionUid,
+        driverId: s.driverId,
+        trackName: s.track,
+        lapCount: s.lapCount,
+        uploadedAt: s.uploadedAt,
+      });
+    }
+  }
+
+  results.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+  return results;
+}
