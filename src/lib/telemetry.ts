@@ -1,4 +1,4 @@
-import { createAdminClient } from "@/lib/supabase/admin"; // adjust to your actual admin client export
+import { createAdminClient } from "@/lib/supabase/server";
 
 // Corner order used consistently everywhere per-corner data appears.
 // F1 25 UDP telemetry packets use this order for all 4-length arrays
@@ -46,7 +46,7 @@ export interface TelemetryLap {
 
 export interface TelemetrySession {
   sessionUid: string; // kept as text throughout — never round-tripped through a JS number
-  driverId: string;
+  driverId: string | null; // setup_telemetry_uploads.driver_id is nullable in the DB
   laps: TelemetryLap[];
 }
 
@@ -110,7 +110,7 @@ export async function getTelemetrySession(sessionUid: string): Promise<Telemetry
       sector3: Number(row.sector3_time_seconds),
       lapValid: row.lap_valid,
       tyres: row.tyre_compound,
-      track: payload?.track,
+      track: payload?.track ?? "unknown",
       trackTemp: Number(row.track_temperature),
       airTemp: Number(row.air_temperature),
       carSetup: payload?.carSetup ?? {},
