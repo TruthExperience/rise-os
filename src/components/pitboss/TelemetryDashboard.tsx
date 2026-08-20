@@ -298,7 +298,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={metricSeries.speed} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={[0, 340]} />
             <Tooltip content={<CustomTooltip unit=" km/h" />} />
             {lapsArr.map(l => (
@@ -313,7 +313,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={metricSeries.throttleBrake} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={[0, 100]} />
             <Tooltip content={<CustomTooltip unit="%" />} />
             {lapsArr.map(l => (
@@ -383,7 +383,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={metricSeries.tyreTemp} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={["dataMin - 5", "dataMax + 5"]} />
             <Tooltip content={<CustomTooltip unit="°C" />} />
             {lapsArr.map(l => (
@@ -408,7 +408,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={metricSeries.brakeTemp} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={["dataMin - 20", "dataMax + 20"]} />
             <Tooltip content={<CustomTooltip unit="°C" />} />
             {lapsArr.map(l => (
