@@ -5,7 +5,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ScatterChart, Scatter, Cell, ReferenceLine
 } from "recharts";
-import { CORNERS, cornerAvg, type Corner, type TelemetrySession } from "@/lib/telemetry";
+import { CORNERS, cornerAvg, type Corner, type TelemetrySession } from "@/lib/telemetry-types";
 
 const LAP_COLORS: Record<number, string> = {
   2: "#9B5DE5", 3: "#00C853", 4: "#FFC400",
