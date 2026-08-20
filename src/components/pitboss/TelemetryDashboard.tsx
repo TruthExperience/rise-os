@@ -124,6 +124,8 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tyreCorner, setTyreCorner] = useState<CornerSelection>("avg");
   const [brakeCorner, setBrakeCorner] = useState<CornerSelection>("avg");
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [refLap, setRefLap] = useState<number | null>(null);
 
   // True until the user manually toggles a lap chip — while true, newly
   // arrived laps auto-add to the selection so a live session keeps showing
@@ -135,10 +137,17 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
 
   useEffect(() => {
     let cancelled = false;
+    let stopped = false;
     autoFollowRef.current = true;
     maxLapNumRef.current = undefined;
     setSession(null);
     setLoadError(null);
+    // Reset lap selection / reference lap too — otherwise switching to a
+    // different sessionUid on an already-mounted dashboard leaves stale
+    // lap numbers selected that don't exist in the new session, and every
+    // chart/table silently renders empty since nothing matches.
+    setSelected(new Set());
+    setRefLap(null);
 
     const poll = () => {
       const since = maxLapNumRef.current;
@@ -180,22 +189,20 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
               });
             }
           }
+
+          // Stop polling once the session is confirmed finished — checked
+          // here (post-response) rather than racing it against the interval
+          // timer, so we don't fire one extra poll after the flip.
+          if (incoming.status === "finished" && !stopped) {
+            stopped = true;
+            clearInterval(id);
+          }
         })
         .catch((err) => { if (!cancelled) setLoadError(String(err.message ?? err)); });
     };
 
     poll();
-    const id = setInterval(() => {
-      // Stop polling once we know the session finished — one last poll
-      // already confirmed that via `status`, no need to keep hitting the API.
-      setSession((current) => {
-        if (current?.status === "finished") {
-          clearInterval(id);
-        }
-        return current;
-      });
-      poll();
-    }, POLL_INTERVAL_MS);
+    const id = setInterval(poll, POLL_INTERVAL_MS);
 
     return () => { cancelled = true; clearInterval(id); };
   }, [sessionUid]);
@@ -205,9 +212,6 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
     if (!session || session.laps.length === 0) return null;
     return session.laps.reduce((a, b) => (a.lapTime < b.lapTime ? a : b)).lapNum;
   }, [session]);
-
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [refLap, setRefLap] = useState<number | null>(null);
 
   useEffect(() => {
     if (session && selected.size === 0 && session.laps.length > 0) {
