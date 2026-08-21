@@ -51,6 +51,8 @@ function IssueRow({ issue }: { issue: DetectedIssue }) {
 
 function CornerCard({ corner }: { corner: CornerCoaching }) {
   const { corner: seg, braking, throttle, issues, coachingNote } = corner;
+  const hasMajorIssue = issues.some((iss: DetectedIssue) => iss.severity === "major");
+
   return (
     <div style={{
       border: "1px solid #1D2229", borderRadius: 6, padding: "12px 14px",
@@ -63,7 +65,7 @@ function CornerCard({ corner }: { corner: CornerCoaching }) {
           CORNER {seg.id + 1} <span style={{ color: "#5B6572", fontWeight: 400 }}>· {seg.direction.toUpperCase()}</span>
         </div>
         {issues.length > 0 && (
-          <span style={badgeStyle(issues.some(i => i.severity === "major") ? "#FF5C77" : "#FFC400")}>
+          <span style={badgeStyle(hasMajorIssue ? "#FF5C77" : "#FFC400")}>
             {issues.length} issue{issues.length > 1 ? "s" : ""}
           </span>
         )}
@@ -92,7 +94,7 @@ function CornerCard({ corner }: { corner: CornerCoaching }) {
 
       {issues.length > 0 && (
         <div style={{ marginTop: 8, borderTop: "1px solid #1D2229", paddingTop: 6 }}>
-          {issues.map((iss, i) => <IssueRow key={i} issue={iss} />)}
+          {issues.map((iss: DetectedIssue, i: number) => <IssueRow key={i} issue={iss} />)}
         </div>
       )}
     </div>
@@ -179,7 +181,7 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
             Next Lap
           </div>
           <ol style={{ margin: 0, paddingLeft: 18 }}>
-            {report.suggestions.map((s, i) => (
+            {report.suggestions.map((s: string, i: number) => (
               <li key={i} style={{
                 fontFamily: "'Inter', sans-serif", fontSize: 12.5, color: "#E7EAEE",
                 lineHeight: 1.5, marginBottom: i < report.suggestions.length - 1 ? 6 : 0,
@@ -225,7 +227,7 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-          {report.corners.map((c) => <CornerCard key={c.corner.id} corner={c} />)}
+          {report.corners.map((c: CoachingReport["corners"][number]) => <CornerCard key={c.corner.id} corner={c} />)}
         </div>
       )}
     </Panel>
