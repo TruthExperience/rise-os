@@ -75,29 +75,28 @@
 // standard-weekend F1 race1 uploads.
 //
 // CASING: resolveSessionType lowercases rawSessionType before matching,
-// and every case label below is written lowercase. This was added
-// deliberately rather than assumed — the pre-existing qualifying cases
-// ('shortq', 'osq') are abbreviations, not camelCased transcriptions of
-// EA's spec labels ("Short Q" / "One-Shot Q" would camelCase to 'shortQ'
-// / 'oneShotQ' with a capital letter, not what's here). That means we
-// don't actually have a confirmed casing convention for the capture
-// tool's raw sessionType strings, including the sprint shootout family
-// added below (sprintShootout1/2/3, Short Sprint Shootout, One-Shot
-// Sprint Shootout). Lowercasing at the match site makes the function
-// correct regardless of which casing the tool actually sends, instead of
-// betting on a guess. If a real sprint-shootout payload comes through and
-// gets rejected as unrecognized, log the exact raw value from the 400
-// response and add it here verbatim (lowercased) rather than assuming.
+// and every case label below is written lowercase.
 //
-// COVERAGE (confirmed against the official F1 25 UDP appendix — 19
-// m_sessionType IDs, 0=Unknown through 18=Time Trial): every named
-// session type maps into one of our five buckets below. 'sprint' and
-// 'sprintqualifying' (pre-existing cases) don't correspond to any ID in
-// that table — likely older-game-year naming or the capture tool's own
-// shorthand for a Sprint Shootout ID; left in place since they're
-// harmless if unused. This table confirms which session types exist, not
-// the exact JSON string the capture tool sends for each — that's a
-// separate, still-unverified layer (see CASING note above).
+// CONFIRMED against a real capture (Melbourne, lap 1): the tool sends the
+// official F1 25 spec label camelCased verbatim — "Short Practice" ->
+// "shortPractice" — not an abbreviation. That real payload's sessionType
+// was literally "shortPractice", which the PRE-EXISTING 'shortp' case did
+// NOT match ('shortPractice'.toLowerCase() is 'shortpractice', a
+// different string) — a confirmed bug: that valid short-practice lap
+// would have been rejected with a 400. 'shortq' and 'osq' are the same
+// kind of wrong guess (correct forms are 'shortQualifying' /
+// 'oneShotQualifying'), presumed equally broken though not yet caught in
+// a real payload the way shortPractice was. The abbreviations are left in
+// place below (harmless — they just never match anything real) and the
+// correct camelCase-derived forms have been added alongside them for
+// every official session type.
+//
+// Also observed in that same payload: "game": "f123", despite
+// sessionType clearly being F1 25's label ("shortPractice" isn't a valid
+// F1 23 label — F1 23's enum only has abbreviated "Short P"). Confirms
+// the file's existing note that `game` is unreliable and shouldn't be
+// trusted for anything, including car class inference (which the file
+// already avoids doing on this field).
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
@@ -154,6 +153,11 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
     case 'qualifying1':
     case 'qualifying2':
     case 'qualifying3':
+    // Confirmed-pattern camelCase forms (see CASING note) — replace the
+    // abbreviations below as the real strings once each is seen live.
+    case 'shortqualifying':
+    case 'oneshotqualifying':
+    // Old abbreviation guesses — kept, but presumed never actually sent.
     case 'q1':
     case 'q2':
     case 'q3':
@@ -162,11 +166,10 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
       return 'qualifying';
     case 'sprint':
     case 'sprintqualifying':
-    // Sprint weekend qualifying-format sessions (F1 25 IDs 10-14:
-    // Sprint Shootout 1/2/3, Short Sprint Shootout, One-Shot Sprint
-    // Shootout) — same bucket as sprint/sprintqualifying above. Matched
-    // lowercase per the CASING note, so this covers the raw string
-    // regardless of how the capture tool actually cases it.
+    // Sprint weekend qualifying-format sessions (F1 25 IDs 10-14) — same
+    // bucket as sprint/sprintqualifying above. Matched lowercase per the
+    // CASING note; these are the camelCase-derived forms confirmed
+    // correct by the shortPractice precedent.
     case 'sprintshootout1':
     case 'sprintshootout2':
     case 'sprintshootout3':
@@ -180,6 +183,10 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
     case 'practice1':
     case 'practice2':
     case 'practice3':
+    // Confirmed live in a real payload (Melbourne, lap 1) — this is the
+    // fix for the bug documented in the CASING note above.
+    case 'shortpractice':
+    // Old abbreviation guesses — kept, but presumed never actually sent.
     case 'p1':
     case 'p2':
     case 'p3':
