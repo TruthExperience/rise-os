@@ -18,6 +18,22 @@
 //      trend analysis, braking-point comparison, etc.) so laps don't need
 //      to be re-uploaded once those land.
 //
+// IDEMPOTENCY: (session_uid, lap_num) is unique per lap. A live session's
+// capture tool can and does retry uploads (flaky connection, client-side
+// timeout-and-resend, etc.) — this route MUST treat a retry of a lap it's
+// already ingested as a no-op-with-refresh, not as a new data point.
+// Before creating anything, it checks setup_telemetry_uploads for an
+// existing row with this (session_uid, lap_num). If found: update that
+// row's archive fields (in case the retried payload has any different
+// data — e.g. a fuller frame capture) and return the ALREADY-EXISTING
+// submission_id with 200, WITHOUT touching setup_submissions again. Only
+// a genuinely new lap creates a new setup_submissions row. Previously this
+// check didn't exist: every retry created a fresh, duplicate "verified"
+// setup_submissions row (silently skewing buildRecommendation()'s
+// weighted average toward whichever lap happened to retry) before failing
+// on the *archive* insert's unique constraint — the failure you'd see in
+// logs was really just the second, more visible symptom of that.
+//
 // NOTE: this route was originally at
 // api/pitboss/setups/telemetry-upload/route.ts and was renamed to
 // telemetry-ingest. The original folder name silently never made it into
@@ -109,55 +125,31 @@ export const dynamic = 'force-dynamic';
 const DEFAULT_CAR_CLASS_CODE = 'F1_2025';
 const TELEMETRY_CONFIDENCE = 0.85;
 
-// F1 game weather enum: 0 clear, 1 light cloud, 2 overcast, 3 light rain,
-// 4 heavy rain, 5 storm. Mapped to the engine's dry/wet/mixed conditions.
 function conditionsFromWeatherCode(code: number): 'dry' | 'wet' | 'mixed' {
   if (code <= 2) return 'dry';
   if (code === 3) return 'mixed';
   return 'wet';
 }
 
-// True if the tyre compound string indicates an F2 car (e.g.
-// "f2SuperSoft"). Used to disambiguate sessionType, not currently used
-// for car_class_code resolution (that stays caller-supplied per the file
-// header — this is a narrower, session-type-only signal check).
 function isF2Compound(tyreCompound: string | undefined | null): boolean {
   return typeof tyreCompound === 'string' && tyreCompound.toLowerCase().startsWith('f2');
 }
 
-// Maps whatever raw sessionType string P1 sends into our canonical
-// SessionType, disambiguating "race2" (and "race1") by category per the
-// file header. Returns null for anything unrecognized so the caller can
-// produce a clear 400 with the original raw value.
-//
-// Matching is case-insensitive (see file header CASING note) — the raw
-// value is lowercased once here, and every case below is lowercase.
 function resolveSessionType(rawSessionType: string, tyreCompound: string | undefined | null): SessionType | null {
   switch (rawSessionType.toLowerCase()) {
     case 'race1':
-      // F2 and F1-sprint-weekend both use race1 = sprint. See the file
-      // header's OPEN QUESTION for the unconfirmed standard-F1-weekend
-      // case.
       return 'sprint';
     case 'race2':
-      // F2: feature race. F1 (only appears on a sprint weekend): Grand
-      // Prix. Either way it's our plain "race" SessionType.
       return 'race';
     case 'race':
     case 'race3':
-      // Bare "race" (no race2 sent) is a standard F1 weekend's only race.
-      // race3 isn't currently produced by either category on payloads
-      // seen so far, but maps to "race" rather than being rejected.
       return 'race';
     case 'qualifying':
     case 'qualifying1':
     case 'qualifying2':
     case 'qualifying3':
-    // Confirmed-pattern camelCase forms (see CASING note) — replace the
-    // abbreviations below as the real strings once each is seen live.
     case 'shortqualifying':
     case 'oneshotqualifying':
-    // Old abbreviation guesses — kept, but presumed never actually sent.
     case 'q1':
     case 'q2':
     case 'q3':
@@ -166,10 +158,6 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
       return 'qualifying';
     case 'sprint':
     case 'sprintqualifying':
-    // Sprint weekend qualifying-format sessions (F1 25 IDs 10-14) — same
-    // bucket as sprint/sprintqualifying above. Matched lowercase per the
-    // CASING note; these are the camelCase-derived forms confirmed
-    // correct by the shortPractice precedent.
     case 'sprintshootout1':
     case 'sprintshootout2':
     case 'sprintshootout3':
@@ -183,10 +171,7 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
     case 'practice1':
     case 'practice2':
     case 'practice3':
-    // Confirmed live in a real payload (Melbourne, lap 1) — this is the
-    // fix for the bug documented in the CASING note above.
     case 'shortpractice':
-    // Old abbreviation guesses — kept, but presumed never actually sent.
     case 'p1':
     case 'p2':
     case 'p3':
@@ -197,10 +182,6 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
   }
 }
 
-// carSetup (nested by category) -> flat param_key, matching
-// pitboss.setup_parameter_ranges exactly. fuel_load has no telemetry
-// counterpart (it's a strategy input, not a car setup param) and is
-// intentionally omitted here.
 function mapCarSetupToParamValues(carSetup: any): Record<string, number> {
   return {
     front_arb: carSetup.suspension.frontAntiRollBars,
@@ -230,7 +211,6 @@ function average(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-// [FL, FR, RL, RR] average across every frame, per corner.
 function averageCorners(frames: any[], key: string): number[] {
   const sums = [0, 0, 0, 0];
   for (const frame of frames) {
@@ -269,20 +249,10 @@ interface WrappedBody {
 
 interface ExtractedBody {
   json: any;
-  // Only populated for multipart uploads — sibling form fields sent next
-  // to the file (see TelemetryUploadPage's handleFileSubmit). Undefined
-  // for raw/wrapped JSON POSTs, where these live inside the JSON itself
-  // instead.
   formCarClassCode?: string;
   formLeagueId?: string;
 }
 
-// Reads and JSON-parses the request body regardless of how it was sent:
-// a raw application/json POST, or a multipart/form-data upload with a
-// .json file attached under any field name (browser file input, curl -F,
-// etc. all vary in what they name the field, so the first File found on
-// the form is used rather than requiring a specific field name) plus
-// optional car_class_code / league_id sibling fields.
 async function extractBody(req: NextRequest): Promise<ExtractedBody> {
   const contentType = req.headers.get('content-type') || '';
 
@@ -315,8 +285,6 @@ async function extractBody(req: NextRequest): Promise<ExtractedBody> {
     };
   }
 
-  // Default: raw JSON body (Content-Type: application/json, or no
-  // content-type header at all — some tools omit it for raw JSON POSTs).
   return { json: await req.json() };
 }
 
@@ -334,16 +302,6 @@ export async function POST(req: NextRequest) {
   }
   const rawBody = extracted.json;
 
-  // The capture tool posts/uploads the lap object directly at the top
-  // level (identified by a top-level lapNum, which only the raw lap shape
-  // has). Some callers may still send the wrapped { telemetry,
-  // car_class_code, league_id } shape — support both rather than forcing
-  // every caller to match one specific envelope.
-  //
-  // For multipart uploads, car_class_code/league_id never live inside the
-  // file's JSON (the file is just the raw lap capture) — they come from
-  // the sibling form fields instead, falling back to the wrapped-body
-  // fields for non-multipart wrapped requests, then to defaults.
   const isRawShape = typeof rawBody?.lapNum === 'number';
   const lap: LapPayload | undefined = isRawShape ? rawBody : (rawBody as WrappedBody)?.telemetry;
   const league_id: string | null =
@@ -383,7 +341,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `Unrecognized session_type in payload: ${lap.sessionType}` }, { status: 400 });
   }
 
-  // Track resolution by name — see file header for why not by numeric id.
+  const session_uid = String(lap.sessionUID);
+
+  // IDEMPOTENCY CHECK — must happen before any insert.
+  const { data: existingUpload, error: existingUploadError } = await supabaseAdmin
+    .schema('pitboss')
+    .from('setup_telemetry_uploads')
+    .select('id, submission_id')
+    .eq('session_uid', session_uid)
+    .eq('lap_num', lap.lapNum)
+    .maybeSingle();
+
+  if (existingUploadError) {
+    return NextResponse.json(
+      { error: `Failed to check for existing telemetry upload: ${existingUploadError.message}` },
+      { status: 500 }
+    );
+  }
+
   const trackName = lap.track.name.trim().toLowerCase();
   const { data: alias } = await supabaseAdmin
     .schema('pitboss')
@@ -416,9 +391,6 @@ export async function POST(req: NextRequest) {
 
   const conditions = conditionsFromWeatherCode(lap.weather.weather);
 
-  // Validate the mapped setup against this car class's actual param ranges
-  // — same guardrail the manual /submissions route applies, so a telemetry
-  // upload can't silently insert an out-of-range or unrecognized value.
   let ranges;
   try {
     ranges = await fetchParamRanges(car_class_id, sessionType);
@@ -454,6 +426,48 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const frames = lap.telemetry;
+
+  // RETRY PATH
+  if (existingUpload) {
+    const { error: refreshError } = await supabaseAdmin
+      .schema('pitboss')
+      .from('setup_telemetry_uploads')
+      .update({
+        lap_time_seconds: lap.lapTime,
+        sector1_time_seconds: lap.sector1Time,
+        sector2_time_seconds: lap.sector2Time,
+        sector3_time_seconds: lap.sector3Time,
+        lap_valid: lap.lapValid,
+        weather_code: lap.weather.weather,
+        track_temperature: lap.weather.trackTemperature,
+        air_temperature: lap.weather.airTemperature,
+        tyre_compound: lap.tyres?.tyreCompound ?? null,
+        tyre_wear_start: frames[0].tyresWear,
+        tyre_wear_end: frames[frames.length - 1].tyresWear,
+        tyre_surface_temp_avg: averageCorners(frames, 'tyresSurfaceTemperature'),
+        tyre_inner_temp_avg: averageCorners(frames, 'tyresInnerTemperature'),
+        frame_count: frames.length,
+        raw_payload: lap,
+      })
+      .eq('id', existingUpload.id);
+
+    if (refreshError) {
+      console.error('telemetry-ingest: failed to refresh archive on retry (original upload intact):', refreshError.message);
+    }
+
+    return NextResponse.json(
+      {
+        submission: { id: existingUpload.submission_id },
+        telemetry_upload_id: existingUpload.id,
+        resolved: { track_id, car_class_id, conditions, session_type: sessionType },
+        retry: true,
+      },
+      { status: 200 }
+    );
+  }
+
+  // NEW LAP PATH
   const { data: submission, error: submissionError } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_submissions')
@@ -482,10 +496,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Archive the raw lap — best-effort. A failure here shouldn't roll back
-  // the submission that already landed; the submission is the part the
-  // engine actually depends on.
-  const frames = lap.telemetry;
   const { data: telemetryRow, error: telemetryError } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_telemetry_uploads')
@@ -494,7 +504,7 @@ export async function POST(req: NextRequest) {
       driver_id: driver.id,
       track_id,
       car_class_id,
-      session_uid: String(lap.sessionUID),
+      session_uid,
       lap_num: lap.lapNum,
       lap_time_seconds: lap.lapTime,
       sector1_time_seconds: lap.sector1Time,
