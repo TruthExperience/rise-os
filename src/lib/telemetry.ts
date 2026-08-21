@@ -116,10 +116,18 @@ export async function listTelemetrySessionsForDriver(
 ): Promise<TelemetrySessionSummary[]> {
   const admin = createAdminClient();
 
+  // IMPORTANT: do not select raw_payload here. Each row's raw_payload holds
+  // a full per-frame telemetry capture (1MB+ per lap, observed directly in
+  // a real upload) — selecting it for every row in the table (unfiltered,
+  // no limit) is what caused this query to hit Postgres's statement
+  // timeout (57014) on /pitboss/telemetry as upload volume grew. All this
+  // function actually needs from the payload is the track name, so pull
+  // just that one JSON field via a Postgres JSON path in the select —
+  // track_name never leaves the DB as anything but a short string.
   const { data, error } = await admin
     .schema("pitboss")
     .from("setup_telemetry_uploads")
-    .select("session_uid, driver_id, created_at, raw_payload, submission_id, setup_submissions(league_id)")
+    .select("session_uid, driver_id, created_at, track_name:raw_payload->track->>name, submission_id, setup_submissions(league_id)")
     .order("created_at", { ascending: false });
 
   if (error) throw error;
@@ -139,9 +147,10 @@ export async function listTelemetrySessionsForDriver(
     } else {
       bySession.set(key, {
         driverId: row.driver_id,
-        // raw_payload.track is an object ({id, name, lengthInMeters, ...}),
-        // not a string — pull the name out here so consumers get a plain string.
-        track: row.raw_payload?.track?.name ?? null,
+        // track_name now comes pre-extracted from the select's JSON path
+        // (raw_payload->track->>name) rather than the full raw_payload
+        // object — see the query comment above for why.
+        track: row.track_name ?? null,
         uploadedAt: row.created_at,
         leagueId,
         lapCount: 1,
