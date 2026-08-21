@@ -1,18 +1,17 @@
 "use client";
 
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ScatterChart, Scatter, Cell, ReferenceLine
 } from "recharts";
-import { CORNERS, cornerAvg, type Corner, type TelemetrySession } from "@/lib/telemetry";
+import { CORNERS, cornerAvg, type Corner, type TelemetrySession } from "@/lib/telemetry-types";
+import CoachingPanel from "@/components/pitboss/CoachingPanel";
 
 const LAP_COLORS: Record<number, string> = {
   2: "#9B5DE5", 3: "#00C853", 4: "#FFC400",
   5: "#00B8D9", 6: "#FF5C77", 7: "#5DA9E9",
 };
-
-const POLL_INTERVAL_MS = 3000;
 
 function fmtTime(t: number) {
   const m = Math.floor(t / 60);
@@ -39,50 +38,22 @@ function speedColor(v: number, min: number, max: number) {
   return `rgb(${r},${g},${bl})`;
 }
 
-function Panel({ title, subtitle, children, style, badge }: { title: string; subtitle?: string; children: React.ReactNode; style?: React.CSSProperties; badge?: React.ReactNode }) {
+function Panel({ title, subtitle, children, style }: { title: string; subtitle?: string; children: React.ReactNode; style?: React.CSSProperties }) {
   return (
     <div style={{
       background: "#14181D", border: "1px solid #262B33", borderRadius: 6,
       padding: "16px 18px", ...style
     }}>
-      <div style={{ marginBottom: 10, display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
-        <div>
-          <div style={{
-            fontFamily: "'Titillium Web', sans-serif", fontWeight: 700, fontSize: 13,
-            letterSpacing: "0.08em", textTransform: "uppercase", color: "#E7EAEE"
-          }}>{title}</div>
-          {subtitle && <div style={{
-            fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#5B6572", marginTop: 2
-          }}>{subtitle}</div>}
-        </div>
-        {badge}
+      <div style={{ marginBottom: 10 }}>
+        <div style={{
+          fontFamily: "'Titillium Web', sans-serif", fontWeight: 700, fontSize: 13,
+          letterSpacing: "0.08em", textTransform: "uppercase", color: "#E7EAEE"
+        }}>{title}</div>
+        {subtitle && <div style={{
+          fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#5B6572", marginTop: 2
+        }}>{subtitle}</div>}
       </div>
       {children}
-    </div>
-  );
-}
-
-function LiveBadge({ status }: { status: "live" | "finished" | null }) {
-  if (!status) return null;
-  if (status === "live") {
-    return (
-      <div style={{
-        display: "inline-flex", alignItems: "center", gap: 6,
-        fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 700,
-        color: "#FF5C77", letterSpacing: "0.06em"
-      }}>
-        <span style={{
-          width: 7, height: 7, borderRadius: "50%", background: "#FF5C77",
-          animation: "pb-live-pulse 1.4s ease-in-out infinite"
-        }} />
-        LIVE
-        <style>{`@keyframes pb-live-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }`}</style>
-      </div>
-    );
-  }
-  return (
-    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#5B6572" }}>
-      SESSION FINISHED
     </div>
   );
 }
@@ -124,111 +95,37 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tyreCorner, setTyreCorner] = useState<CornerSelection>("avg");
   const [brakeCorner, setBrakeCorner] = useState<CornerSelection>("avg");
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [refLap, setRefLap] = useState<number | null>(null);
-
-  // True until the user manually toggles a lap chip — while true, newly
-  // arrived laps auto-add to the selection so a live session keeps showing
-  // its latest laps without the user having to re-select each time.
-  const autoFollowRef = useRef(true);
-
-  // Highest lap_num we've merged in, used to ask the API for only what's new.
-  const maxLapNumRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
-    let stopped = false;
-    autoFollowRef.current = true;
-    maxLapNumRef.current = undefined;
-    setSession(null);
-    setLoadError(null);
-    // Reset lap selection / reference lap too — otherwise switching to a
-    // different sessionUid on an already-mounted dashboard leaves stale
-    // lap numbers selected that don't exist in the new session, and every
-    // chart/table silently renders empty since nothing matches.
-    setSelected(new Set());
-    setRefLap(null);
-
-    const poll = () => {
-      const since = maxLapNumRef.current;
-      const url = `/api/pitboss/telemetry?session_uid=${encodeURIComponent(sessionUid)}` +
-        (since != null ? `&since_lap_num=${since}` : "");
-
-      fetch(url)
-        .then(async (res) => {
-          if (!res.ok) throw new Error((await res.json()).error ?? "failed to load telemetry");
-          return res.json();
-        })
-        .then((incoming: TelemetrySession) => {
-          if (cancelled) return;
-          setLoadError(null);
-
-          setSession((prev) => {
-            if (!prev) return incoming;
-            if (incoming.laps.length === 0) {
-              // No new laps — still refresh status/lastUpdatedAt so the
-              // live badge and any staleness UI stay accurate.
-              return { ...prev, status: incoming.status, lastUpdatedAt: incoming.lastUpdatedAt };
-            }
-            const byLap = new Map(prev.laps.map((l) => [l.lapNum, l]));
-            for (const lap of incoming.laps) byLap.set(lap.lapNum, lap);
-            const merged = [...byLap.values()].sort((a, b) => a.lapNum - b.lapNum);
-            return { ...incoming, laps: merged };
-          });
-
-          if (incoming.laps.length > 0) {
-            const newest = incoming.laps[incoming.laps.length - 1].lapNum;
-            maxLapNumRef.current =
-              maxLapNumRef.current != null ? Math.max(maxLapNumRef.current, newest) : newest;
-
-            if (autoFollowRef.current) {
-              setSelected((prevSel) => {
-                const next = new Set(prevSel);
-                for (const lap of incoming.laps) next.add(lap.lapNum);
-                return next;
-              });
-            }
-          }
-
-          // Stop polling once the session is confirmed finished — checked
-          // here (post-response) rather than racing it against the interval
-          // timer, so we don't fire one extra poll after the flip.
-          if (incoming.status === "finished" && !stopped) {
-            stopped = true;
-            clearInterval(id);
-          }
-        })
-        .catch((err) => { if (!cancelled) setLoadError(String(err.message ?? err)); });
-    };
-
-    poll();
-    const id = setInterval(poll, POLL_INTERVAL_MS);
-
-    return () => { cancelled = true; clearInterval(id); };
+    fetch(`/api/pitboss/telemetry?session_uid=${encodeURIComponent(sessionUid)}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error ?? "failed to load telemetry");
+        return res.json();
+      })
+      .then((data: TelemetrySession) => { if (!cancelled) setSession(data); })
+      .catch((err) => { if (!cancelled) setLoadError(String(err.message ?? err)); });
+    return () => { cancelled = true; };
   }, [sessionUid]);
 
   const laps = useMemo(() => session?.laps.map(l => l.lapNum) ?? [], [session]);
   const fastest = useMemo(() => {
-    if (!session || session.laps.length === 0) return null;
+    if (!session) return null;
     return session.laps.reduce((a, b) => (a.lapTime < b.lapTime ? a : b)).lapNum;
   }, [session]);
 
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [refLap, setRefLap] = useState<number | null>(null);
+
   useEffect(() => {
-    if (session && selected.size === 0 && session.laps.length > 0) {
+    if (session && selected.size === 0) {
       setSelected(new Set(laps));
       setRefLap(fastest);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
-  // refLap should track the latest lap automatically while following live,
-  // same as the original behavior of defaulting to the fastest lap on load.
-  useEffect(() => {
-    if (autoFollowRef.current && fastest != null) setRefLap(fastest);
-  }, [fastest]);
-
   const toggle = (l: number) => {
-    autoFollowRef.current = false;
     setSelected(prev => {
       const next = new Set(prev);
       if (next.has(l)) { if (next.size > 1) next.delete(l); }
@@ -248,15 +145,16 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
     if (lapsArr.length === 0) return out;
 
     const lapByNum = new Map(session.laps.map(l => [l.lapNum, l]));
-    const validLapsArr = lapsArr.filter(l => lapByNum.has(l));
-    if (validLapsArr.length === 0) return out;
-
-    const baseLap = validLapsArr.reduce((a, b) =>
+    const baseLap = lapsArr.reduce((a, b) =>
       (lapByNum.get(b)!.frames.length > lapByNum.get(a)!.frames.length ? b : a));
     const baseFrames = lapByNum.get(baseLap)!.frames;
 
+    // Guards against a lap with zero frames (e.g. malformed/missing raw_payload) —
+    // without this, rows[0] on an empty array returns undefined and the .speed
+    // access below throws.
     function nearestFrame(lap: number, d: number) {
       const rows = lapByNum.get(lap)!.frames;
+      if (rows.length === 0) return null;
       let lo = 0, hi = rows.length - 1;
       while (lo < hi) {
         const mid = (lo + hi) >> 1;
@@ -272,13 +170,12 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
       const tbPoint: any = { dist: d };
       const tyrePoint: any = { dist: d };
       const brakePoint: any = { dist: d };
-      validLapsArr.forEach(l => {
-        const lapFrames = lapByNum.get(l)!.frames;
-        if (lapFrames.length === 0) return;
+      lapsArr.forEach(l => {
         const row = nearestFrame(l, d);
+        if (!row) return;
         speedPoint[`lap${l}`] = row.speed;
-        tbPoint[`throttle${l}`] = row.throttle;
-        tbPoint[`brake${l}`] = row.brake;
+        tbPoint[`throttle${l}`] = row.throttle * 100;
+        tbPoint[`brake${l}`] = row.brake * 100;
         tyrePoint[`lap${l}`] = cornerValue(row.tyreTemp, tyreCorner);
         brakePoint[`lap${l}`] = cornerValue(row.brakeTemp, brakeCorner);
       });
@@ -287,80 +184,80 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
       out.tyreTemp.push(tyrePoint);
       out.brakeTemp.push(brakePoint);
     });
-
     return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, selected, tyreCorner, brakeCorner]);
-
-  const lapsArr = [...selected].sort((a, b) => a - b);
 
   const trackPoints = useMemo(() => {
     if (!session || refLap == null) return [];
     const lap = session.laps.find(l => l.lapNum === refLap);
-    if (!lap || lap.frames.length === 0) return [];
+    if (!lap) return [];
     const speeds = lap.frames.map(f => f.speed);
     const min = Math.min(...speeds), max = Math.max(...speeds);
-    return lap.frames
-      .filter((_, i) => i % 3 === 0)
-      .map(f => ({ x: f.x, y: f.y, fill: speedColor(f.speed, min, max) }));
+    return lap.frames.map(f => ({
+      x: f.x, y: f.y, speed: f.speed,
+      fill: speedColor(f.speed, min, max)
+    }));
   }, [session, refLap]);
 
   const ggPoints = useMemo(() => {
     if (!session || refLap == null) return [];
     const lap = session.laps.find(l => l.lapNum === refLap);
-    if (!lap) return [];
-    return lap.frames.filter((_, i) => i % 2 === 0).map(f => ({ x: f.gLat, y: f.gLon }));
+    return lap ? lap.frames.map(f => ({ x: f.gLat, y: f.gLon })) : [];
   }, [session, refLap]);
 
-  const bestSector = useMemo(() => {
-    if (!session || session.laps.length === 0) return { s1: Infinity, s2: Infinity, s3: Infinity };
-    return {
-      s1: Math.min(...session.laps.map(l => l.sector1)),
-      s2: Math.min(...session.laps.map(l => l.sector2)),
-      s3: Math.min(...session.laps.map(l => l.sector3)),
-    };
-  }, [session]);
-
-  const bestLapTime = useMemo(() => {
-    if (!session || session.laps.length === 0) return Infinity;
-    return Math.min(...session.laps.map(l => l.lapTime));
-  }, [session]);
-
-  if (loadError && !session) {
-    return (
-      <div style={{ padding: 24, fontFamily: "'JetBrains Mono', monospace", color: "#FF5C77" }}>
-        {loadError}
-      </div>
-    );
+  if (loadError) {
+    return <div style={{ padding: 40, color: "#FF5C77", fontFamily: "'JetBrains Mono', monospace" }}>
+      Failed to load telemetry: {loadError}
+    </div>;
+  }
+  if (!session || fastest == null || refLap == null) {
+    return <div style={{ padding: 40, color: "#5B6572", fontFamily: "'JetBrains Mono', monospace" }}>
+      Loading telemetry…
+    </div>;
   }
 
-  if (!session || session.laps.length === 0) {
-    return (
-      <div style={{ padding: 24, fontFamily: "'JetBrains Mono', monospace", color: "#5B6572" }}>
-        Waiting for telemetry…
-      </div>
-    );
-  }
-
+  const bestSector = {
+    s1: Math.min(...session.laps.map(m => m.sector1)),
+    s2: Math.min(...session.laps.map(m => m.sector2)),
+    s3: Math.min(...session.laps.map(m => m.sector3)),
+  };
+  const bestLapTime = Math.min(...session.laps.map(m => m.lapTime));
+  const lapsArr = [...selected].sort((a, b) => a - b);
   const firstLap = session.laps[0];
 
   return (
-    <div style={{ padding: 20, background: "#0B0D10", minHeight: "100vh" }}>
-      {loadError && (
-        <div style={{
-          marginBottom: 12, padding: "8px 12px", borderRadius: 4,
-          background: "#2A1519", border: "1px solid #4A2229",
-          fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#FF8A9B"
-        }}>
-          Last poll failed: {loadError} — showing most recent data.
-        </div>
-      )}
+    <div style={{
+      minHeight: "100vh", background: "#0B0E11", color: "#E7EAEE",
+      fontFamily: "'Inter', 'Titillium Web', sans-serif", padding: "24px 28px 60px"
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700;900&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500&display=swap');
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { height: 6px; width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #262B33; border-radius: 3px; }
+      `}</style>
 
-      <Panel title="Lap Times" subtitle={firstLap.track} style={{ marginBottom: 18 }} badge={<LiveBadge status={session.status} />}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 22, flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ fontFamily: "'Titillium Web', sans-serif", fontWeight: 900, fontSize: 26, letterSpacing: "0.02em" }}>
+            {(firstLap.track ?? "").toUpperCase()} <span style={{ color: "#5B6572", fontWeight: 400 }}>· TELEMETRY</span>
+          </div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#5B6572", marginTop: 4 }}>
+            {(firstLap.tyres ?? "").toUpperCase()} · Track {firstLap.trackTemp}°C / Air {firstLap.airTemp}°C
+          </div>
+        </div>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#9B5DE5", border: "1px solid #9B5DE5", borderRadius: 4, padding: "6px 10px" }}>
+          BEST LAP {fmtTime(bestLapTime)} — L{fastest}
+        </div>
+      </div>
+
+      {/* Timing tower */}
+      <Panel title="Timing Tower" style={{ marginBottom: 18, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5, minWidth: 520 }}>
           <thead>
             <tr style={{ color: "#5B6572", textAlign: "right" }}>
-              <th style={{ padding: "4px 8px", textAlign: "left" }}>LAP</th>
+              <th style={{ textAlign: "left", padding: "4px 8px" }}>LAP</th>
               <th style={{ padding: "4px 8px" }}>S1</th>
               <th style={{ padding: "4px 8px" }}>S2</th>
               <th style={{ padding: "4px 8px" }}>S3</th>
@@ -402,7 +299,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={metricSeries.speed} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={[0, 340]} />
             <Tooltip content={<CustomTooltip unit=" km/h" />} />
             {lapsArr.map(l => (
@@ -417,7 +314,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={metricSeries.throttleBrake} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={[0, 100]} />
             <Tooltip content={<CustomTooltip unit="%" />} />
             {lapsArr.map(l => (
@@ -435,7 +332,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <Panel title="Track Map" subtitle={`speed heatmap · reference lap ${refLap}`}>
           <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
             {laps.map(l => (
-              <div key={l} onClick={() => { autoFollowRef.current = false; setRefLap(l); }} style={{ ...chipStyle(refLap === l, LAP_COLORS[l] ?? "#5B6572"), padding: "3px 9px", fontSize: 11 }}>
+              <div key={l} onClick={() => setRefLap(l)} style={{ ...chipStyle(refLap === l, LAP_COLORS[l] ?? "#5B6572"), padding: "3px 9px", fontSize: 11 }}>
                 L{l}
               </div>
             ))}
@@ -465,7 +362,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
               <YAxis type="number" dataKey="y" tick={axisStyle} stroke="#262B33" domain={[-4, 4]} label={{ value: "longitudinal", angle: -90, position: "insideLeft", fill: "#5B6572", fontSize: 10 }} />
               <ReferenceLine x={0} stroke="#262B33" />
               <ReferenceLine y={0} stroke="#262B33" />
-              <Scatter data={ggPoints} fill={refLap != null ? LAP_COLORS[refLap] : "#5B6572"} fillOpacity={0.45} isAnimationActive={false} />
+              <Scatter data={ggPoints} fill={LAP_COLORS[refLap]} fillOpacity={0.45} isAnimationActive={false} />
             </ScatterChart>
           </ResponsiveContainer>
         </Panel>
@@ -487,7 +384,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={metricSeries.tyreTemp} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={["dataMin - 5", "dataMax + 5"]} />
             <Tooltip content={<CustomTooltip unit="°C" />} />
             {lapsArr.map(l => (
@@ -512,7 +409,7 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={metricSeries.brakeTemp} syncId="tel" margin={{ top: 4, right: 12, left: -14, bottom: 0 }}>
             <CartesianGrid stroke="#1D2229" vertical={false} />
-            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => Math.round(v)} stroke="#262B33" />
+            <XAxis dataKey="dist" tick={axisStyle} tickFormatter={v => String(Math.round(v))} stroke="#262B33" />
             <YAxis tick={axisStyle} stroke="#262B33" domain={["dataMin - 20", "dataMax + 20"]} />
             <Tooltip content={<CustomTooltip unit="°C" />} />
             {lapsArr.map(l => (
@@ -522,9 +419,17 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         </ResponsiveContainer>
       </Panel>
 
+      {/* Coaching — analyzes the currently-selected track-map/G-G lap
+          (refLap), compared against the fastest lap unless refLap already
+          is the fastest lap (comparing a lap to itself is a no-op). */}
+      <CoachingPanel
+        sessionUid={session.sessionUid}
+        lapNum={refLap}
+        referenceLapNum={refLap !== fastest ? fastest : undefined}
+      />
+
       <div style={{ marginTop: 22, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "#3D444D" }}>
         Session {session.sessionUid} · Laps {laps[0]}–{laps[laps.length - 1]} · {firstLap.track}
-        {session.lastUpdatedAt && <> · updated {new Date(session.lastUpdatedAt).toLocaleTimeString()}</>}
       </div>
     </div>
   );
