@@ -200,34 +200,57 @@ export function compareLaps(lapA: TelemetryLap, lapB: TelemetryLap, stepMeters =
 
 // =======================================================================
 // 2. Corner detection — steering angle + lateral g threshold, with a
-// consecutive-frame debounce and an apex speed-drop sanity check.
+// consecutive-frame debounce, a gap-bridging pass, and an apex speed-drop
+// sanity check.
 //
-// FIXED (Aug 2026): the original single-frame-threshold version was
-// misreading flat-out straights as corners. Real F1/F2 telemetry example
-// that triggered this: a lap 3 straight held at 293→301 km/h the whole
-// way (throttle=1, brake=0 every frame), but gForceLateral spiked to
-// 0.35-0.57g from curb/road-surface noise, and the old GLAT_THRESHOLD of
-// 0.3 treated any single frame over that as "in a corner". That produced
-// a fake "Corner 1" at 297 km/h with 0% brake pressure, 0% trail brake,
-// and brakePointDist == fullThrottleDist (both defaulting to the corner's
-// own entry distance because analyzeBraking/analyzeThrottle found zero
-// qualifying frames in a zone that was never actually braked). The same
-// noise was also very likely behind an inflated issue count from
-// detectIssues' snap-correction check.
+// FIXED (Aug 2026, round 1): the original single-frame-threshold version
+// misread flat-out straights as corners — curb/road-surface noise on a
+// straight could spike gForceLateral over the old 0.3g threshold for one
+// frame. Fixed by raising thresholds substantially and requiring several
+// consecutive turning frames before treating anything as a corner entry.
 //
-// Real cornering g at F1/F2 pace is typically several g, not fractions of
-// one — so the threshold was raised substantially, a run of turning
-// frames must persist for several consecutive samples (not one noisy
-// spike) before being treated as a corner entry, and any candidate
-// segment is rejected outright unless its apex speed is meaningfully
-// lower than both its entry and exit speed — the actual signature of a
-// real corner, which a straight can never produce.
+// FIXED (Aug 2026, round 2): that fix then swallowed real corners — a
+// Jeddah lap 4 complex hairpin/chicane at 480-640m (steering to -153°,
+// lateral g to 2.97g, min speed 77 km/h) went completely undetected.
+// Cause: the driver briefly straightens the wheel for ~8 frames between
+// the two apexes of a double-apex corner. The old code treated that gap
+// as "corner ended", splitting one real corner into fragments — and each
+// fragment's own boundary frame was still mid-corner (slow), so the apex
+// speed-drop sanity check compared the apex against a deceptively slow
+// "exit" and rejected the whole thing as noise, along with every other
+// multi-apex corner on the lap.
+//
+// Fix: (1) bridge separate turning runs into one corner when the gap
+// between them is short (GAP_BRIDGE_METERS) — a brief straightening mid-
+// corner shouldn't end the corner; (2) validate the apex speed drop
+// against the car's true entry/exit speed — the fastest it was going in
+// the REFERENCE_WINDOW_METERS immediately before/after the whole (possibly
+// bridged) corner — rather than the corner segment's own boundary frame,
+// which can still be mid-corner if bridging occurred.
 // =======================================================================
 
 const STEER_THRESHOLD_DEG = 15; // realistic minimum steering input for an actual corner
-const GLAT_THRESHOLD = 1.2; // g — filters out straight-line curb/road noise (was 0.3)
+const GLAT_THRESHOLD = 1.2; // g — filters out straight-line curb/road noise
 const MIN_CONSECUTIVE_TURN_FRAMES = 4; // one noisy frame shouldn't start a corner
-const MIN_APEX_SPEED_DROP_KMH = 15; // apex must be genuinely slower than entry/exit, or it's not a corner
+const MIN_APEX_SPEED_DROP_KMH = 15; // apex must be genuinely slower than true entry/exit, or it's not a corner
+const GAP_BRIDGE_METERS = 25; // bridge brief straightening within a complex corner (chicanes, hairpin doubles) so one real corner isn't fragmented
+const REFERENCE_WINDOW_METERS = 150; // how far to look before/after a corner for its true (straight-line) entry/exit speed
+
+function maxSpeedInWindow(
+  frames: TelemetryFrame[],
+  centerDist: number,
+  direction: 'before' | 'after',
+  windowMeters: number,
+  fallback: number
+): number {
+  const lo = direction === 'before' ? centerDist - windowMeters : centerDist;
+  const hi = direction === 'before' ? centerDist : centerDist + windowMeters;
+  let max = -Infinity;
+  for (const f of frames) {
+    if (f.dist >= lo && f.dist <= hi) max = Math.max(max, f.speed);
+  }
+  return Number.isFinite(max) ? max : fallback;
+}
 
 export function detectCorners(frames: TelemetryFrame[]): CornerSegment[] {
   const corners: CornerSegment[] = [];
@@ -235,30 +258,40 @@ export function detectCorners(frames: TelemetryFrame[]): CornerSegment[] {
     (f) => Math.abs(f.steer) > STEER_THRESHOLD_DEG || Math.abs(f.gLat) > GLAT_THRESHOLD
   );
 
-  let cornerId = 0;
+  // Step 1: raw runs of consecutive turning frames (end is exclusive).
+  const rawRuns: { start: number; end: number }[] = [];
   let i = 0;
   while (i < frames.length) {
     if (!isTurning[i]) {
       i++;
       continue;
     }
+    let end = i;
+    while (end < frames.length && isTurning[end]) end++;
+    rawRuns.push({ start: i, end });
+    i = end;
+  }
 
-    // Found the start of a turning run — walk to its end first.
-    let runEnd = i;
-    while (runEnd < frames.length && isTurning[runEnd]) runEnd++;
-    const runLength = runEnd - i;
-
-    // Debounce: a single noisy sample (or a couple) above threshold isn't
-    // a corner entry. Real steering/g input into a corner holds for more
-    // than a frame or two.
-    if (runLength < MIN_CONSECUTIVE_TURN_FRAMES) {
-      i = runEnd;
-      continue;
+  // Step 2: bridge runs separated by a short non-turning gap in distance —
+  // see header comment for why this matters for double-apex corners.
+  const mergedRuns: { start: number; end: number }[] = [];
+  for (const run of rawRuns) {
+    const last = mergedRuns[mergedRuns.length - 1];
+    if (last && frames[run.start].dist - frames[last.end - 1].dist <= GAP_BRIDGE_METERS) {
+      last.end = run.end;
+    } else {
+      mergedRuns.push({ ...run });
     }
+  }
 
-    const segment = frames.slice(i, runEnd);
+  let cornerId = 0;
+  for (const run of mergedRuns) {
+    const runLength = run.end - run.start;
+    if (runLength < MIN_CONSECUTIVE_TURN_FRAMES) continue;
 
-    // apex = point of minimum speed within the segment
+    const segment = frames.slice(run.start, run.end);
+
+    // apex = point of minimum speed within the (possibly bridged) segment
     let apexIdx = 0;
     let minSpeed = Infinity;
     for (let j = 0; j < segment.length; j++) {
@@ -268,14 +301,17 @@ export function detectCorners(frames: TelemetryFrame[]): CornerSegment[] {
       }
     }
 
-    // Sanity check: a real corner has a genuine speed minimum relative to
-    // both ends of the segment. A flat-out straight with steering/g noise
-    // never actually slows down — reject it here rather than downstream.
+    // Sanity check: compare the apex against the car's true entry/exit
+    // speed — the fastest it was going in the window immediately before
+    // and after this corner — not the segment's own boundary frame, which
+    // can still be mid-corner (slow) if this corner was bridged from
+    // multiple turning runs.
     const entrySpeed = segment[0].speed;
     const exitSpeed = segment[segment.length - 1].speed;
-    const referenceSpeed = Math.min(entrySpeed, exitSpeed);
+    const entryRef = maxSpeedInWindow(frames, frames[run.start].dist, 'before', REFERENCE_WINDOW_METERS, entrySpeed);
+    const exitRef = maxSpeedInWindow(frames, frames[run.end - 1].dist, 'after', REFERENCE_WINDOW_METERS, exitSpeed);
+    const referenceSpeed = Math.min(entryRef, exitRef);
     if (referenceSpeed - minSpeed < MIN_APEX_SPEED_DROP_KMH) {
-      i = runEnd;
       continue;
     }
 
@@ -283,13 +319,11 @@ export function detectCorners(frames: TelemetryFrame[]): CornerSegment[] {
 
     corners.push({
       id: cornerId++,
-      entryDist: frames[i].dist,
+      entryDist: frames[run.start].dist,
       apexDist: segment[apexIdx].dist,
-      exitDist: frames[runEnd - 1].dist,
+      exitDist: frames[run.end - 1].dist,
       direction: avgSteer < 0 ? 'left' : 'right', // sign convention depends on game's steer field — verify against a known left-hander
     });
-
-    i = runEnd;
   }
 
   return corners;
@@ -483,13 +517,17 @@ You are given the ALREADY-COMPUTED structured output of a deterministic telemetr
 
 Your job is ONLY to interpret these numbers in plain, encouraging but honest coaching language. Do not invent facts, distances, or times that are not present in the data. Do not contradict the numbers given. If a value is missing or looks like a sensor gap (e.g. fullThrottleDist is null), say so rather than guessing.
 
+Corner numbering: each corner object has an "id" field starting at 0 — this is an internal array index, NOT the display number. Always refer to corners using id+1 in your prose (e.g. id 0 is "Corner 1", id 2 is "Corner 3"), to match what the driver sees on screen. Never write "corner 0" or any other 0-indexed reference.
+
+Field names are internal variable names, not driving vocabulary — describe what they mean in plain racing language instead of naming the field. For example, say "throttle came on a bit late after the apex" rather than "distFromApexToThrottle was high", and "the throttle ramp was inconsistent" rather than mentioning "applicationSmoothness" by name.
+
 Units: distances in meters, speeds in km/h, times in seconds, angles in degrees, pressures/smoothness on a 0-1 scale.
 
 Respond with ONLY a single JSON object, no markdown fences, no prose outside the JSON, matching exactly this shape:
 {
   "summary": "2-4 sentence overall lap summary",
   "cornerNotes": { "<cornerId>": "1-3 sentence coaching note for that corner", ... one entry per corner id given ... },
-  "suggestions": ["3-5 short, concrete, prioritized next-lap tips, each grounded in a specific number or corner from the data above — e.g. reference a corner id, a distance, or a time delta. Order from highest-impact first. Do not repeat the summary verbatim."]
+  "suggestions": ["3-5 short, concrete, prioritized next-lap tips, each grounded in a specific number or corner from the data above — e.g. reference a corner by its display number (id+1), a distance, or a time delta, described in plain racing language rather than field names. Order from highest-impact first. Do not repeat the summary verbatim."]
 }`;
 
 function stripJsonFences(text: string): string {
@@ -556,7 +594,7 @@ function buildDeterministicSuggestions(input: NarrativeInput): string[] {
     const latestThrottle = input.corners.reduce((a, b) => (a.distFromApexToThrottle > b.distFromApexToThrottle ? a : b));
     if (latestThrottle.distFromApexToThrottle > 20) {
       suggestions.push(
-        `Corner ${latestThrottle.id + 1}: throttle applied ${latestThrottle.distFromApexToThrottle.toFixed(0)}m after the apex — there may be time available getting back to power sooner.`
+        `Corner ${latestThrottle.id + 1}: throttle came on ${latestThrottle.distFromApexToThrottle.toFixed(0)}m after the apex — there may be time available getting back to power sooner.`
       );
     }
   }
