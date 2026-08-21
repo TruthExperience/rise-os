@@ -18,6 +18,13 @@ function validateWorkerUrl(url: string): string {
 }
 const VALIDATED_WORKER_URL = validateWorkerUrl(WORKER_URL); // ADDED
 
+// ADDED — client-side ceiling on any single worker call. Chosen to sit
+// comfortably under Vercel Hobby's 30s maxDuration (or Pro's higher one),
+// leaving room for the rest of the request handler to run its
+// try/catch fallback path *within the function's lifetime* instead of
+// the whole process getting killed mid-fetch with no chance to recover.
+const DEFAULT_TIMEOUT_MS = 20_000;
+
 export type LLMMode = 'fast' | 'primary' | 'reasoning' | 'certgen' | 'quick' | 'steward' | 'coding' | 'vision';
 
 export interface InferOptions {
@@ -27,6 +34,7 @@ export interface InferOptions {
   mode?:        LLMMode;
   max_tokens?:  number;
   temperature?: number;
+  timeoutMs?:   number; // ADDED — per-call override, falls back to DEFAULT_TIMEOUT_MS
 }
 
 export interface InferResult {
@@ -112,7 +120,17 @@ function getInternalKey(): string {
 // failures (bad URL, DNS failure, network drop, worker unreachable) come
 // back as a consistent Error with a readable message instead of whatever
 // raw exception the underlying fetch/URL implementation throws.
-async function workerPost(path: string, body: object): Promise<any> {
+//
+// ADDED (timeout) — an AbortController tied to a timer bounds the whole
+// call. Without this, a hung waterfall on the worker side (e.g. every
+// free model rate-limited and paid fallback also slow) just rides out
+// Vercel's maxDuration and takes the entire function down with it —
+// callers like generateCoachingNarrative() never get their try/catch to
+// run because the process is dead, not because the promise rejected.
+async function workerPost(path: string, body: object, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   let res: Response;
   try {
     res = await fetch(`${VALIDATED_WORKER_URL}${path}`, {
@@ -122,14 +140,19 @@ async function workerPost(path: string, body: object): Promise<any> {
         'X-PitBoss-Key': getInternalKey(),
       },
       body: JSON.stringify(body),
+      signal: controller.signal, // ADDED
     });
   } catch (err) {
-    // ADDED — normalize transport failures (bad URL, DNS, network) into a
-    // predictable message rather than letting fetch's internal error
-    // (e.g. ada-url's "string did not match the expected pattern") leak
-    // straight to the caller / UI.
+    // ADDED — distinguish "we gave up waiting" from other transport
+    // failures (bad URL, DNS, network) so callers/logs can tell a slow
+    // worker apart from a broken one.
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`PitBoss worker request to ${path} timed out after ${timeoutMs}ms`);
+    }
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`PitBoss worker request to ${path} failed before reaching the server: ${detail}`);
+  } finally {
+    clearTimeout(timer); // ADDED
   }
 
   if (!res.ok) {
@@ -152,27 +175,33 @@ async function workerPost(path: string, body: object): Promise<any> {
 }
 
 export const pbInfer = (opts: InferOptions) =>
-  workerPost('/infer', { mode: 'primary', max_tokens: 1024, temperature: 0.3, ...opts }) as Promise<InferResult>;
+  workerPost(
+    '/infer',
+    { mode: 'primary', max_tokens: 1024, temperature: 0.3, ...opts },
+    opts.timeoutMs
+  ) as Promise<InferResult>;
 
 export const pbSteward = (
   incident:    Record<string, unknown>,
   regulations: RuleArticle[],
-  league:      string
+  league:      string,
+  timeoutMs?:  number // ADDED
 ): Promise<PbStewardResult | PbInferError> =>
-  workerPost('/steward', { incident, regulations, league });
+  workerPost('/steward', { incident, regulations, league }, timeoutMs);
 
 export const pbSetupFeedback = (
   feedbackText:    string,
   knownParamKeys:  string[],
   context:         Record<string, unknown>,
-  league:          string
+  league:          string,
+  timeoutMs?:      number // ADDED
 ): Promise<PbSetupFeedbackResult | PbInferError> =>
   workerPost('/setup-feedback', {
     feedback_text:     feedbackText,
     known_param_keys:  knownParamKeys,
     context,
     league,
-  });
+  }, timeoutMs);
 
 export const pbHealth = () =>
   fetch(`${VALIDATED_WORKER_URL}/health`, {
