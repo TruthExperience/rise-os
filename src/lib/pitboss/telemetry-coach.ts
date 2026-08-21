@@ -50,6 +50,7 @@ export type {
 } from '@/lib/pitboss/telemetry-coach-types';
 
 import type {
+  DeltaPoint,
   LapComparison,
   CornerSegment,
   BrakingAnalysis,
