@@ -71,6 +71,42 @@ export interface CornerCoaching {
    * deterministic template fallback if the LLM call failed. Never blank.
    */
   coachingNote: string;
+  /**
+   * A single, short, concrete next-lap tip for this specific corner —
+   * distinct from coachingNote (which describes what happened), this is
+   * the one thing to try differently. Never blank.
+   */
+  suggestion: string;
+}
+
+export interface StraightSegment {
+  id: number;
+  startDist: number;
+  endDist: number;
+  /** Corner id immediately before this straight, or null if this straight runs from the start of the lap to the first detected corner. */
+  afterCornerId: number | null;
+  /** Corner id immediately after this straight, or null if this straight runs from the last detected corner to the end of the lap. */
+  beforeCornerId: number | null;
+}
+
+export interface StraightAnalysis {
+  straightId: number;
+  lengthMeters: number;
+  topSpeed: number;
+  topSpeedDist: number;
+  /** Average throttle (0-1) across the straight — near 1 means full throttle was held the whole way; lower suggests a lift. */
+  avgThrottle: number;
+  /** % of frames on this straight where DRS was enabled, 0-1. */
+  drsActivePercent: number;
+  /** Time delta vs the reference lap across this straight's distance range, if a comparison lap was requested. Positive = slower than reference here. Null if no comparison lap or insufficient overlapping data. */
+  deltaVsReferenceSeconds: number | null;
+}
+
+export interface StraightCoaching {
+  straight: StraightSegment;
+  analysis: StraightAnalysis;
+  coachingNote: string;
+  suggestion: string;
 }
 
 export interface CoachingReport {
@@ -78,16 +114,17 @@ export interface CoachingReport {
   referenceLapNum: number | null;
   comparison: LapComparison | null;
   corners: CornerCoaching[];
+  straights: StraightCoaching[];
   issues: DetectedIssue[]; // issues not tied to a specific corner
   summaryText: string;
   /**
    * 3-5 ranked, concrete next-lap tips — e.g. "carry more trail brake into
    * corner 4" or "focus on the 200-350m loss zone". Always grounded in the
-   * corner/comparison/issue data above; never blank (falls back to a
-   * deterministic template if the LLM call fails or is unparseable, same
-   * as summaryText/coachingNote).
+   * corner/straight/comparison/issue data above; never blank (falls back
+   * to a deterministic template if the LLM call fails or is unparseable,
+   * same as summaryText/coachingNote/suggestion).
    */
   suggestions: string[];
-  /** Whether summaryText / coachingNotes / suggestions came from the LLM or the deterministic fallback. */
+  /** Whether summaryText / per-segment notes+suggestions came from the LLM or the deterministic fallback. */
   narrativeSource: 'llm' | 'deterministic';
 }
