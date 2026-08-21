@@ -123,6 +123,9 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
       // seen so far, but maps to "race" rather than being rejected.
       return 'race';
     case 'qualifying':
+    case 'qualifying1':
+    case 'qualifying2':
+    case 'qualifying3':
     case 'q1':
     case 'q2':
     case 'q3':
@@ -136,6 +139,9 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
     case 'timetrial':
       return 'time_trial';
     case 'practice':
+    case 'practice1':
+    case 'practice2':
+    case 'practice3':
     case 'p1':
     case 'p2':
     case 'p3':
