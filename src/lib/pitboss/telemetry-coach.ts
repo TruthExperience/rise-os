@@ -481,4 +481,527 @@ export function analyzeThrottle(frames: TelemetryFrame[], corner: CornerSegment,
   const distFromApexToThrottle = throttleApplicationDist - corner.apexDist;
 
   const fullThrottleFrame = zone.find((f) => f.throttle >= FULL_THROTTLE_THRESHOLD);
-  const fullThrottleDist = fullThrottleFrame?.dist ??
+  const fullThrottleDist = fullThrottleFrame?.dist ?? null;
+
+  // Smoothness: lower variance in frame-to-frame throttle delta = smoother
+  // ramp, not a jabby/inconsistent application.
+  const rampFrames = zone.filter((f) => f.dist <= (fullThrottleDist ?? searchEnd));
+  let smoothness = 1;
+  if (rampFrames.length > 2) {
+    const deltas: number[] = [];
+    for (let i = 1; i < rampFrames.length; i++) deltas.push(rampFrames[i].throttle - rampFrames[i - 1].throttle);
+    const mean = deltas.reduce((s, d) => s + d, 0) / deltas.length;
+    const variance = deltas.reduce((s, d) => s + (d - mean) ** 2, 0) / deltas.length;
+    smoothness = Math.max(0, 1 - variance * 20); // scaled heuristic, not a calibrated physical unit
+  }
+
+  return {
+    cornerId: corner.id,
+    throttleApplicationDist,
+    distFromApexToThrottle,
+    fullThrottleDist,
+    applicationSmoothness: smoothness,
+  };
+}
+
+// =======================================================================
+// 5. Consistency & mistake detection
+// =======================================================================
+
+export function detectIssues(frames: TelemetryFrame[]): DetectedIssue[] {
+  const issues: DetectedIssue[] = [];
+
+  for (let i = 2; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const curr = frames[i];
+
+    // Lockup heuristic: heavy braking + longitudinal g suddenly collapses
+    // (locked tyres generate less stopping force than a rolling tyre at
+    // the grip limit) while speed keeps dropping. Not a direct wheel-lock
+    // signal — F1 UDP doesn't expose per-wheel slip ratio — so this is a
+    // proxy, not a certainty. Validate against a known locked-wheel replay
+    // before trusting severity labels.
+    if (curr.brake > 0.8 && prev.brake > 0.8) {
+      const gDrop = prev.gLon - curr.gLon; // gLon expected negative under braking; a sudden move toward 0 = grip loss
+      if (gDrop > 0.4 && curr.speed < prev.speed) {
+        issues.push({
+          kind: 'lockup',
+          dist: curr.dist,
+          severity: gDrop > 0.7 ? 'major' : 'minor',
+          note: `Possible lockup — braking g dropped ${gDrop.toFixed(2)}g while still on the brakes.`,
+        });
+      }
+    }
+
+    // Snap correction: large, fast steering reversal at speed — proxy for
+    // a near-spin or correction after losing the rear. Threshold is a
+    // starting guess.
+    const steerDelta = curr.steer - prev.steer;
+    if (Math.abs(steerDelta) > 25 && curr.speed > 30 && Math.sign(steerDelta) !== Math.sign(prev.steer - frames[i - 2].steer)) {
+      issues.push({
+        kind: 'snap_correction',
+        dist: curr.dist,
+        severity: Math.abs(steerDelta) > 45 ? 'major' : 'minor',
+        note: `Sharp steering correction (${steerDelta.toFixed(0)}° in one frame) at ${curr.speed.toFixed(0)} — possible rear-end slide.`,
+      });
+    }
+
+    // Over-rev: sustained RPM at/above redline without a gear change
+    // suggests a missed upshift, not a deliberate hold.
+    if (curr.rpm > 0 && prev.gear === curr.gear && curr.rpm > 0.98 * (prev.rpm || curr.rpm) && curr.rpm > 11500) {
+      issues.push({
+        kind: 'engine_over_rev',
+        dist: curr.dist,
+        severity: 'minor',
+        note: `Held ${curr.rpm} RPM in gear ${curr.gear} — check for a missed upshift.`,
+      });
+    }
+  }
+
+  return issues;
+}
+
+// =======================================================================
+// 6. Coaching narrative — LLM-generated summaryText, a note + a short
+// suggestion for each corner AND each straight, plus top-level
+// suggestions, all built from the structured output of sections 1-5
+// above. The LLM never sees raw frame data, only the already-computed
+// numbers, so it can't invent facts that contradict the deterministic
+// analysis.
+// =======================================================================
+
+interface NarrativeCornerInput {
+  id: number;
+  direction: 'left' | 'right';
+  entryDist: number;
+  apexDist: number;
+  exitDist: number;
+  brakePointDist: number;
+  brakePeakPressure: number;
+  brakeDurationMeters: number;
+  trailBrakePercent: number;
+  minSpeedInCorner: number;
+  throttleApplicationDist: number;
+  distFromApexToThrottle: number;
+  fullThrottleDist: number | null;
+  applicationSmoothness: number;
+  issues: DetectedIssue[];
+}
+
+interface NarrativeStraightInput {
+  id: number;
+  startDist: number;
+  endDist: number;
+  lengthMeters: number;
+  topSpeed: number;
+  topSpeedDist: number;
+  avgThrottle: number;
+  drsActivePercent: number;
+  deltaVsReferenceSeconds: number | null;
+}
+
+interface NarrativeInput {
+  lapNum: number;
+  lapTime: number;
+  lapValid: boolean;
+  referenceLapNum: number | null;
+  comparison: {
+    totalDeltaSeconds: number;
+    sectorDeltas: { sector1: number; sector2: number; sector3: number };
+    biggestGainZone: LapComparison['biggestGainZone'];
+    biggestLossZone: LapComparison['biggestLossZone'];
+  } | null;
+  corners: NarrativeCornerInput[];
+  straights: NarrativeStraightInput[];
+  generalIssues: DetectedIssue[];
+}
+
+interface CoachingNarrative {
+  summaryText: string;
+  cornerNotes: Map<number, string>;
+  cornerSuggestions: Map<number, string>;
+  straightNotes: Map<number, string>;
+  straightSuggestions: Map<number, string>;
+  suggestions: string[];
+  source: 'llm' | 'deterministic';
+}
+
+const COACH_SYSTEM_PROMPT = `You are PitBoss's sim-racing driving coach for F1 UDP telemetry.
+You are given the ALREADY-COMPUTED structured output of a deterministic telemetry analysis for one lap: lap time, an optional comparison against a reference lap, a per-corner breakdown (braking point/pressure/duration, trail-brake %, min corner speed, throttle application point, distance from apex to throttle, full-throttle point, throttle smoothness 0-1, and any detected issues), and a per-straight breakdown (length, top speed and where it was reached, average throttle 0-1, % of the straight with DRS active, and time delta vs the reference lap across that straight if available).
+
+Your job is ONLY to interpret these numbers in plain, encouraging but honest coaching language. Do not invent facts, distances, or times that are not present in the data. Do not contradict the numbers given. If a value is missing or looks like a sensor gap (e.g. fullThrottleDist is null), say so rather than guessing.
+
+Corner numbering: each corner object has an "id" field starting at 0 — this is an internal array index, NOT the display number. Always refer to corners using id+1 in your prose (e.g. id 0 is "Corner 1", id 2 is "Corner 3"), to match what the driver sees on screen. Never write "corner 0" or any other 0-indexed reference. Straights should be referred to descriptively (e.g. "the straight after Corner 3") rather than by a straight id number, since the driver doesn't see straight numbers on screen.
+
+Field names are internal variable names, not driving vocabulary — describe what they mean in plain racing language instead of naming the field. For example, say "throttle came on a bit late after the apex" rather than "distFromApexToThrottle was high".
+
+Units: distances in meters, speeds in km/h, times in seconds, angles in degrees, pressures/smoothness/throttle on a 0-1 scale.
+
+Respond with ONLY a single JSON object, no markdown fences, no prose outside the JSON, matching exactly this shape:
+{
+  "summary": "2-4 sentence overall lap summary",
+  "cornerNotes": { "<cornerId>": "1-3 sentence coaching note for that corner", ... one entry per corner id given ... },
+  "cornerSuggestions": { "<cornerId>": "1 short, concrete, single-focus next-lap tip for that corner — the ONE thing to try differently, or a short affirmation if execution was clean", ... one entry per corner id given ... },
+  "straightNotes": { "<straightId>": "1-2 sentence note about that straight — top speed reached, throttle discipline, DRS usage, and/or time delta if given", ... one entry per straight id given ... },
+  "straightSuggestions": { "<straightId>": "1 short, concrete tip for that straight, or a short affirmation if it was clean", ... one entry per straight id given ... },
+  "suggestions": ["3-5 short, concrete, prioritized next-lap tips covering the whole lap, each grounded in a specific number, corner, or straight from the data above, described in plain racing language rather than field names. Order from highest-impact first. Do not repeat the summary verbatim."]
+}`;
+
+function stripJsonFences(text: string): string {
+  return text.replace(/```json|```/g, '').trim();
+}
+
+interface ParsedNarrative {
+  summary: string;
+  cornerNotes: Record<string, string>;
+  cornerSuggestions: Record<string, string>;
+  straightNotes: Record<string, string>;
+  straightSuggestions: Record<string, string>;
+  suggestions: string[];
+}
+
+function isStringRecord(v: unknown): v is Record<string, string> {
+  return !!v && typeof v === 'object' && !Array.isArray(v) && Object.values(v).every((x) => typeof x === 'string');
+}
+
+function parseNarrativeResponse(raw: string): ParsedNarrative | null {
+  try {
+    const parsed = JSON.parse(stripJsonFences(raw));
+    if (
+      parsed &&
+      typeof parsed.summary === 'string' &&
+      isStringRecord(parsed.cornerNotes) &&
+      isStringRecord(parsed.cornerSuggestions) &&
+      isStringRecord(parsed.straightNotes) &&
+      isStringRecord(parsed.straightSuggestions) &&
+      Array.isArray(parsed.suggestions) &&
+      parsed.suggestions.every((s: unknown) => typeof s === 'string')
+    ) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deterministic suggestions builder — ranks the most actionable findings
+ * from the structured analysis into 3-5 concrete top-level tips. Used both
+ * as the fallback when the LLM call fails/is unparseable, and as a sanity
+ * reference the LLM path never needs but this keeps the two code paths
+ * symmetric with buildDeterministicNarrative below.
+ */
+function buildDeterministicSuggestions(input: NarrativeInput): string[] {
+  const suggestions: string[] = [];
+
+  if (input.comparison?.biggestLossZone) {
+    const z = input.comparison.biggestLossZone;
+    suggestions.push(
+      `Focus here first: ${z.lostSeconds.toFixed(2)}s lost between ${z.startDist.toFixed(0)}m and ${z.endDist.toFixed(0)}m vs lap ${input.referenceLapNum}.`
+    );
+  }
+
+  const brakedCorners = input.corners.filter((c) => c.brakeDurationMeters > 0);
+  if (brakedCorners.length > 0) {
+    const worstTrail = brakedCorners.reduce((a, b) => (a.trailBrakePercent < b.trailBrakePercent ? a : b));
+    if (worstTrail.trailBrakePercent < 0.3) {
+      suggestions.push(
+        `Corner ${worstTrail.id + 1}: only ${(worstTrail.trailBrakePercent * 100).toFixed(0)}% trail brake — carry a bit more brake into the turn to rotate the car earlier.`
+      );
+    }
+  }
+
+  if (input.corners.length > 0) {
+    const roughest = input.corners.reduce((a, b) => (a.applicationSmoothness < b.applicationSmoothness ? a : b));
+    if (roughest.applicationSmoothness < 0.5) {
+      suggestions.push(
+        `Corner ${roughest.id + 1}: throttle application is inconsistent on exit — smooth the initial squeeze before going to full throttle.`
+      );
+    }
+
+    const latestThrottle = input.corners.reduce((a, b) => (a.distFromApexToThrottle > b.distFromApexToThrottle ? a : b));
+    if (latestThrottle.distFromApexToThrottle > 20) {
+      suggestions.push(
+        `Corner ${latestThrottle.id + 1}: throttle came on ${latestThrottle.distFromApexToThrottle.toFixed(0)}m after the apex — there may be time available getting back to power sooner.`
+      );
+    }
+  }
+
+  const liftingStraight = input.straights.find((s) => s.avgThrottle < 0.9);
+  if (liftingStraight) {
+    suggestions.push(
+      `Throttle wasn't fully pinned on the ${liftingStraight.lengthMeters.toFixed(0)}m straight around ${liftingStraight.startDist.toFixed(0)}m — check for an unnecessary lift.`
+    );
+  }
+
+  const majorIssues = input.generalIssues.filter((i) => i.severity === 'major');
+  if (majorIssues.length > 0) {
+    const kinds = new Set(majorIssues.map((i) => i.kind));
+    if (kinds.has('lockup')) {
+      suggestions.push(`Lockup events detected this lap — ease initial brake pressure to avoid flat-spotting the tyres.`);
+    }
+    if (kinds.has('snap_correction')) {
+      suggestions.push(`The rear stepped out at least once — consider slightly less aggressive turn-in or throttle mid-corner.`);
+    }
+    if (kinds.has('engine_over_rev')) {
+      suggestions.push(`At least one missed upshift this lap — check your shift points, you're bouncing off the limiter.`);
+    }
+  }
+
+  return suggestions.slice(0, 5);
+}
+
+function deterministicCornerSuggestion(c: NarrativeCornerInput): string {
+  const majorIssue = c.issues.find((iss) => iss.severity === 'major');
+  if (majorIssue) {
+    if (majorIssue.kind === 'lockup') return 'Ease initial brake pressure here to avoid the lockup.';
+    if (majorIssue.kind === 'snap_correction') return 'A smoother initial input here should keep the rear settled.';
+    if (majorIssue.kind === 'engine_over_rev') return 'Shift a touch earlier here to stop bouncing off the limiter.';
+  }
+  if (c.brakeDurationMeters > 0 && c.trailBrakePercent < 0.3) {
+    return 'Carry a bit more brake into the corner to rotate the car earlier.';
+  }
+  if (c.applicationSmoothness < 0.5) {
+    return 'Smooth out the throttle application on exit.';
+  }
+  if (c.distFromApexToThrottle > 20) {
+    return 'Get back to power sooner after the apex.';
+  }
+  return 'Solid execution here — no clear time on the table.';
+}
+
+function deterministicStraightNote(s: NarrativeStraightInput): string {
+  const parts: string[] = [];
+  parts.push(`${s.lengthMeters.toFixed(0)}m straight, top speed ${s.topSpeed.toFixed(0)} km/h at ${s.topSpeedDist.toFixed(0)}m.`);
+  if (s.drsActivePercent > 0) {
+    parts.push(`DRS active ${(s.drsActivePercent * 100).toFixed(0)}% of the way.`);
+  }
+  if (s.deltaVsReferenceSeconds != null) {
+    const sign = s.deltaVsReferenceSeconds >= 0 ? '+' : '';
+    parts.push(`${sign}${s.deltaVsReferenceSeconds.toFixed(3)}s vs the reference lap here.`);
+  }
+  return parts.join(' ');
+}
+
+function deterministicStraightSuggestion(s: NarrativeStraightInput): string {
+  if (s.avgThrottle < 0.9) {
+    return 'Throttle was not held fully flat the whole way — check for an unnecessary lift.';
+  }
+  if (s.deltaVsReferenceSeconds != null && s.deltaVsReferenceSeconds > 0.05) {
+    return `Losing ${s.deltaVsReferenceSeconds.toFixed(2)}s here vs the reference lap — likely down to exit speed from the corner before it, not this straight itself.`;
+  }
+  return 'Full throttle held cleanly — nothing to change here.';
+}
+
+/**
+ * Deterministic fallback narrative — used when the LLM call fails, times
+ * out, or returns something we can't parse. Template-built from the same
+ * structured input the LLM would have received, so the UI always gets a
+ * usable summary, per-corner and per-straight notes/suggestions, and
+ * top-level suggestions even if the PitBoss worker is down.
+ */
+function buildDeterministicNarrative(input: NarrativeInput): CoachingNarrative {
+  const summaryParts: string[] = [];
+  summaryParts.push(`Lap ${input.lapNum}: ${input.lapTime.toFixed(3)}s${input.lapValid ? '' : ' (invalid)'}.`);
+  if (input.comparison) {
+    const sign = input.comparison.totalDeltaSeconds >= 0 ? '+' : '';
+    summaryParts.push(`${sign}${input.comparison.totalDeltaSeconds.toFixed(3)}s vs lap ${input.referenceLapNum}.`);
+    if (input.comparison.biggestLossZone) {
+      summaryParts.push(
+        `Biggest loss: ${input.comparison.biggestLossZone.lostSeconds.toFixed(2)}s between ${input.comparison.biggestLossZone.startDist.toFixed(0)}m–${input.comparison.biggestLossZone.endDist.toFixed(0)}m.`
+      );
+    }
+  }
+  const majorIssueCount = input.generalIssues.filter((i) => i.severity === 'major').length;
+  if (majorIssueCount > 0) {
+    summaryParts.push(`${majorIssueCount} major issue(s) detected this lap.`);
+  }
+
+  const cornerNotes = new Map<number, string>();
+  const cornerSuggestions = new Map<number, string>();
+  for (const c of input.corners) {
+    const parts: string[] = [];
+    parts.push(`Braked at ${c.brakePointDist.toFixed(0)}m, peak ${(c.brakePeakPressure * 100).toFixed(0)}% brake pressure, min speed ${c.minSpeedInCorner.toFixed(0)} km/h.`);
+    parts.push(`Trail-braked through ${(c.trailBrakePercent * 100).toFixed(0)}% of the braking zone.`);
+    parts.push(
+      c.fullThrottleDist != null
+        ? `Throttle applied ${c.distFromApexToThrottle.toFixed(0)}m after apex, full throttle by ${c.fullThrottleDist.toFixed(0)}m.`
+        : `Throttle applied ${c.distFromApexToThrottle.toFixed(0)}m after apex; full throttle not reached before the next braking zone.`
+    );
+    if (c.issues.length > 0) {
+      parts.push(`${c.issues.length} issue(s) flagged in this corner.`);
+    }
+    cornerNotes.set(c.id, parts.join(' '));
+    cornerSuggestions.set(c.id, deterministicCornerSuggestion(c));
+  }
+
+  const straightNotes = new Map<number, string>();
+  const straightSuggestions = new Map<number, string>();
+  for (const s of input.straights) {
+    straightNotes.set(s.id, deterministicStraightNote(s));
+    straightSuggestions.set(s.id, deterministicStraightSuggestion(s));
+  }
+
+  return {
+    summaryText: summaryParts.join(' '),
+    cornerNotes,
+    cornerSuggestions,
+    straightNotes,
+    straightSuggestions,
+    suggestions: buildDeterministicSuggestions(input),
+    source: 'deterministic',
+  };
+}
+
+async function generateCoachingNarrative(input: NarrativeInput): Promise<CoachingNarrative> {
+  try {
+    const result = await pbInfer({
+      mode: 'reasoning',
+      system: COACH_SYSTEM_PROMPT,
+      prompt: JSON.stringify(input),
+      max_tokens: 2000,
+      temperature: 0.4,
+    });
+
+    const parsed = parseNarrativeResponse(result.response);
+    if (parsed) {
+      const toMap = (rec: Record<string, string>) => {
+        const m = new Map<number, string>();
+        for (const [key, note] of Object.entries(rec)) {
+          const id = Number(key);
+          if (Number.isFinite(id)) m.set(id, note);
+        }
+        return m;
+      };
+      return {
+        summaryText: parsed.summary,
+        cornerNotes: toMap(parsed.cornerNotes),
+        cornerSuggestions: toMap(parsed.cornerSuggestions),
+        straightNotes: toMap(parsed.straightNotes),
+        straightSuggestions: toMap(parsed.straightSuggestions),
+        suggestions: parsed.suggestions,
+        source: 'llm',
+      };
+    }
+
+    console.error('[telemetry-coach] pbInfer returned unparseable narrative JSON, falling back to deterministic:', result.response);
+  } catch (err) {
+    console.error('[telemetry-coach] pbInfer call failed, falling back to deterministic narrative:', err);
+  }
+  return buildDeterministicNarrative(input);
+}
+
+// =======================================================================
+// 7. Top-level orchestrator
+// =======================================================================
+
+export async function buildCoachingReport(
+  session: TelemetrySession,
+  lapNum: number,
+  referenceLapNum?: number
+): Promise<CoachingReport> {
+  const lap = session.laps.find((l) => l.lapNum === lapNum);
+  if (!lap) throw new Error(`Lap ${lapNum} not found in session ${session.sessionUid}`);
+
+  const referenceLap = referenceLapNum != null ? session.laps.find((l) => l.lapNum === referenceLapNum) : undefined;
+  const comparison = referenceLap ? compareLaps(referenceLap, lap) : null;
+
+  const corners = detectCorners(lap.frames);
+  const cornerAnalysis = corners.map((corner, idx) => {
+    const braking = analyzeBraking(lap.frames, corner);
+    const throttle = analyzeThrottle(lap.frames, corner, corners[idx + 1] ?? null);
+    const cornerIssues = detectIssues(framesInRange(lap.frames, corner.entryDist - 50, corner.exitDist + 50));
+    return { corner, braking, throttle, issues: cornerIssues };
+  });
+
+  const straights = detectStraights(lap.frames, corners);
+  const straightAnalysis = straights.map((straight) => ({
+    straight,
+    analysis: analyzeStraight(lap.frames, straight, comparison),
+  }));
+
+  const allIssues = detectIssues(lap.frames);
+
+  const narrativeInput: NarrativeInput = {
+    lapNum: lap.lapNum,
+    lapTime: lap.lapTime,
+    lapValid: lap.lapValid,
+    referenceLapNum: referenceLapNum ?? null,
+    comparison: comparison
+      ? {
+          totalDeltaSeconds: comparison.totalDeltaSeconds,
+          sectorDeltas: comparison.sectorDeltas,
+          biggestGainZone: comparison.biggestGainZone,
+          biggestLossZone: comparison.biggestLossZone,
+        }
+      : null,
+    corners: cornerAnalysis.map(({ corner, braking, throttle, issues }) => ({
+      id: corner.id,
+      direction: corner.direction,
+      entryDist: corner.entryDist,
+      apexDist: corner.apexDist,
+      exitDist: corner.exitDist,
+      brakePointDist: braking.brakePointDist,
+      brakePeakPressure: braking.brakePeakPressure,
+      brakeDurationMeters: braking.brakeDurationMeters,
+      trailBrakePercent: braking.trailBrakePercent,
+      minSpeedInCorner: braking.minSpeedInCorner,
+      throttleApplicationDist: throttle.throttleApplicationDist,
+      distFromApexToThrottle: throttle.distFromApexToThrottle,
+      fullThrottleDist: throttle.fullThrottleDist,
+      applicationSmoothness: throttle.applicationSmoothness,
+      issues,
+    })),
+    straights: straightAnalysis.map(({ straight, analysis }) => ({
+      id: straight.id,
+      startDist: straight.startDist,
+      endDist: straight.endDist,
+      lengthMeters: analysis.lengthMeters,
+      topSpeed: analysis.topSpeed,
+      topSpeedDist: analysis.topSpeedDist,
+      avgThrottle: analysis.avgThrottle,
+      drsActivePercent: analysis.drsActivePercent,
+      deltaVsReferenceSeconds: analysis.deltaVsReferenceSeconds,
+    })),
+    generalIssues: allIssues,
+  };
+
+  const narrative = await generateCoachingNarrative(narrativeInput);
+
+  // Only computed if the LLM (or its fallback) left a gap — e.g. the model
+  // omitted a corner or straight despite being given all of them.
+  let deterministicFallback: CoachingNarrative | null = null;
+  const fallback = (): CoachingNarrative => {
+    if (!deterministicFallback) deterministicFallback = buildDeterministicNarrative(narrativeInput);
+    return deterministicFallback;
+  };
+
+  const corners_: CornerCoaching[] = cornerAnalysis.map(({ corner, braking, throttle, issues }) => ({
+    corner,
+    braking,
+    throttle,
+    issues,
+    coachingNote: narrative.cornerNotes.get(corner.id) ?? fallback().cornerNotes.get(corner.id) ?? '',
+    suggestion: narrative.cornerSuggestions.get(corner.id) ?? fallback().cornerSuggestions.get(corner.id) ?? '',
+  }));
+
+  const straights_: StraightCoaching[] = straightAnalysis.map(({ straight, analysis }) => ({
+    straight,
+    analysis,
+    coachingNote: narrative.straightNotes.get(straight.id) ?? fallback().straightNotes.get(straight.id) ?? '',
+    suggestion: narrative.straightSuggestions.get(straight.id) ?? fallback().straightSuggestions.get(straight.id) ?? '',
+  }));
+
+  return {
+    lapNum,
+    referenceLapNum: referenceLapNum ?? null,
+    comparison,
+    corners: corners_,
+    straights: straights_,
+    issues: allIssues,
+    summaryText: narrative.summaryText,
+    suggestions: narrative.suggestions,
+    narrativeSource: narrative.source,
+  };
+}
