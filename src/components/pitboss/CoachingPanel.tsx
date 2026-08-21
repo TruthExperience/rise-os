@@ -7,11 +7,6 @@ import type {
   DetectedIssue,
 } from "@/lib/pitboss/telemetry-coach-types";
 
-const LAP_COLORS: Record<number, string> = {
-  2: "#9B5DE5", 3: "#00C853", 4: "#FFC400",
-  5: "#00B8D9", 6: "#FF5C77", 7: "#5DA9E9",
-};
-
 function Panel({ title, subtitle, children, style }: { title: string; subtitle?: string; children: React.ReactNode; style?: React.CSSProperties }) {
   return (
     <div style={{
@@ -171,6 +166,30 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
       }}>
         {report.summaryText}
       </div>
+
+      {report.suggestions.length > 0 && (
+        <div style={{
+          background: "#0E1116", border: "1px solid #1D2229", borderRadius: 6,
+          padding: "12px 14px", marginBottom: 16,
+        }}>
+          <div style={{
+            fontFamily: "'Titillium Web', sans-serif", fontWeight: 700, fontSize: 11.5,
+            letterSpacing: "0.06em", textTransform: "uppercase", color: "#00C853", marginBottom: 8,
+          }}>
+            Next Lap
+          </div>
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            {report.suggestions.map((s, i) => (
+              <li key={i} style={{
+                fontFamily: "'Inter', sans-serif", fontSize: 12.5, color: "#E7EAEE",
+                lineHeight: 1.5, marginBottom: i < report.suggestions.length - 1 ? 6 : 0,
+              }}>
+                {s}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
 
       {cmp && (
         <div style={{
