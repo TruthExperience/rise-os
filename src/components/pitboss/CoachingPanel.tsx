@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import type {
   CoachingReport,
   CornerCoaching,
+  StraightCoaching,
   DetectedIssue,
 } from "@/lib/pitboss/telemetry-coach-types";
 
@@ -35,6 +36,19 @@ const badgeStyle = (color: string): React.CSSProperties => ({
 
 const severityColor = (sev: DetectedIssue["severity"]) => (sev === "major" ? "#FF5C77" : "#FFC400");
 
+function TipLine({ text, color }: { text: string; color: string }) {
+  return (
+    <div style={{
+      fontFamily: "'Inter', sans-serif", fontSize: 12, color: "#E7EAEE",
+      lineHeight: 1.45, marginTop: 8, paddingTop: 8, borderTop: "1px dashed #1D2229",
+      display: "flex", gap: 8,
+    }}>
+      <span style={{ color, fontWeight: 700, flexShrink: 0 }}>TIP</span>
+      <span>{text}</span>
+    </div>
+  );
+}
+
 function IssueRow({ issue }: { issue: DetectedIssue }) {
   return (
     <div style={{
@@ -50,7 +64,7 @@ function IssueRow({ issue }: { issue: DetectedIssue }) {
 }
 
 function CornerCard({ corner }: { corner: CornerCoaching }) {
-  const { corner: seg, braking, throttle, issues, coachingNote } = corner;
+  const { corner: seg, braking, throttle, issues, coachingNote, suggestion } = corner;
   const hasMajorIssue = issues.some((iss: DetectedIssue) => iss.severity === "major");
 
   return (
@@ -97,9 +111,66 @@ function CornerCard({ corner }: { corner: CornerCoaching }) {
           {issues.map((iss: DetectedIssue, i: number) => <IssueRow key={i} issue={iss} />)}
         </div>
       )}
+
+      {suggestion && <TipLine text={suggestion} color="#00C853" />}
     </div>
   );
 }
+
+function StraightCard({ straight }: { straight: StraightCoaching }) {
+  const { straight: seg, analysis, coachingNote, suggestion } = straight;
+  return (
+    <div style={{
+      border: "1px solid #1D2229", borderRadius: 6, padding: "12px 14px",
+      background: "#0B0E11", // slightly darker than corner cards — visually distinct at a glance
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{
+          fontFamily: "'Titillium Web', sans-serif", fontWeight: 700, fontSize: 13, color: "#5DA9E9"
+        }}>
+          STRAIGHT <span style={{ color: "#5B6572", fontWeight: 400 }}>
+            {seg.afterCornerId != null ? `after C${seg.afterCornerId + 1}` : "start"}
+            {" → "}
+            {seg.beforeCornerId != null ? `C${seg.beforeCornerId + 1}` : "finish"}
+          </span>
+        </div>
+      </div>
+
+      <div style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px",
+        fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#B7BFC9", marginBottom: 10
+      }}>
+        <div><span style={{ color: "#5B6572" }}>Length</span> {Math.round(analysis.lengthMeters)}m</div>
+        <div><span style={{ color: "#5B6572" }}>Top speed</span> {Math.round(analysis.topSpeed)} km/h</div>
+        <div><span style={{ color: "#5B6572" }}>Avg throttle</span> {(analysis.avgThrottle * 100).toFixed(0)}%</div>
+        <div><span style={{ color: "#5B6572" }}>DRS active</span> {(analysis.drsActivePercent * 100).toFixed(0)}%</div>
+        {analysis.deltaVsReferenceSeconds != null && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <span style={{ color: "#5B6572" }}>Delta here</span>{" "}
+            <span style={{ color: analysis.deltaVsReferenceSeconds <= 0 ? "#00C853" : "#FF5C77", fontWeight: 700 }}>
+              {analysis.deltaVsReferenceSeconds >= 0 ? "+" : ""}{analysis.deltaVsReferenceSeconds.toFixed(3)}s
+            </span>
+          </div>
+        )}
+      </div>
+
+      {coachingNote && (
+        <div style={{
+          fontFamily: "'Inter', sans-serif", fontSize: 12.5, color: "#E7EAEE",
+          lineHeight: 1.5, borderTop: "1px solid #1D2229", paddingTop: 10,
+        }}>
+          {coachingNote}
+        </div>
+      )}
+
+      {suggestion && <TipLine text={suggestion} color="#5DA9E9" />}
+    </div>
+  );
+}
+
+type TrackSegment =
+  | { kind: "corner"; startDist: number; data: CornerCoaching }
+  | { kind: "straight"; startDist: number; data: StraightCoaching };
 
 interface CoachingPanelProps {
   sessionUid: string;
@@ -155,6 +226,14 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
   if (!report) return null;
 
   const cmp = report.comparison;
+
+  // Merge corners and straights into one track-ordered list for rendering,
+  // so the coaching timeline reads in the same order the car actually
+  // drives the lap, rather than corners-then-straights.
+  const segments: TrackSegment[] = [
+    ...report.corners.map((c): TrackSegment => ({ kind: "corner", startDist: c.corner.entryDist, data: c })),
+    ...report.straights.map((s): TrackSegment => ({ kind: "straight", startDist: s.straight.startDist, data: s })),
+  ].sort((a, b) => a.startDist - b.startDist);
 
   return (
     <Panel
@@ -221,13 +300,17 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
         </div>
       )}
 
-      {report.corners.length === 0 ? (
+      {segments.length === 0 ? (
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#5B6572" }}>
-          No corners detected for this lap.
+          No corners or straights detected for this lap.
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-          {report.corners.map((c: CoachingReport["corners"][number]) => <CornerCard key={c.corner.id} corner={c} />)}
+          {segments.map((seg) =>
+            seg.kind === "corner"
+              ? <CornerCard key={`corner-${seg.data.corner.id}`} corner={seg.data} />
+              : <StraightCard key={`straight-${seg.data.straight.id}`} straight={seg.data} />
+          )}
         </div>
       )}
     </Panel>
