@@ -73,6 +73,31 @@
 // need the same category-aware disambiguation race2 gets. Currently
 // race1 always resolves to "sprint" — confirm this before trusting
 // standard-weekend F1 race1 uploads.
+//
+// CASING: resolveSessionType lowercases rawSessionType before matching,
+// and every case label below is written lowercase. This was added
+// deliberately rather than assumed — the pre-existing qualifying cases
+// ('shortq', 'osq') are abbreviations, not camelCased transcriptions of
+// EA's spec labels ("Short Q" / "One-Shot Q" would camelCase to 'shortQ'
+// / 'oneShotQ' with a capital letter, not what's here). That means we
+// don't actually have a confirmed casing convention for the capture
+// tool's raw sessionType strings, including the sprint shootout family
+// added below (sprintShootout1/2/3, Short Sprint Shootout, One-Shot
+// Sprint Shootout). Lowercasing at the match site makes the function
+// correct regardless of which casing the tool actually sends, instead of
+// betting on a guess. If a real sprint-shootout payload comes through and
+// gets rejected as unrecognized, log the exact raw value from the 400
+// response and add it here verbatim (lowercased) rather than assuming.
+//
+// COVERAGE (confirmed against the official F1 25 UDP appendix — 19
+// m_sessionType IDs, 0=Unknown through 18=Time Trial): every named
+// session type maps into one of our five buckets below. 'sprint' and
+// 'sprintqualifying' (pre-existing cases) don't correspond to any ID in
+// that table — likely older-game-year naming or the capture tool's own
+// shorthand for a Sprint Shootout ID; left in place since they're
+// harmless if unused. This table confirms which session types exist, not
+// the exact JSON string the capture tool sends for each — that's a
+// separate, still-unverified layer (see CASING note above).
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
@@ -105,8 +130,11 @@ function isF2Compound(tyreCompound: string | undefined | null): boolean {
 // SessionType, disambiguating "race2" (and "race1") by category per the
 // file header. Returns null for anything unrecognized so the caller can
 // produce a clear 400 with the original raw value.
+//
+// Matching is case-insensitive (see file header CASING note) — the raw
+// value is lowercased once here, and every case below is lowercase.
 function resolveSessionType(rawSessionType: string, tyreCompound: string | undefined | null): SessionType | null {
-  switch (rawSessionType) {
+  switch (rawSessionType.toLowerCase()) {
     case 'race1':
       // F2 and F1-sprint-weekend both use race1 = sprint. See the file
       // header's OPEN QUESTION for the unconfirmed standard-F1-weekend
@@ -134,6 +162,16 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
       return 'qualifying';
     case 'sprint':
     case 'sprintqualifying':
+    // Sprint weekend qualifying-format sessions (F1 25 IDs 10-14:
+    // Sprint Shootout 1/2/3, Short Sprint Shootout, One-Shot Sprint
+    // Shootout) — same bucket as sprint/sprintqualifying above. Matched
+    // lowercase per the CASING note, so this covers the raw string
+    // regardless of how the capture tool actually cases it.
+    case 'sprintshootout1':
+    case 'sprintshootout2':
+    case 'sprintshootout3':
+    case 'shortsprintshootout':
+    case 'oneshotsprintshootout':
       return 'sprint';
     case 'time_trial':
     case 'timetrial':
