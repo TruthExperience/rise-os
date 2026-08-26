@@ -49,7 +49,12 @@ export async function POST(req: NextRequest) {
     driver_id = driverIdOverride;
   }
   if (!driver_id) {
-    return NextResponse.json({ error: "Could not resolve driver identity" }, { status: 401 });
+    // See calculate/route.ts for why this is split into two messages.
+    const reason = !discord_id && !driverIdOverride
+      ? 'no discord_id or driver_id was included in the request'
+      : `no pitboss.drivers row matched discord_id=${discord_id ?? 'null'} / driver_id=${driverIdOverride ?? 'null'}`;
+    console.error(`[fm/setups/mark-optimal] Could not resolve driver identity: ${reason}`);
+    return NextResponse.json({ error: `Could not resolve driver identity (${reason})` }, { status: 401 });
   }
 
   const supabase = createAdminClient();
