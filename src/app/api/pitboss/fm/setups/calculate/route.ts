@@ -87,7 +87,19 @@ export async function POST(req: NextRequest) {
     driver_id = driverIdOverride;
   }
   if (!driver_id) {
-    return NextResponse.json({ error: "Could not resolve driver identity" }, { status: 401 });
+    // Distinguish the two failure modes that were previously collapsed into
+    // one generic message: no identity was ever sent (client-side — most
+    // likely the session hadn't finished loading when discordId() was read,
+    // since useSession() only becomes 'authenticated' asynchronously) vs. an
+    // identity WAS sent but no pitboss.drivers row has that discord_id
+    // (data-side — the account isn't registered as a driver). Logging both
+    // the reason and the raw discord_id/driver_id received makes this
+    // debuggable from server logs instead of guessing blind next time.
+    const reason = !discord_id && !driverIdOverride
+      ? 'no discord_id or driver_id was included in the request'
+      : `no pitboss.drivers row matched discord_id=${discord_id ?? 'null'} / driver_id=${driverIdOverride ?? 'null'}`;
+    console.error(`[fm/setups/calculate] Could not resolve driver identity: ${reason}`);
+    return NextResponse.json({ error: `Could not resolve driver identity (${reason})` }, { status: 401 });
   }
 
   let ranges, session;
