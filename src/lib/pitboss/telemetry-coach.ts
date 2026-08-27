@@ -651,6 +651,46 @@ function stripJsonFences(text: string): string {
   return text.replace(/```json|```/g, '').trim();
 }
 
+// Recovers a JSON object embedded in surrounding prose. Added because the
+// 'reasoning' mode model (routed through pitboss-proxy) frequently returns
+// its entire chain-of-thought as plain text before the actual JSON answer
+// — e.g. "We need to produce JSON with summary, cornerNotes... Corner 0:
+// direction right..." followed eventually by the real { ... } object. Some
+// OpenRouter free-tier providers for reasoning models don't separate the
+// reasoning trace into its own response field, so this can't be fixed by
+// reading a different field — the reasoning text is mixed into the same
+// string as the answer. Rather than require the whole response to be pure
+// JSON (which was silently discarding a correct answer buried in prose and
+// falling back to the deterministic narrative on nearly every call),
+// find the last balanced {...} block by scanning backward from the final
+// '}' and tracking brace depth, and parse just that substring.
+function extractTrailingJsonObject(text: string): string | null {
+  const lastBrace = text.lastIndexOf('}');
+  if (lastBrace === -1) return null;
+  let depth = 0;
+  for (let i = lastBrace; i >= 0; i--) {
+    if (text[i] === '}') depth++;
+    else if (text[i] === '{') {
+      depth--;
+      if (depth === 0) return text.slice(i, lastBrace + 1);
+    }
+  }
+  return null;
+}
+
+function isValidParsedNarrative(parsed: any): parsed is ParsedNarrative {
+  return !!(
+    parsed &&
+    typeof parsed.summary === 'string' &&
+    isStringRecord(parsed.cornerNotes) &&
+    isStringRecord(parsed.cornerSuggestions) &&
+    isStringRecord(parsed.straightNotes) &&
+    isStringRecord(parsed.straightSuggestions) &&
+    Array.isArray(parsed.suggestions) &&
+    parsed.suggestions.every((s: unknown) => typeof s === 'string')
+  );
+}
+
 interface ParsedNarrative {
   summary: string;
   cornerNotes: Record<string, string>;
@@ -665,42 +705,30 @@ function isStringRecord(v: unknown): v is Record<string, string> {
 }
 
 function parseNarrativeResponse(raw: string): ParsedNarrative | null {
+  const cleaned = stripJsonFences(raw);
+
+  // Fast path: a well-behaved model returned pure JSON with nothing else.
   try {
-    const parsed = JSON.parse(stripJsonFences(raw));
-    if (
-      parsed &&
-      typeof parsed.summary === 'string' &&
-      isStringRecord(parsed.cornerNotes) &&
-      isStringRecord(parsed.cornerSuggestions) &&
-      isStringRecord(parsed.straightNotes) &&
-      isStringRecord(parsed.straightSuggestions) &&
-      Array.isArray(parsed.suggestions) &&
-      parsed.suggestions.every((s: unknown) => typeof s === 'string')
-    ) {
-      return parsed;
-    }
-    return null;
+    const parsed = JSON.parse(cleaned);
+    if (isValidParsedNarrative(parsed)) return parsed;
   } catch {
-    return null;
+    // fall through to extraction below
   }
+
+  // Slow path: recover the JSON object from inside a reasoning trace. See
+  // extractTrailingJsonObject's comment for why this is needed.
+  const extracted = extractTrailingJsonObject(cleaned);
+  if (extracted) {
+    try {
+      const parsed = JSON.parse(extracted);
+      if (isValidParsedNarrative(parsed)) return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
 }
-
-/**
- * Deterministic suggestions builder — ranks the most actionable findings
- * from the structured analysis into 3-5 concrete top-level tips. Used both
- * as the fallback when the LLM call fails/is unparseable, and as a sanity
- * reference the LLM path never needs but this keeps the two code paths
- * symmetric with buildDeterministicNarrative below.
- */
-function buildDeterministicSuggestions(input: NarrativeInput): string[] {
-  const suggestions: string[] = [];
-
-  if (input.comparison?.biggestLossZone) {
-    const z = input.comparison.biggestLossZone;
-    suggestions.push(
-      `Focus here first: ${z.lostSeconds.toFixed(2)}s lost between ${z.startDist.toFixed(0)}m and ${z.endDist.toFixed(0)}m vs lap ${input.referenceLapNum}.`
-    );
-  }
 
   const brakedCorners = input.corners.filter((c) => c.brakeDurationMeters > 0);
   if (brakedCorners.length > 0) {
