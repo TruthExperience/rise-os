@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useSession } from 'next-auth/react'
+import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -140,7 +140,19 @@ function emptyLane(slot: 1 | 2): LaneState {
 }
 
 export default function FmSetupsPage() {
-  const { data: session, status: authStatus } = useSession()
+  // Self-contained Supabase Auth check rather than next-auth/react's
+  // useSession() (always empty — the app's real login flow at
+  // src/app/login/page.tsx signs in via Supabase Auth, never next-auth,
+  // so that session is permanently unpopulated) or the compat module's
+  // useSession() from @/lib/compat/next-auth-react (structurally correct,
+  // but its SessionProvider is never mounted anywhere in the tree —
+  // layout.tsx wraps the app in the real next-auth SessionProvider
+  // instead — so components using it, e.g. CertPageClient.tsx, are stuck
+  // reading the context's default {status:"loading"} forever). This is
+  // only used to gate the page UI; the API routes underneath independently
+  // verify identity server-side via getAuthedDriver(), so a stale client
+  // check here can't grant access to anything real.
+  const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading')
   const router = useRouter()
 
   const [loadingMeta, setLoadingMeta] = useState(true)
@@ -155,6 +167,24 @@ export default function FmSetupsPage() {
 
   // Two independent lanes, one per driver, running in parallel
   const [lanes, setLanes] = useState<[LaneState, LaneState]>([emptyLane(1), emptyLane(2)])
+
+  useEffect(() => {
+    const supabase = createClient()
+    let mounted = true
+
+    async function checkAuth() {
+      const { data, error } = await supabase.auth.getClaims()
+      if (!mounted) return
+      setAuthStatus(error || !data?.claims?.sub ? 'unauthenticated' : 'authenticated')
+    }
+    checkAuth()
+
+    const { data: listener } = supabase.auth.onAuthStateChange(() => checkAuth())
+    return () => {
+      mounted = false
+      listener.subscription.unsubscribe()
+    }
+  }, [])
 
   useEffect(() => {
     if (authStatus === 'unauthenticated') router.push('/login')
@@ -179,10 +209,6 @@ export default function FmSetupsPage() {
     }
   }
 
-  function discordId() {
-    return (session?.user as any)?.discordId ?? null
-  }
-
   function updateLane(idx: 0 | 1, patch: Partial<LaneState>) {
     setLanes((prev) => {
       const next = [...prev] as [LaneState, LaneState]
@@ -203,7 +229,6 @@ export default function FmSetupsPage() {
           conditions,
           driver_slot: lane.slot,
           driver_slot_name: lane.driverName || null,
-          discord_id: discordId(),
           ...body,
         }),
       })
@@ -288,7 +313,6 @@ export default function FmSetupsPage() {
     try {
       const qs = new URLSearchParams({
         session_id: lane.result.session_id,
-        ...(discordId() ? { discord_id: discordId() } : {}),
       })
       const res = await fetch(`/api/pitboss/fm/setups/history?${qs.toString()}`)
       const data = await res.json()
@@ -319,7 +343,6 @@ export default function FmSetupsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: lane.result.session_id,
-          discord_id: discordId(),
           setup_values: lane.result.best_setup,
         }),
       })
