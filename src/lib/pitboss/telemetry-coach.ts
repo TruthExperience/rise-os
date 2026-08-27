@@ -14,6 +14,10 @@
  *      structured output of 1-3 above. The detection/analysis math itself
  *      stays fully deterministic — the LLM only writes the prose that
  *      interprets those numbers, it never invents the numbers.
+ *   5. Track sanity check — cross-references the detected corner count
+ *      against F1_TRACKS' known turn count for this circuit, and appends
+ *      a caveat to the summary if detection looks substantially
+ *      incomplete (see "Track sanity check" section below).
  *
  * SERVER-ONLY: this file calls pbInfer, which reads PITBOSS_INTERNAL_KEY.
  * Never import this from a 'use client' component — see the recharts /
@@ -33,6 +37,7 @@
 
 import { pbInfer } from '@/lib/pitboss-llm';
 import type { TelemetryFrame, TelemetryLap, TelemetrySession } from '@/lib/telemetry-types';
+import { findTrackByRawName } from '@/lib/pitboss/f1-tracks';
 
 // Re-exported so existing server-side imports of these types from
 // "@/lib/pitboss/telemetry-coach" keep working unchanged. Client components
@@ -678,19 +683,6 @@ function extractTrailingJsonObject(text: string): string | null {
   return null;
 }
 
-function isValidParsedNarrative(parsed: any): parsed is ParsedNarrative {
-  return !!(
-    parsed &&
-    typeof parsed.summary === 'string' &&
-    isStringRecord(parsed.cornerNotes) &&
-    isStringRecord(parsed.cornerSuggestions) &&
-    isStringRecord(parsed.straightNotes) &&
-    isStringRecord(parsed.straightSuggestions) &&
-    Array.isArray(parsed.suggestions) &&
-    parsed.suggestions.every((s: unknown) => typeof s === 'string')
-  );
-}
-
 interface ParsedNarrative {
   summary: string;
   cornerNotes: Record<string, string>;
@@ -702,6 +694,19 @@ interface ParsedNarrative {
 
 function isStringRecord(v: unknown): v is Record<string, string> {
   return !!v && typeof v === 'object' && !Array.isArray(v) && Object.values(v).every((x) => typeof x === 'string');
+}
+
+function isValidParsedNarrative(parsed: any): parsed is ParsedNarrative {
+  return !!(
+    parsed &&
+    typeof parsed.summary === 'string' &&
+    isStringRecord(parsed.cornerNotes) &&
+    isStringRecord(parsed.cornerSuggestions) &&
+    isStringRecord(parsed.straightNotes) &&
+    isStringRecord(parsed.straightSuggestions) &&
+    Array.isArray(parsed.suggestions) &&
+    parsed.suggestions.every((s: unknown) => typeof s === 'string')
+  );
 }
 
 function parseNarrativeResponse(raw: string): ParsedNarrative | null {
@@ -729,6 +734,23 @@ function parseNarrativeResponse(raw: string): ParsedNarrative | null {
 
   return null;
 }
+
+/**
+ * Deterministic suggestions builder — ranks the most actionable findings
+ * from the structured analysis into 3-5 concrete top-level tips. Used both
+ * as the fallback when the LLM call fails/is unparseable, and as a sanity
+ * reference the LLM path never needs but this keeps the two code paths
+ * symmetric with buildDeterministicNarrative below.
+ */
+function buildDeterministicSuggestions(input: NarrativeInput): string[] {
+  const suggestions: string[] = [];
+
+  if (input.comparison?.biggestLossZone) {
+    const z = input.comparison.biggestLossZone;
+    suggestions.push(
+      `Focus here first: ${z.lostSeconds.toFixed(2)}s lost between ${z.startDist.toFixed(0)}m and ${z.endDist.toFixed(0)}m vs lap ${input.referenceLapNum}.`
+    );
+  }
 
   const brakedCorners = input.corners.filter((c) => c.brakeDurationMeters > 0);
   if (brakedCorners.length > 0) {
@@ -1021,6 +1043,22 @@ export async function buildCoachingReport(
     suggestion: narrative.straightSuggestions.get(straight.id) ?? fallback().straightSuggestions.get(straight.id) ?? '',
   }));
 
+  // Track sanity check — cross-reference detected corner count against the
+  // known turn count for this circuit (see lib/pitboss/f1-tracks.ts). If
+  // detection looks substantially incomplete (fewer than half the real
+  // corners found), append an explicit caveat rather than silently
+  // presenting a partial lap as if it were the whole picture. This is a
+  // deterministic, always-on check — it runs regardless of whether the
+  // narrative came from the LLM or the fallback template.
+  let summaryText = narrative.summaryText;
+  const trackInfo = findTrackByRawName(lap.track);
+  if (trackInfo && trackInfo.turns > 0) {
+    const detectedRatio = corners.length / trackInfo.turns;
+    if (detectedRatio < 0.5) {
+      summaryText += ` Note: only ${corners.length} of ${trackInfo.name}'s ~${trackInfo.turns} corners were detected this lap — some corners may be missing from this analysis.`;
+    }
+  }
+
   return {
     lapNum,
     referenceLapNum: referenceLapNum ?? null,
@@ -1028,7 +1066,7 @@ export async function buildCoachingReport(
     corners: corners_,
     straights: straights_,
     issues: allIssues,
-    summaryText: narrative.summaryText,
+    summaryText,
     suggestions: narrative.suggestions,
     narrativeSource: narrative.source,
   };
