@@ -14,13 +14,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
-import { resolveDriverIdFromSession } from "@/lib/pitboss/resolveDriver";
+import { getAuthedDriver } from "@/lib/getSupabaseUserId";
 import { FM_SETUP_PARAM_ORDER, FmSetupParamKey } from "@/lib/pitboss/fm-setup-engine";
 
 interface MarkOptimalRequestBody {
   session_id: string;
-  discord_id?: string | null;
-  driver_id?: string | null;
   // Which setup to confirm. Defaults to the session's current_values, but
   // callers marking a specific ranked candidate from history (rather than
   // whatever's currently on the sliders) should pass it explicitly.
@@ -35,27 +33,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { session_id, discord_id = null, driver_id: driverIdOverride = null, setup_values } = body;
+  const { session_id, setup_values } = body;
 
   if (!session_id) {
     return NextResponse.json({ error: "session_id is required" }, { status: 400 });
   }
 
-  let driver_id: string | null = null;
-  if (discord_id) {
-    driver_id = await resolveDriverIdFromSession(discord_id);
+  // See calculate/route.ts for why this reads the Supabase Auth session
+  // cookie instead of taking a client-supplied discord_id.
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json(
+      { error: "Could not resolve driver identity — no authenticated Supabase session found" },
+      { status: 401 },
+    );
   }
-  if (!driver_id && driverIdOverride) {
-    driver_id = driverIdOverride;
-  }
-  if (!driver_id) {
-    // See calculate/route.ts for why this is split into two messages.
-    const reason = !discord_id && !driverIdOverride
-      ? 'no discord_id or driver_id was included in the request'
-      : `no pitboss.drivers row matched discord_id=${discord_id ?? 'null'} / driver_id=${driverIdOverride ?? 'null'}`;
-    console.error(`[fm/setups/mark-optimal] Could not resolve driver identity: ${reason}`);
-    return NextResponse.json({ error: `Could not resolve driver identity (${reason})` }, { status: 401 });
-  }
+  const driver_id = driver.id;
 
   const supabase = createAdminClient();
 
