@@ -1,250 +1,684 @@
-import { NextRequest, NextResponse } from "next/server";
-import {
-  nearestSetup,
-  setupToBiasKeyed,
-  neutralAnchorBias,
-  FM_BIAS_ORDER,
-  FM_SETUP_PARAM_ORDER,
-  MAX_SETUP_CANDIDATES,
-  FmSetupParamKey,
-  FmBiasKey,
-  FmFeedbackValue,
-} from "@/lib/pitboss/fm-setup-engine";
-import {
-  fetchFmParamRanges,
-  fetchOrCreateFmSetupSession,
-  updateFmSetupSession,
-  logFmFeedback,
-  fetchFmSetupMemory,
-  upsertFmSetupMemory,
-} from "@/lib/pitboss/fm-setup-engine-data";
-import { resolveDriverIdFromSession } from "@/lib/pitboss/resolveDriver";
+'use client'
 
-interface CalculateRequestBody {
-  circuit_id: string;
-  conditions: "dry" | "wet";
-  driver_slot: 1 | 2;
-  driver_slot_name?: string | null;
-  // Discord snowflake, resolved server-side — same pattern as
-  // /api/pitboss/setups/recommend. Never trust a client-supplied driver_id
-  // for identity.
-  discord_id?: string | null;
-  driver_id?: string | null;
-  // The setup the driver just tried in-game, if this call is reporting new
-  // feedback on it. Omit to just re-run the search against existing
-  // feedback (e.g. re-fetching candidates after a session was already
-  // populated elsewhere).
-  current_values?: Record<FmSetupParamKey, number>;
-  // One feedback point per bias category being reported this call. Only
-  // include the categories the driver actually gave feedback on.
-  new_feedback?: Partial<Record<FmBiasKey, FmFeedbackValue>>;
-  // Number of ranked candidates to return, capped at MAX_SETUP_CANDIDATES.
-  // Defaults to 10 for normal UI calls; stewards/debug views can request up
-  // to the full 99 already computed by the search.
-  candidate_limit?: number;
+import { useEffect, useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { useRouter } from 'next/navigation'
+
+// ─── Types ────────────────────────────────────────────────────────────────
+
+type FmSetupParamKey = 'front_wing_angle' | 'rear_wing_angle' | 'anti_roll_bar' | 'tyre_camber' | 'toe_out'
+type FmBiasKey = 'oversteer' | 'braking' | 'cornering' | 'traction' | 'straights'
+// Matches the in-game feedback categories exactly — F1 Manager only ever
+// shows Optimal/Great/Good/Bad after a practice run. "Bad+"/"Bad-" aren't
+// real in-game options and the engine no longer narrows on them (see
+// fm-setup-engine.ts) — keeping them here would silently no-op.
+type FmFeedbackValue = 'optimal' | 'great' | 'good' | 'bad' | 'unknown'
+
+interface Track {
+  id: string
+  name: string
+  slug: string
+  country: string | null
 }
 
-export async function POST(req: NextRequest) {
-  let body: CalculateRequestBody;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+interface ParamDef {
+  param_key: FmSetupParamKey
+  label: string
+  characteristic: string
+  min_value: number
+  max_value: number
+  step: number
+  unit: string
+  value_format: string
+  display_order: number
+}
 
-  const {
-    circuit_id,
-    conditions,
-    driver_slot,
-    driver_slot_name = null,
-    discord_id = null,
-    driver_id: driverIdOverride = null,
-    current_values,
-    new_feedback,
-    candidate_limit,
-  } = body;
+interface CalculateResponse {
+  session_id: string
+  iteration_count: number
+  lowest_rule_break: number
+  possible_setups: number
+  best_setup: Record<FmSetupParamKey, number> | null
+  candidates: { setup: Record<FmSetupParamKey, number>; diff: number }[]
+  current_feedback: Record<FmBiasKey, { value: number; feedback: FmFeedbackValue }[]>
+}
 
-  if (!circuit_id || !conditions || !driver_slot) {
-    return NextResponse.json(
-      { error: "circuit_id, conditions, and driver_slot are required" },
-      { status: 400 },
-    );
-  }
-  if (driver_slot !== 1 && driver_slot !== 2) {
-    return NextResponse.json({ error: "driver_slot must be 1 or 2" }, { status: 400 });
-  }
-  if (conditions !== "dry" && conditions !== "wet") {
-    return NextResponse.json({ error: "conditions must be 'dry' or 'wet'" }, { status: 400 });
-  }
+interface HistoryIteration {
+  iteration_number: number
+  feedback: Record<FmBiasKey, FmFeedbackValue> | Record<string, unknown>
+  applied_deltas: Record<string, number> | null
+  created_at: string
+}
 
-  const limit = Math.min(Math.max(Number(candidate_limit) || 10, 1), MAX_SETUP_CANDIDATES);
+interface HistoryResponse {
+  session_id: string
+  marked_optimal_at: string | null
+  iterations: HistoryIteration[]
+}
 
-  let driver_id: string | null = null;
-  if (discord_id) {
-    driver_id = await resolveDriverIdFromSession(discord_id);
-  }
-  if (!driver_id && driverIdOverride) {
-    driver_id = driverIdOverride;
-  }
-  if (!driver_id) {
-    // Distinguish the two failure modes that were previously collapsed into
-    // one generic message: no identity was ever sent (client-side — most
-    // likely the session hadn't finished loading when discordId() was read,
-    // since useSession() only becomes 'authenticated' asynchronously) vs. an
-    // identity WAS sent but no pitboss.drivers row has that discord_id
-    // (data-side — the account isn't registered as a driver). Logging both
-    // the reason and the raw discord_id/driver_id received makes this
-    // debuggable from server logs instead of guessing blind next time.
-    const reason = !discord_id && !driverIdOverride
-      ? 'no discord_id or driver_id was included in the request'
-      : `no pitboss.drivers row matched discord_id=${discord_id ?? 'null'} / driver_id=${driverIdOverride ?? 'null'}`;
-    console.error(`[fm/setups/calculate] Could not resolve driver identity: ${reason}`);
-    return NextResponse.json({ error: `Could not resolve driver identity (${reason})` }, { status: 401 });
-  }
+const FM_BIAS_ORDER: FmBiasKey[] = ['oversteer', 'braking', 'cornering', 'traction', 'straights']
+const FEEDBACK_OPTIONS: FmFeedbackValue[] = ['optimal', 'great', 'good', 'bad']
 
-  let ranges, session;
-  try {
-    [ranges, session] = await Promise.all([
-      fetchFmParamRanges(),
-      fetchOrCreateFmSetupSession({
-        driverId: driver_id,
-        circuitId: circuit_id,
-        conditions,
-        driverSlot: driver_slot,
-        driverSlotName: driver_slot_name,
-      }),
-    ]);
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to load fm setup engine inputs" },
-      { status: 500 },
-    );
+const FEEDBACK_LABELS: Record<FmFeedbackValue, string> = {
+  optimal: 'Optimal',
+  great: 'Great',
+  good: 'Good',
+  bad: 'Bad',
+  unknown: 'Unknown',
+}
+
+const BIAS_LABELS: Record<FmBiasKey, string> = {
+  oversteer: 'Oversteer',
+  braking: 'Braking',
+  cornering: 'Cornering',
+  traction: 'Traction',
+  straights: 'Straights',
+}
+
+// Rounds away JS floating-point drift (e.g. 3.1500000000000004) that appears
+// when a slider's step (like 0.05) is repeatedly added via Number(e.target.value).
+function roundToStep(v: number, step: number) {
+  const decimals = (step.toString().split('.')[1] || '').length
+  return Number(v.toFixed(decimals))
+}
+
+function formatValue(v: number, p: ParamDef) {
+  const rounded = roundToStep(v, p.step)
+  if (p.value_format === 'ratio_out_of_10') return `${rounded}:${10 - rounded}`
+  return `${rounded}${p.unit}`
+}
+
+function formatTimestamp(iso: string) {
+  return new Date(iso).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+// ─── Per-driver lane state ──────────────────────────────────────────────
+
+interface LaneState {
+  slot: 1 | 2
+  driverName: string
+  started: boolean
+  calculating: boolean
+  error: string
+  result: CalculateResponse | null
+  currentValues: Record<FmSetupParamKey, number> | null
+  feedbackSelections: Partial<Record<FmBiasKey, FmFeedbackValue>>
+  expanded: boolean
+  // History panel
+  historyOpen: boolean
+  historyLoading: boolean
+  historyError: string
+  history: HistoryResponse | null
+  // Mark-as-optimal
+  markingOptimal: boolean
+  markOptimalError: string
+}
+
+function emptyLane(slot: 1 | 2): LaneState {
+  return {
+    slot,
+    driverName: '',
+    started: false,
+    calculating: false,
+    error: '',
+    result: null,
+    currentValues: null,
+    feedbackSelections: {},
+    expanded: true,
+    historyOpen: false,
+    historyLoading: false,
+    historyError: '',
+    history: null,
+    markingOptimal: false,
+    markOptimalError: '',
   }
+}
 
-  if (ranges.length !== FM_SETUP_PARAM_ORDER.length) {
-    return NextResponse.json(
-      { error: "fm_setup_params is missing rows — expected all 5 setup params to be configured" },
-      { status: 422 },
-    );
-  }
+export default function FmSetupsPage() {
+  // Self-contained Supabase Auth check rather than next-auth/react's
+  // useSession() (always empty — the app's real login flow at
+  // src/app/login/page.tsx signs in via Supabase Auth, never next-auth,
+  // so that session is permanently unpopulated) or the compat module's
+  // useSession() from @/lib/compat/next-auth-react (structurally correct,
+  // but its SessionProvider is never mounted anywhere in the tree —
+  // layout.tsx wraps the app in the real next-auth SessionProvider
+  // instead — so components using it, e.g. CertPageClient.tsx, are stuck
+  // reading the context's default {status:"loading"} forever). This is
+  // only used to gate the page UI; the API routes underneath independently
+  // verify identity server-side via getAuthedDriver(), so a stale client
+  // check here can't grant access to anything real.
+  const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading')
+  const router = useRouter()
 
-  let currentFeedback = session.current_feedback;
-  let currentValues = session.current_values;
-  let iterationCount = session.iteration_count;
-  const loggedPoints: { bias: FmBiasKey; value: number; feedback: FmFeedbackValue }[] = [];
+  const [loadingMeta, setLoadingMeta] = useState(true)
+  const [metaError, setMetaError] = useState('')
+  const [tracks, setTracks] = useState<Track[]>([])
+  const [params, setParams] = useState<ParamDef[]>([])
 
-  // If the driver reported new feedback this call, append it to the
-  // session's growing history (never collapse/overwrite past points) and
-  // update the tracked current setup.
-  if (current_values && new_feedback && Object.keys(new_feedback).length > 0) {
-    const bias = setupToBiasKeyed(current_values, ranges);
-    currentFeedback = { ...currentFeedback };
-    for (const key of FM_BIAS_ORDER) {
-      currentFeedback[key] = [...(currentFeedback[key] ?? [])];
+  // Shared session config — both drivers are setting up for the same event
+  const [circuitId, setCircuitId] = useState('')
+  const [conditions, setConditions] = useState<'dry' | 'wet'>('dry')
+  const [sessionStarted, setSessionStarted] = useState(false)
+
+  // Two independent lanes, one per driver, running in parallel
+  const [lanes, setLanes] = useState<[LaneState, LaneState]>([emptyLane(1), emptyLane(2)])
+
+  useEffect(() => {
+    const supabase = createClient()
+    let mounted = true
+
+    async function checkAuth() {
+      const { data, error } = await supabase.auth.getClaims()
+      if (!mounted) return
+      setAuthStatus(error || !data?.claims?.sub ? 'unauthenticated' : 'authenticated')
     }
+    checkAuth()
 
-    for (const [biasKey, feedbackValue] of Object.entries(new_feedback) as [
-      FmBiasKey,
-      FmFeedbackValue,
-    ][]) {
-      const point = { value: bias[biasKey], feedback: feedbackValue };
-      currentFeedback[biasKey].push(point);
-      loggedPoints.push({ bias: biasKey, ...point });
+    const { data: listener } = supabase.auth.onAuthStateChange(() => checkAuth())
+    return () => {
+      mounted = false
+      listener.subscription.unsubscribe()
     }
+  }, [])
 
-    currentValues = current_values;
-    iterationCount += 1;
-  }
+  useEffect(() => {
+    if (authStatus === 'unauthenticated') router.push('/login')
+  }, [authStatus, router])
 
-  // Anchor the search's tie-breaking distance against: the driver's own
-  // current setup if they have one this session, otherwise the best
-  // community-converged setup on record for this circuit + conditions (a
-  // warm start instead of neutral), falling back to neutral only if neither
-  // exists yet.
-  let anchorBias: number[];
-  if (Object.keys(currentValues).length === FM_SETUP_PARAM_ORDER.length) {
-    anchorBias = FM_BIAS_ORDER.map((k) => setupToBiasKeyed(currentValues, ranges)[k]);
-  } else {
-    let memory;
+  useEffect(() => {
+    loadMeta()
+  }, [])
+
+  async function loadMeta() {
+    setLoadingMeta(true)
     try {
-      memory = await fetchFmSetupMemory(circuit_id, conditions);
-    } catch (err) {
-      return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Failed to load fm setup memory" },
-        { status: 500 },
-      );
+      const res = await fetch('/api/pitboss/fm/setups/meta')
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to load setup data')
+      setTracks(data.tracks ?? [])
+      setParams(data.params ?? [])
+    } catch (err: any) {
+      setMetaError(err.message)
+    } finally {
+      setLoadingMeta(false)
     }
-    anchorBias = memory
-      ? FM_BIAS_ORDER.map((k) => setupToBiasKeyed(memory.setup_values, ranges)[k])
-      : neutralAnchorBias();
   }
 
-  const result = nearestSetup({ ranges, feedbackByBias: currentFeedback, anchorBias });
+  function updateLane(idx: 0 | 1, patch: Partial<LaneState>) {
+    setLanes((prev) => {
+      const next = [...prev] as [LaneState, LaneState]
+      next[idx] = { ...next[idx], ...patch }
+      return next
+    })
+  }
 
-  try {
-    const updated = await updateFmSetupSession(session.id, {
-      current_values: currentValues,
-      current_feedback: currentFeedback,
-      iteration_count: iterationCount,
-    });
-
-    if (loggedPoints.length > 0) {
-      await logFmFeedback({
-        sessionId: session.id,
-        iterationNumber: iterationCount,
-        feedback: loggedPoints,
-        appliedDeltas: {
-          lowestRuleBreak: result.lowestRuleBreak,
-          possibleSetups: result.possibleSetups,
-          bestSetup: result.best,
-        },
-      });
-    }
-
-    // Record this converged setup as the new memory-bank best for this
-    // circuit + conditions, if it's at least as good as whatever's already
-    // on record. No-op on the very first neutral-anchor pass before any
-    // feedback has been given, since result.best is only meaningful once
-    // the search has something to converge toward.
-    if (result.best) {
-      try {
-        await upsertFmSetupMemory({
-          circuitId: circuit_id,
+  async function runCalculate(idx: 0 | 1, body: Record<string, any>) {
+    const lane = lanes[idx]
+    updateLane(idx, { calculating: true, error: '' })
+    try {
+      const res = await fetch('/api/pitboss/fm/setups/calculate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          circuit_id: circuitId,
           conditions,
-          setupValues: Object.fromEntries(
-            FM_SETUP_PARAM_ORDER.map((key, i) => [key, result.best![i]]),
-          ) as Record<FmSetupParamKey, number>,
-          lowestRuleBreak: result.lowestRuleBreak,
-          possibleSetups: result.possibleSetups,
-        });
-      } catch (err) {
-        // Non-fatal — don't fail the whole calculation if the memory bank
-        // write fails, the driver still gets their result this call.
-        console.error("[fm/setups/calculate] fm setup memory upsert failed", err);
+          driver_slot: lane.slot,
+          driver_slot_name: lane.driverName || null,
+          ...body,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Calculation failed')
+
+      let rounded: Record<FmSetupParamKey, number> | null = null
+      if (data.best_setup) {
+        rounded = Object.fromEntries(
+          params.map((p) => [p.param_key, roundToStep(data.best_setup[p.param_key], p.step)])
+        ) as Record<FmSetupParamKey, number>
       }
+      updateLane(idx, {
+        result: data,
+        currentValues: rounded,
+        feedbackSelections: {},
+        // A new calculation supersedes whatever history/optimal state was
+        // showing for the previous session on this lane.
+        history: null,
+        historyOpen: false,
+        markOptimalError: '',
+      })
+      return data as CalculateResponse
+    } catch (err: any) {
+      updateLane(idx, { error: err.message })
+      return null
+    } finally {
+      updateLane(idx, { calculating: false })
+    }
+  }
+
+  async function handleStartSession() {
+    if (!circuitId) {
+      updateLane(0, { error: 'Select a track first' })
+      return
+    }
+    setSessionStarted(true)
+    setLanes([{ ...lanes[0], started: true }, { ...lanes[1], started: true }])
+    await Promise.all([runCalculate(0, {}), runCalculate(1, {})])
+  }
+
+  async function handleSubmitFeedback(idx: 0 | 1) {
+    const lane = lanes[idx]
+    if (!lane.currentValues) return
+    const newFeedback = Object.fromEntries(
+      Object.entries(lane.feedbackSelections).filter(([, v]) => !!v)
+    )
+    if (Object.keys(newFeedback).length === 0) {
+      updateLane(idx, { error: 'Select at least one feedback rating before submitting' })
+      return
+    }
+    await runCalculate(idx, { current_values: lane.currentValues, new_feedback: newFeedback })
+  }
+
+  function updateCurrentValue(idx: 0 | 1, key: FmSetupParamKey, value: number) {
+    const paramDef = params.find((p) => p.param_key === key)
+    const clean = paramDef ? roundToStep(value, paramDef.step) : value
+    const lane = lanes[idx]
+    updateLane(idx, {
+      currentValues: { ...(lane.currentValues ?? ({} as Record<FmSetupParamKey, number>)), [key]: clean },
+    })
+  }
+
+  function resetSession() {
+    setSessionStarted(false)
+    setLanes([emptyLane(1), emptyLane(2)])
+  }
+
+  // ── History panel ──────────────────────────────────────────────────────
+
+  async function toggleHistory(idx: 0 | 1) {
+    const lane = lanes[idx]
+    if (!lane.result) return
+
+    // Collapsing just hides it — don't refetch on every reopen unless stale.
+    if (lane.historyOpen) {
+      updateLane(idx, { historyOpen: false })
+      return
     }
 
-    return NextResponse.json(
-      {
-        session_id: session.id,
-        iteration_count: updated.iteration_count,
-        lowest_rule_break: result.lowestRuleBreak,
-        possible_setups: result.possibleSetups,
-        best_setup: result.best
-          ? Object.fromEntries(FM_SETUP_PARAM_ORDER.map((key, i) => [key, result.best![i]]))
-          : null,
-        candidates: result.candidates.slice(0, limit).map((c) => ({
-          setup: Object.fromEntries(FM_SETUP_PARAM_ORDER.map((key, i) => [key, c.setup[i]])),
-          diff: c.diff,
-        })),
-        current_feedback: currentFeedback,
-      },
-      { status: 200 },
-    );
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to persist fm setup session" },
-      { status: 500 },
-    );
+    updateLane(idx, { historyOpen: true, historyLoading: true, historyError: '' })
+    try {
+      const qs = new URLSearchParams({
+        session_id: lane.result.session_id,
+      })
+      const res = await fetch(`/api/pitboss/fm/setups/history?${qs.toString()}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to load history')
+      updateLane(idx, { history: data })
+    } catch (err: any) {
+      updateLane(idx, { historyError: err.message })
+    } finally {
+      updateLane(idx, { historyLoading: false })
+    }
   }
+
+  // ── Mark as optimal ────────────────────────────────────────────────────
+
+  async function handleMarkOptimal(idx: 0 | 1) {
+    const lane = lanes[idx]
+    if (!lane.result?.best_setup) return
+
+    const confirmed = window.confirm(
+      'Confirm this setup worked in-game? This promotes it to the verified setup for this track and conditions, overriding any previous best.'
+    )
+    if (!confirmed) return
+
+    updateLane(idx, { markingOptimal: true, markOptimalError: '' })
+    try {
+      const res = await fetch('/api/pitboss/fm/setups/mark-optimal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: lane.result.session_id,
+          setup_values: lane.result.best_setup,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to mark setup as optimal')
+
+      // Reflect the confirmation immediately without a full refetch —
+      // if the history panel is open, its own state gets the same stamp.
+      updateLane(idx, {
+        history: lane.history
+          ? { ...lane.history, marked_optimal_at: new Date().toISOString() }
+          : lane.history,
+      })
+      // A lightweight local flag so the button swaps to a checkmark state
+      // even if the history panel was never opened this session.
+      setLanes((prev) => {
+        const next = [...prev] as [LaneState, LaneState]
+        next[idx] = {
+          ...next[idx],
+          history: next[idx].history ?? {
+            session_id: lane.result!.session_id,
+            marked_optimal_at: new Date().toISOString(),
+            iterations: [],
+          },
+        }
+        return next
+      })
+    } catch (err: any) {
+      updateLane(idx, { markOptimalError: err.message })
+    } finally {
+      updateLane(idx, { markingOptimal: false })
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  if (authStatus === 'loading' || loadingMeta) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-rise-black">
+        <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
+      </main>
+    )
+  }
+
+  return (
+    <main className="min-h-screen bg-rise-black px-4 py-8 pb-24">
+      <button onClick={() => router.back()} className="text-white/40 text-sm mb-4 block">← Back</button>
+
+      <div className="mb-6">
+        <h1 className="text-2xl font-black text-white">FM Setup Generator</h1>
+        <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
+          F1 Manager setup solver · both drivers
+        </p>
+      </div>
+
+      {metaError && (
+        <div className="bg-red-400/10 border border-red-400/30 rounded-xl px-4 py-3 mb-4">
+          <p className="text-red-400 text-sm">{metaError}</p>
+        </div>
+      )}
+
+      {/* ── Shared session config ──────────────────────────────────────── */}
+      {!sessionStarted && (
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-4">
+          <div>
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Track</p>
+            <select
+              value={circuitId}
+              onChange={(e) => setCircuitId(e.target.value)}
+              className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:outline-none focus:border-rise-red"
+            >
+              <option value="">Select a track…</option>
+              {tracks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}{t.country ? ` (${t.country})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <p className="text-white/40 text-xs uppercase tracking-widest mb-2">Conditions</p>
+            <div className="flex gap-2">
+              {(['dry', 'wet'] as const).map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setConditions(c)}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-bold uppercase tracking-widest ${
+                    conditions === c ? 'bg-rise-red text-white' : 'bg-white/5 text-white/40 border border-white/10'
+                  }`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {([0, 1] as const).map((idx) => (
+              <div key={idx}>
+                <p className="text-white/40 text-xs uppercase tracking-widest mb-2">
+                  Driver {lanes[idx].slot} Name (optional)
+                </p>
+                <input
+                  value={lanes[idx].driverName}
+                  onChange={(e) => updateLane(idx, { driverName: e.target.value })}
+                  placeholder="in-game driver name"
+                  className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:outline-none focus:border-rise-red placeholder-white/20"
+                />
+              </div>
+            ))}
+          </div>
+
+          {lanes[0].error && <p className="text-red-400 text-xs">{lanes[0].error}</p>}
+
+          <button
+            onClick={handleStartSession}
+            disabled={lanes[0].calculating || lanes[1].calculating || !circuitId}
+            className="w-full bg-rise-red disabled:opacity-40 text-white font-bold py-3 rounded-xl text-sm"
+          >
+            {lanes[0].calculating || lanes[1].calculating ? 'Starting…' : 'Start Session — Both Drivers'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Two parallel driver lanes ──────────────────────────────────── */}
+      {sessionStarted && (
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-white font-bold text-sm">
+                {tracks.find((t) => t.id === circuitId)?.name} · {conditions}
+              </p>
+              <button onClick={resetSession} className="text-white/30 text-xs underline">
+                Change
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4">
+            {([0, 1] as const).map((idx) => {
+              const lane = lanes[idx]
+              const isMarkedOptimal = !!lane.history?.marked_optimal_at
+              return (
+                <div key={idx} className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-4">
+                  <button
+                    onClick={() => updateLane(idx, { expanded: !lane.expanded })}
+                    className="w-full flex items-center justify-between"
+                  >
+                    <div className="text-left">
+                      <p className="text-white font-bold text-sm">
+                        Driver {lane.slot}{lane.driverName ? ` · ${lane.driverName}` : ''}
+                      </p>
+                      {!lane.expanded && lane.result?.best_setup && (
+                        <p className="text-white/40 text-[11px] mt-0.5">
+                          FW {formatValue(lane.result.best_setup.front_wing_angle, params.find((p) => p.param_key === 'front_wing_angle')!)}
+                          {' · '}
+                          RW {formatValue(lane.result.best_setup.rear_wing_angle, params.find((p) => p.param_key === 'rear_wing_angle')!)}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {lane.result && (
+                        <p className="text-white/30 text-[11px]">
+                          Iter {lane.result.iteration_count} · {lane.result.possible_setups} match
+                          {lane.result.lowest_rule_break > 0 ? ` (${lane.result.lowest_rule_break} break${lane.result.lowest_rule_break === 1 ? '' : 's'})` : ''}
+                        </p>
+                      )}
+                      <span className={`text-white/40 text-xs transition-transform ${lane.expanded ? 'rotate-180' : ''}`}>
+                        ▾
+                      </span>
+                    </div>
+                  </button>
+
+                  {lane.expanded && lane.error && (
+                    <div className="bg-red-400/10 border border-red-400/30 rounded-xl px-4 py-3">
+                      <p className="text-red-400 text-sm">{lane.error}</p>
+                    </div>
+                  )}
+
+                  {lane.expanded && lane.result?.best_setup && (
+                    <div className="rounded-2xl border border-rise-red/30 bg-rise-red/5 p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-white/40 text-xs uppercase tracking-widest">Recommended Setup</p>
+                        {isMarkedOptimal ? (
+                          <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1">
+                            ✓ Confirmed Optimal
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleMarkOptimal(idx)}
+                            disabled={lane.markingOptimal}
+                            className="text-[11px] font-bold uppercase tracking-wide text-rise-red disabled:opacity-40"
+                          >
+                            {lane.markingOptimal ? 'Saving…' : 'Mark as Optimal'}
+                          </button>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        {params.map((p) => (
+                          <div key={p.param_key}>
+                            <p className="text-white/30 text-[10px] uppercase tracking-widest">{p.label}</p>
+                            <p className="text-white font-bold text-base">
+                              {formatValue(lane.result!.best_setup![p.param_key], p)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                      {lane.markOptimalError && (
+                        <p className="text-red-400 text-[11px] mt-2">{lane.markOptimalError}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {lane.expanded && lane.result && (
+                    <div>
+                      <button
+                        onClick={() => toggleHistory(idx)}
+                        className="w-full flex items-center justify-between text-white/40 text-xs uppercase tracking-widest py-1"
+                      >
+                        <span>Past Tried Setups This Session</span>
+                        <span className={`transition-transform ${lane.historyOpen ? 'rotate-180' : ''}`}>▾</span>
+                      </button>
+
+                      {lane.historyOpen && (
+                        <div className="mt-2 space-y-2">
+                          {lane.historyLoading && (
+                            <p className="text-white/30 text-xs">Loading…</p>
+                          )}
+                          {lane.historyError && (
+                            <p className="text-red-400 text-xs">{lane.historyError}</p>
+                          )}
+                          {lane.history && lane.history.iterations.length === 0 && !lane.historyLoading && (
+                            <p className="text-white/30 text-xs">No feedback submitted yet this session.</p>
+                          )}
+                          {lane.history?.iterations.map((it) => (
+                            <div
+                              key={it.iteration_number}
+                              className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2"
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <p className="text-white/50 text-[11px] font-bold">
+                                  Iteration {it.iteration_number}
+                                </p>
+                                <p className="text-white/30 text-[10px]">{formatTimestamp(it.created_at)}</p>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {Object.entries(it.feedback ?? {}).map(([bias, fb]) => (
+                                  <span
+                                    key={bias}
+                                    className="text-[10px] px-2 py-0.5 rounded-full bg-white/5 text-white/50 border border-white/10"
+                                  >
+                                    {BIAS_LABELS[bias as FmBiasKey] ?? bias}: {String(fb)}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {lane.expanded && lane.currentValues && (() => {
+                    const currentValues = lane.currentValues!
+                    return (
+                    <div className="space-y-4 pt-2">
+                      <p className="text-white/70 font-bold text-xs">Report Back From The Sim</p>
+                      <div className="space-y-3">
+                        {params.map((p) => (
+                          <div key={p.param_key}>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="text-white/40 text-xs uppercase tracking-widest">{p.label}</p>
+                              <p className="text-white text-xs font-bold">
+                                {formatValue(currentValues[p.param_key], p)}
+                              </p>
+                            </div>
+                            <input
+                              type="range"
+                              min={p.min_value}
+                              max={p.max_value}
+                              step={p.step}
+                              value={currentValues[p.param_key]}
+                              onChange={(e) => updateCurrentValue(idx, p.param_key, Number(e.target.value))}
+                              className="w-full accent-rise-red"
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="space-y-3 pt-2 border-t border-white/10">
+                        {FM_BIAS_ORDER.map((biasKey) => (
+                          <div key={biasKey}>
+                            <p className="text-white/40 text-xs uppercase tracking-widest mb-2">{BIAS_LABELS[biasKey]}</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {FEEDBACK_OPTIONS.map((fb) => (
+                                <button
+                                  key={fb}
+                                  onClick={() =>
+                                    updateLane(idx, {
+                                      feedbackSelections: {
+                                        ...lane.feedbackSelections,
+                                        [biasKey]: lane.feedbackSelections[biasKey] === fb ? undefined : fb,
+                                      },
+                                    })
+                                  }
+                                  className={`px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide ${
+                                    lane.feedbackSelections[biasKey] === fb
+                                      ? 'bg-rise-red text-white'
+                                      : 'bg-white/5 text-white/40 border border-white/10'
+                                  }`}
+                                >
+                                  {FEEDBACK_LABELS[fb]}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <button
+                        onClick={() => handleSubmitFeedback(idx)}
+                        disabled={lane.calculating}
+                        className="w-full bg-rise-red disabled:opacity-40 text-white font-bold py-3 rounded-xl text-sm"
+                      >
+                        {lane.calculating ? 'Recalculating…' : 'Submit Feedback & Recalculate'}
+                      </button>
+                    </div>
+                    )
+                  })()}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </main>
+  )
 }
