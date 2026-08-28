@@ -2,7 +2,7 @@
 
 const WORKER_URL = process.env.PITBOSS_WORKER_URL || 'https://pitboss-proxy.truthexper.workers.dev';
 
-// ADDED — catch a malformed env var at module load instead of at request
+// Catch a malformed env var at module load instead of at request
 // time, where it surfaces as an opaque "string did not match expected
 // pattern" error deep inside fetch/undici's URL parser.
 function validateWorkerUrl(url: string): string {
@@ -16,14 +16,16 @@ function validateWorkerUrl(url: string): string {
     );
   }
 }
-const VALIDATED_WORKER_URL = validateWorkerUrl(WORKER_URL); // ADDED
+const VALIDATED_WORKER_URL = validateWorkerUrl(WORKER_URL);
 
-// ADDED — client-side ceiling on any single worker call. Chosen to sit
-// comfortably under Vercel Hobby's 30s maxDuration (or Pro's higher one),
-// leaving room for the rest of the request handler to run its
-// try/catch fallback path *within the function's lifetime* instead of
-// the whole process getting killed mid-fetch with no chance to recover.
-const DEFAULT_TIMEOUT_MS = 20_000;
+// Client-side ceiling on any single worker call. The worker now bounds
+// its own free-model waterfall (FREE_WATERFALL_BUDGET_MS) and paid
+// fallback (PAID_FALLBACK_BUDGET_MS) to a combined ~18s worst case.
+// 25s here sits comfortably above that, while still leaving ~5s of
+// headroom under Vercel Hobby's 30s maxDuration for the caller's own
+// try/catch fallback path to actually run before the function gets
+// killed outright.
+const DEFAULT_TIMEOUT_MS = 25_000; // CHANGED — was 20_000, too tight against the worker's worst case
 
 export type LLMMode = 'fast' | 'primary' | 'reasoning' | 'certgen' | 'quick' | 'steward' | 'coding' | 'vision';
 
@@ -34,7 +36,7 @@ export interface InferOptions {
   mode?:        LLMMode;
   max_tokens?:  number;
   temperature?: number;
-  timeoutMs?:   number; // ADDED — per-call override, falls back to DEFAULT_TIMEOUT_MS
+  timeoutMs?:   number; // per-call override, falls back to DEFAULT_TIMEOUT_MS
 }
 
 export interface InferResult {
@@ -54,8 +56,8 @@ export type RuleArticle = {
   rule_book_id:   string;
 };
 
-// ADDED — per-request metadata about the vision pre-pass in /steward,
-// so callers can log/audit which model produced an image description
+// Per-request metadata about the vision pre-pass in /steward, so
+// callers can log/audit which model produced an image description
 // without having to guess from the general `model`/`usage` fields
 // (those describe the verdict-writing call, not the vision call).
 export type ImageAnalysisMeta = {
@@ -77,7 +79,7 @@ export type PbStewardResult = {
     steward_notes:       string;
     parse_error?:        boolean;
   };
-  image_analysis: ImageAnalysisMeta | null; // ADDED
+  image_analysis: ImageAnalysisMeta | null;
   model:      string;
   provider:   string;
   league:     string;
@@ -116,17 +118,16 @@ function getInternalKey(): string {
   return key;
 }
 
-// ADDED — wrap the fetch + error-text read in try/catch so transport-level
+// Wrap the fetch + error-text read in try/catch so transport-level
 // failures (bad URL, DNS failure, network drop, worker unreachable) come
 // back as a consistent Error with a readable message instead of whatever
 // raw exception the underlying fetch/URL implementation throws.
 //
-// ADDED (timeout) — an AbortController tied to a timer bounds the whole
-// call. Without this, a hung waterfall on the worker side (e.g. every
-// free model rate-limited and paid fallback also slow) just rides out
-// Vercel's maxDuration and takes the entire function down with it —
-// callers like generateCoachingNarrative() never get their try/catch to
-// run because the process is dead, not because the promise rejected.
+// An AbortController tied to a timer bounds the whole call. Without
+// this, a hung waterfall on the worker side just rides out Vercel's
+// maxDuration and takes the entire function down with it — callers
+// like generateCoachingNarrative() never get their try/catch to run
+// because the process is dead, not because the promise rejected.
 async function workerPost(path: string, body: object, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -140,19 +141,19 @@ async function workerPost(path: string, body: object, timeoutMs: number = DEFAUL
         'X-PitBoss-Key': getInternalKey(),
       },
       body: JSON.stringify(body),
-      signal: controller.signal, // ADDED
+      signal: controller.signal,
     });
   } catch (err) {
-    // ADDED — distinguish "we gave up waiting" from other transport
-    // failures (bad URL, DNS, network) so callers/logs can tell a slow
-    // worker apart from a broken one.
+    // Distinguish "we gave up waiting" from other transport failures
+    // (bad URL, DNS, network) so callers/logs can tell a slow worker
+    // apart from a broken one.
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`PitBoss worker request to ${path} timed out after ${timeoutMs}ms`);
     }
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`PitBoss worker request to ${path} failed before reaching the server: ${detail}`);
   } finally {
-    clearTimeout(timer); // ADDED
+    clearTimeout(timer);
   }
 
   if (!res.ok) {
@@ -168,8 +169,8 @@ async function workerPost(path: string, body: object, timeoutMs: number = DEFAUL
   try {
     return await res.json();
   } catch (err) {
-    // ADDED — worker returned a non-JSON 2xx body; surface clearly instead
-    // of throwing an opaque JSON.parse error upstream.
+    // Worker returned a non-JSON 2xx body; surface clearly instead of
+    // throwing an opaque JSON.parse error upstream.
     throw new Error(`PitBoss ${path} returned a non-JSON response body`);
   }
 }
@@ -185,7 +186,7 @@ export const pbSteward = (
   incident:    Record<string, unknown>,
   regulations: RuleArticle[],
   league:      string,
-  timeoutMs?:  number // ADDED
+  timeoutMs?:  number
 ): Promise<PbStewardResult | PbInferError> =>
   workerPost('/steward', { incident, regulations, league }, timeoutMs);
 
@@ -194,7 +195,7 @@ export const pbSetupFeedback = (
   knownParamKeys:  string[],
   context:         Record<string, unknown>,
   league:          string,
-  timeoutMs?:      number // ADDED
+  timeoutMs?:      number
 ): Promise<PbSetupFeedbackResult | PbInferError> =>
   workerPost('/setup-feedback', {
     feedback_text:     feedbackText,
