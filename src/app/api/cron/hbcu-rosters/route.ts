@@ -55,6 +55,20 @@ const NAME_OVERRIDES: Record<string, string> = {
   'Lincoln University (PA)': 'lincoln (pa) lions',
 };
 
+// ESPN's edge (site.api.espn.com) 403s requests that don't look like a real
+// browser. A bot-labelled UA like "rise-os-cron/1.0" gets blocked outright —
+// this needs to look like an actual browser hit, headers and all.
+const ESPN_HEADERS: HeadersInit = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+  Accept: 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  Referer: 'https://www.espn.com/',
+};
+
+const ESPN_FETCH_RETRIES = 2;
+const ESPN_RETRY_DELAY_MS = 1000;
+
 interface EspnTeamListEntry {
   team: {
     id: string;
@@ -88,9 +102,29 @@ function normalize(s: string): string {
     .trim();
 }
 
+async function espnFetch(url: string): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= ESPN_FETCH_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, { headers: ESPN_HEADERS });
+      // 403/429 are worth retrying (edge-level throttling); other non-OK
+      // statuses are unlikely to change on retry.
+      if (res.ok) return res;
+      if (res.status !== 403 && res.status !== 429) return res;
+      lastErr = new Error(`ESPN fetch failed: ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt < ESPN_FETCH_RETRIES) {
+      await new Promise((resolve) => setTimeout(resolve, ESPN_RETRY_DELAY_MS * (attempt + 1)));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('ESPN fetch failed after retries');
+}
+
 async function fetchEspnTeamList(): Promise<EspnTeamListEntry[]> {
   const url = 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?limit=700';
-  const res = await fetch(url, { headers: { 'User-Agent': 'rise-os-cron/1.0' } });
+  const res = await espnFetch(url);
   if (!res.ok) throw new Error(`ESPN team list fetch failed: ${res.status}`);
   const data = await res.json();
   return data?.sports?.[0]?.leagues?.[0]?.teams ?? [];
@@ -118,7 +152,7 @@ function resolveEspnId(
 
 async function fetchRoster(espnId: string): Promise<EspnAthlete[]> {
   const url = `https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams/${espnId}?enable=roster`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'rise-os-cron/1.0' } });
+  const res = await espnFetch(url);
   if (!res.ok) throw new Error(`ESPN roster fetch failed for team ${espnId}: ${res.status}`);
   const data = await res.json();
   return data?.team?.athletes ?? [];
@@ -153,7 +187,24 @@ export async function GET(request: Request) {
   }
 
   const supabase = getSupabase();
-  const teamList = await fetchEspnTeamList();
+
+  let teamList: EspnTeamListEntry[];
+  try {
+    teamList = await fetchEspnTeamList();
+  } catch (err) {
+    // Previously this threw unhandled and crashed the whole cron run with
+    // a bare 500/403. Fail gracefully instead so the schedule's next run
+    // isn't the only recovery path, and so this shows up as a clean JSON
+    // error instead of an unhandled exception in the logs.
+    return NextResponse.json(
+      {
+        ranAt: new Date().toISOString(),
+        error: 'espn_team_list_fetch_failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      },
+      { status: 502 }
+    );
+  }
 
   const resolved: { school: string; espnId: string; matchedName: string }[] = [];
   const unresolved: string[] = [];
