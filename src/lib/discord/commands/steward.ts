@@ -9,6 +9,8 @@ import {
   postTicketMessage,
   postTicketFile,
   sendDirectMessage,
+  addUserToTicketChannel,
+  removeUserFromTicketChannel,
 } from "../tickets";
 import { hasDiscordStewardAccess } from "../permissions";
 
@@ -511,6 +513,84 @@ registerCommand("steward_delete", async (ctx) => {
   }
 
   return { content: "🗑️ Ticket deleted.", ephemeral: true };
+});
+
+registerCommand("steward_adduser", async (ctx) => {
+  const denied = await requireSteward(ctx);
+  if (denied) return { content: denied, ephemeral: true };
+
+  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  if (!incident) {
+    return {
+      content: "This channel isn't linked to an incident ticket.",
+      ephemeral: true,
+    };
+  }
+  if (incident.ticket_closed_at) {
+    return {
+      content: "This ticket is closed — reopen it before adding anyone.",
+      ephemeral: true,
+    };
+  }
+
+  const targetUserId = ctx.options.user as string | undefined;
+  if (!targetUserId) {
+    return { content: "No user specified.", ephemeral: true };
+  }
+
+  const ok = await addUserToTicketChannel(ctx.channelId, targetUserId);
+  if (!ok) {
+    return { content: "Couldn't add that user — check my permissions.", ephemeral: true };
+  }
+
+  const username = ctx.resolvedUsers[targetUserId]?.username ?? targetUserId;
+  await postTicketMessage(
+    ctx.channelId,
+    `➕ <@${targetUserId}> (${username}) was added to this ticket by a steward.`
+  );
+
+  return { content: `Added ${username} to the ticket.`, ephemeral: true };
+});
+
+registerCommand("steward_removeuser", async (ctx) => {
+  const denied = await requireSteward(ctx);
+  if (denied) return { content: denied, ephemeral: true };
+
+  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  if (!incident) {
+    return {
+      content: "This channel isn't linked to an incident ticket.",
+      ephemeral: true,
+    };
+  }
+
+  const targetUserId = ctx.options.user as string | undefined;
+  if (!targetUserId) {
+    return { content: "No user specified.", ephemeral: true };
+  }
+
+  const reporterDiscordId = (incident as any).drivers?.discord_id as
+    | string
+    | undefined;
+  if (targetUserId === reporterDiscordId) {
+    return {
+      content: "Can't remove the reporter from their own ticket — close or delete it instead.",
+      ephemeral: true,
+    };
+  }
+
+  const ok = await removeUserFromTicketChannel(ctx.channelId, targetUserId);
+  if (!ok) {
+    return { content: "Couldn't remove that user — check my permissions.", ephemeral: true };
+  }
+
+  const username = ctx.resolvedUsers[targetUserId]?.username ?? targetUserId;
+  await postTicketMessage(
+    ctx.channelId,
+    `➖ ${username} was removed from this ticket by a steward.`
+  );
+
+  return { content: `Removed ${username} from the ticket.`, ephemeral: true };
 });
 
 registerCommand("steward_respond", async (ctx) => {
