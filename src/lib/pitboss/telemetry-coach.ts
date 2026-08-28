@@ -36,8 +36,8 @@
  */
 
 import { pbInfer } from '@/lib/pitboss-llm';
+import { createAdminClient } from '@/lib/supabase/server';
 import type { TelemetryFrame, TelemetryLap, TelemetrySession } from '@/lib/telemetry-types';
-import { findTrackByRawName } from '@/lib/pitboss/f1-tracks';
 
 // Re-exported so existing server-side imports of these types from
 // "@/lib/pitboss/telemetry-coach" keep working unchanged. Client components
@@ -392,6 +392,48 @@ function framesInRange(frames: TelemetryFrame[], startDist: number, endDist: num
   return frames.filter((f) => f.dist >= startDist && f.dist <= endDist);
 }
 
+// Resolves a raw F1 UDP track name (e.g. "Sakhir", "Abu Dhabi", "Austin")
+// to its canonical name + nominal turn count, for the track sanity check
+// below. Deliberately reuses pitboss.f1_track_name_aliases — the same
+// alias table telemetry-ingest already relies on to resolve track_id for
+// setup submissions — rather than a second, separate name-matching
+// heuristic. An earlier version of this check used a static in-memory
+// table (lib/pitboss/f1-tracks.ts) with its own ad-hoc substring matcher;
+// that silently failed for "Sakhir" (confirmed against real uploaded
+// laps) and would have also failed for "abu dhabi", "austin"/"cota",
+// "montreal", "interlagos"/"sao paulo", "red bull ring", "losail",
+// "catalunya", "mexico city", "hungaroring", "saudi arabia", "yas
+// marina" — roughly half of the real name variants the game actually
+// sends — because its id scheme (country-based: 'melbourne', 'austria',
+// 'mexico', 'usa') doesn't line up with pitboss.tracks' slug scheme
+// (circuit-based: 'albert-park', 'red-bull-ring', 'mexico-city', 'cota').
+// Rather than maintain a third mapping to reconcile the two, this reads
+// straight from the one place turn counts now live: pitboss.tracks.turns
+// (added specifically for this check — see its column comment).
+async function getTrackTurnsForRawName(rawName: string): Promise<{ name: string; turns: number } | null> {
+  const needle = rawName.trim().toLowerCase();
+  if (!needle) return null;
+
+  const supabase = createAdminClient();
+  const { data: alias } = await supabase
+    .schema('pitboss')
+    .from('f1_track_name_aliases')
+    .select('track_id')
+    .eq('game_track_name', needle)
+    .maybeSingle();
+  if (!alias) return null;
+
+  const { data: track } = await supabase
+    .schema('pitboss')
+    .from('tracks')
+    .select('name, turns')
+    .eq('id', alias.track_id)
+    .maybeSingle();
+  if (!track || track.turns == null) return null;
+
+  return { name: track.name, turns: track.turns };
+}
+
 export function analyzeStraight(
   frames: TelemetryFrame[],
   straight: StraightSegment,
@@ -709,7 +751,21 @@ function isValidParsedNarrative(parsed: any): parsed is ParsedNarrative {
   );
 }
 
-function parseNarrativeResponse(raw: string): ParsedNarrative | null {
+// Accepts `unknown` rather than `string` deliberately — result.response is
+// typed as `string` in InferResult, but that's just a TypeScript `as` cast
+// on pbInfer's end (see pitboss-llm.ts's workerPost — the worker's JSON is
+// trusted blindly, no runtime validation), not an actual runtime
+// guarantee. Confirmed in production: the worker/upstream provider has
+// returned `response: null` at least once (crashing this function's old
+// `raw.replace(...)` with an unguarded TypeError), and separately returned
+// a plain-text safety-classifier string ("User Safety: safe") instead of
+// real completion content. Both were only "caught" by accident, via the
+// outer try/catch around the whole pbInfer call in
+// generateCoachingNarrative — this makes the guard explicit and local
+// instead of relying on that.
+function parseNarrativeResponse(raw: unknown): ParsedNarrative | null {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return null;
+
   const cleaned = stripJsonFences(raw);
 
   // Fast path: a well-behaved model returned pure JSON with nothing else.
@@ -1051,7 +1107,7 @@ export async function buildCoachingReport(
   // deterministic, always-on check — it runs regardless of whether the
   // narrative came from the LLM or the fallback template.
   let summaryText = narrative.summaryText;
-  const trackInfo = findTrackByRawName(lap.track);
+  const trackInfo = await getTrackTurnsForRawName(lap.track);
   if (trackInfo && trackInfo.turns > 0) {
     const detectedRatio = corners.length / trackInfo.turns;
     if (detectedRatio < 0.5) {
