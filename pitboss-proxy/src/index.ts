@@ -116,12 +116,20 @@ function poolForMode(mode, hasImage) {
 // or paid fallback — which then makes the client-side timeout in
 // pitboss-llm.ts the ONLY thing standing between a hung model and a
 // dead Vercel function, instead of a second line of defense.
-//
-// NOTE: at 10s/model, the 7-model `general` pool has a 70s worst case
-// before paid fallback even starts, while pitboss-llm.ts's default
-// client-side timeout is 20s. Flagged separately — not silently
-// changed here since it's a call-site/product decision, not a bug fix.
 const PER_MODEL_TIMEOUT_MS = 10_000;
+
+// ADDED — a per-model cap alone doesn't bound the *pool*: the 7-model
+// `general` pool could still take up to 70s sequential before paid
+// fallback starts, which blows past pitboss-llm.ts's client-side abort.
+// These are shared budgets across the whole free/paid phase — each
+// model gets min(PER_MODEL_TIMEOUT_MS, time left in the phase), and the
+// loop stops trying new models once the phase budget is spent, moving
+// on to the next phase (paid fallback, or giving up) instead.
+// Worst case end-to-end: ~18s, comfortably under the 25s client-side
+// timeout in pitboss-llm.ts, which itself sits under Vercel's
+// maxDuration with room for the caller's own fallback logic to run.
+const FREE_WATERFALL_BUDGET_MS = 12_000;
+const PAID_FALLBACK_BUDGET_MS = 6_000;
 
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
@@ -139,9 +147,16 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 // if none succeed, so the caller can fall back to the existing
 // all-failed error shape.
 async function callPaidFallback(body, env) {
+  const deadline = Date.now() + PAID_FALLBACK_BUDGET_MS; // ADDED — shared budget across providers
+
   for (const { model, key } of PAID_FALLBACK) {
     const apiKey = env[key];
     if (!apiKey) continue;
+
+    const remaining = deadline - Date.now(); // ADDED
+    if (remaining <= 0) break; // ADDED — budget exhausted, stop trying more providers
+
+    const timeout = Math.min(PER_MODEL_TIMEOUT_MS, remaining); // ADDED
 
     try {
       if (model.startsWith('anthropic/')) {
@@ -157,7 +172,7 @@ async function callPaidFallback(body, env) {
             max_tokens: body.max_tokens ?? 1024,
             messages: body.messages,
           }),
-        }, PER_MODEL_TIMEOUT_MS);
+        }, timeout);
 
         if (!res.ok) continue;
         const data = await res.json();
@@ -179,7 +194,7 @@ async function callPaidFallback(body, env) {
           'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({ ...body, model: model.replace('openai/', '') }),
-      }, PER_MODEL_TIMEOUT_MS);
+      }, timeout);
 
       if (!res.ok) continue;
       const data = await res.json();
@@ -212,8 +227,16 @@ async function callPaidFallback(body, env) {
 async function inferWithWaterfall(pool, body, env) {
   const openrouterKey = (env && typeof env === 'object') ? env.OPENROUTER_API_KEY : env;
   const errors = [];
+  const deadline = Date.now() + FREE_WATERFALL_BUDGET_MS; // ADDED — shared budget across the whole pool
 
   for (const model of pool) {
+    const remaining = deadline - Date.now(); // ADDED
+    if (remaining <= 0) { // ADDED — stop trying more free models, go straight to paid fallback
+      errors.push(`${model}: skipped, free-waterfall budget exhausted`);
+      break;
+    }
+    const timeout = Math.min(PER_MODEL_TIMEOUT_MS, remaining); // ADDED
+
     try {
       const res = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
@@ -224,7 +247,7 @@ async function inferWithWaterfall(pool, body, env) {
           'X-Title': 'PitBoss Internal LLM',
         },
         body: JSON.stringify({ ...body, model }),
-      }, PER_MODEL_TIMEOUT_MS);
+      }, timeout);
 
       if (res.status === 429 || res.status === 503) {
         errors.push(`${model}: rate limited`);
@@ -250,7 +273,7 @@ async function inferWithWaterfall(pool, body, env) {
       // Label timeout distinctly from other thrown errors so /health /
       // logs can tell "model hung" apart from "model errored".
       if (err && err.name === 'AbortError') {
-        errors.push(`${model}: timed out after ${PER_MODEL_TIMEOUT_MS}ms`);
+        errors.push(`${model}: timed out after ${timeout}ms`);
       } else {
         errors.push(`${model}: ${String(err)}`);
       }
