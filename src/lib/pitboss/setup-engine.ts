@@ -12,7 +12,19 @@ export interface ParamRange {
   param_group: string;
   min_value: number;
   max_value: number;
-  default_value: number;
+  // Nullable because pitboss.setup_parameter_ranges genuinely has gaps —
+  // several car classes (F1_2026, F1_2023 as of Aug 2026) have no
+  // default_value seeded yet for ANY param. This used to be typed as a
+  // required `number`, which forced fetchParamRanges to coerce a real
+  // null into Number(null) === 0 to satisfy the type. That silently fed
+  // 0 into buildRecommendation's "class_default" fallback below, which
+  // clamp() then floors to min_value for any range where min > 0 (true
+  // for every param in this table) — so an untouched, brand-new car
+  // class with no submissions yet was confidently serving "every
+  // parameter at its absolute minimum" as its recommended setup, with no
+  // indication anything was missing. See buildRecommendation's fallback
+  // chain below for the real fix.
+  default_value: number | null;
   step: number;
   unit: string;
 }
@@ -50,6 +62,11 @@ export interface ParamRationale {
     | "weighted_average"
     | "override_default"
     | "class_default"
+    // Used when range.default_value itself is null (car class has no
+    // seeded default for this param yet) — falls back to the midpoint of
+    // min/max rather than silently landing on min via clamp(0, min, max).
+    // See ParamRange.default_value's comment for the bug this replaced.
+    | "range_midpoint"
     | "feedback_adjusted"
     | "trait_adjusted"
     | "session_adjusted"
@@ -144,9 +161,18 @@ export function buildRecommendation(params: {
     } else if (override?.override_default != null) {
       rawValue = override.override_default;
       origin = "override_default";
-    } else {
+    } else if (range.default_value != null) {
       rawValue = range.default_value;
       origin = "class_default";
+    } else {
+      // No submissions, no override, and no seeded default for this car
+      // class/param — land on the midpoint of the valid range rather than
+      // falling through to 0 (which clamp() would floor to min_value,
+      // presenting an untouched car class's "recommendation" as every
+      // param pinned to its absolute minimum with no indication that's
+      // an artifact rather than a real baseline).
+      rawValue = (min + max) / 2;
+      origin = "range_midpoint";
     }
 
     const clamped = clamp(rawValue, min, max);
@@ -245,7 +271,7 @@ function applyDeltas(params: {
     const cappedDelta = clamp(requestedDelta, -deltaCap, deltaCap);
     const wasCapped = cappedDelta !== requestedDelta;
 
-    const currentValue = generated_setup[key] ?? range.default_value;
+    const currentValue = generated_setup[key] ?? range.default_value ?? (min + max) / 2;
     const proposed = currentValue + cappedDelta;
     const clampedToRange = clamp(proposed, min, max);
     const finalValue = roundToStep(clampedToRange, min, range.step);
