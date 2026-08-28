@@ -55,16 +55,20 @@ const NAME_OVERRIDES: Record<string, string> = {
   'Lincoln University (PA)': 'lincoln (pa) lions',
 };
 
-// ESPN's edge (site.api.espn.com) 403s requests that don't look like a real
-// browser. A bot-labelled UA like "rise-os-cron/1.0" gets blocked outright —
-// this needs to look like an actual browser hit, headers and all.
-const ESPN_HEADERS: HeadersInit = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-  Accept: 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  Referer: 'https://www.espn.com/',
-};
+// A browser-like User-Agent + headers wasn't enough to clear ESPN's 403 when
+// called directly from Vercel's serverless egress — points to IP-reputation
+// blocking on ESPN's edge rather than a UA/header check. Routing through
+// pitboss-proxy's /espn-relay gives this a different egress IP range to test
+// against, reusing the same PITBOSS_WORKER_URL / PITBOSS_INTERNAL_KEY pattern
+// pitboss-llm.ts already uses for /infer, /steward, /setup-feedback.
+const PITBOSS_WORKER_URL =
+  process.env.PITBOSS_WORKER_URL || 'https://pitboss-proxy.truthexper.workers.dev';
+
+function getInternalKey(): string {
+  const key = process.env.PITBOSS_INTERNAL_KEY;
+  if (!key) throw new Error('PITBOSS_INTERNAL_KEY is not set');
+  return key;
+}
 
 const ESPN_FETCH_RETRIES = 2;
 const ESPN_RETRY_DELAY_MS = 1000;
@@ -103,15 +107,19 @@ function normalize(s: string): string {
 }
 
 async function espnFetch(url: string): Promise<Response> {
+  const relayUrl = `${PITBOSS_WORKER_URL}/espn-relay?url=${encodeURIComponent(url)}`;
   let lastErr: unknown;
   for (let attempt = 0; attempt <= ESPN_FETCH_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, { headers: ESPN_HEADERS });
-      // 403/429 are worth retrying (edge-level throttling); other non-OK
+      const res = await fetch(relayUrl, {
+        headers: { 'X-PitBoss-Key': getInternalKey() },
+      });
+      // 403/429 are worth retrying (edge-level throttling on ESPN's side);
+      // 502 covers the relay itself failing to reach ESPN. Other non-OK
       // statuses are unlikely to change on retry.
       if (res.ok) return res;
-      if (res.status !== 403 && res.status !== 429) return res;
-      lastErr = new Error(`ESPN fetch failed: ${res.status}`);
+      if (res.status !== 403 && res.status !== 429 && res.status !== 502) return res;
+      lastErr = new Error(`ESPN relay fetch failed: ${res.status}`);
     } catch (err) {
       lastErr = err;
     }
@@ -119,7 +127,7 @@ async function espnFetch(url: string): Promise<Response> {
       await new Promise((resolve) => setTimeout(resolve, ESPN_RETRY_DELAY_MS * (attempt + 1)));
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error('ESPN fetch failed after retries');
+  throw lastErr instanceof Error ? lastErr : new Error('ESPN relay fetch failed after retries');
 }
 
 async function fetchEspnTeamList(): Promise<EspnTeamListEntry[]> {
