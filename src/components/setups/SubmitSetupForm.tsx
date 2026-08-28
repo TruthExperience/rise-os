@@ -7,7 +7,11 @@ interface ParamRange {
   param_group: string
   min_value: number
   max_value: number
-  default_value: number
+  // Genuinely nullable — some car classes have no seeded default yet.
+  // The `?? r.min_value` / `?? p.default_value` fallbacks below only
+  // work correctly once this can actually arrive as null instead of a
+  // silently-coerced 0 — see setup-engine-data.ts's fetchParamRanges.
+  default_value: number | null
   step: number
   unit: string
 }
