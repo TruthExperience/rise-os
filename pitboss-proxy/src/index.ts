@@ -338,6 +338,64 @@ Describe what's visible in the attached image(s), in order.`;
   };
 }
 
+// ─── ESPN relay (used by rise-os's hbcu-rosters cron) ─────────────────────────
+// ADDED — rise-os's hbcu-rosters cron gets 403'd calling ESPN's undocumented
+// site.api.espn.com directly from Vercel's serverless egress IPs, and that
+// persisted even after switching to full browser headers — points to
+// IP-reputation blocking on ESPN's edge rather than a UA/header check.
+// Relaying through this Worker's egress gives it a different IP range to
+// test against.
+//
+// Locked to a single allowed host so this can't become an open SSRF relay
+// for arbitrary outbound requests.
+
+const ESPN_RELAY_ALLOWED_HOST = 'site.api.espn.com';
+
+const ESPN_RELAY_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://www.espn.com/',
+};
+
+async function handleEspnRelay(request, env) {
+  const url = new URL(request.url);
+  const target = url.searchParams.get('url');
+  if (!target) {
+    return jsonResponse({ error: 'Missing url parameter' }, 400);
+  }
+
+  let targetUrl;
+  try {
+    targetUrl = new URL(target);
+  } catch {
+    return jsonResponse({ error: 'Invalid url parameter' }, 400);
+  }
+
+  if (targetUrl.hostname !== ESPN_RELAY_ALLOWED_HOST) {
+    return jsonResponse({ error: `Relay only permits ${ESPN_RELAY_ALLOWED_HOST}` }, 400);
+  }
+
+  try {
+    const res = await fetchWithTimeout(
+      targetUrl.toString(),
+      { headers: ESPN_RELAY_HEADERS },
+      PER_MODEL_TIMEOUT_MS
+    );
+    const bodyText = await res.text();
+    return new Response(bodyText, {
+      status: res.status,
+      headers: {
+        'Content-Type': res.headers.get('Content-Type') ?? 'application/json',
+        ...CORS_HEADERS,
+      },
+    });
+  } catch (err) {
+    return jsonResponse({ error: 'espn_relay_fetch_failed', message: String(err) }, 502);
+  }
+}
+
 // ─── Route handlers ────────────────────────────────────────────────────────────
 
 async function handleInfer(request, env) {
@@ -613,6 +671,9 @@ export default {
       if (pathname === '/health' && method === 'GET') {
         return await handleHealth(request, env);
       }
+      if (pathname === '/espn-relay' && method === 'GET') {
+        return await handleEspnRelay(request, env);
+      }
 
       return jsonResponse({ error: 'Not found' }, 404);
     } catch (err) {
@@ -620,4 +681,3 @@ export default {
     }
   },
 };
-
