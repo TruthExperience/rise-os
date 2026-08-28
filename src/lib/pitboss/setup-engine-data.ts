@@ -39,7 +39,13 @@ export async function fetchParamRanges(
       param_group: r.param_group,
       min_value: Number(r.min_value),
       max_value: Number(r.max_value),
-      default_value: Number(r.default_value),
+      // r.default_value is genuinely nullable in the DB (several car
+      // classes have no seeded default yet) — Number(null) === 0 in JS,
+      // which silently turned a real gap into a fake "0 psi" / "0
+      // degrees" default. Preserve null so callers (buildRecommendation,
+      // SubmitSetupForm's slider init) can tell the difference between
+      // "the default really is 0" and "there is no default yet."
+      default_value: r.default_value != null ? Number(r.default_value) : null,
       step: Number(r.step),
       unit: r.unit,
     }));
