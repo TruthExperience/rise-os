@@ -404,6 +404,83 @@ export async function lockTicketChannel(
   return ok;
 }
 
+/**
+ * Grants a user VIEW/SEND/READ_MESSAGE_HISTORY on a ticket channel via
+ * a permission overwrite. Used for /steward adduser to bring in a
+ * witness or other party after the ticket was already created.
+ */
+export async function addUserToTicketChannel(
+  channelId: string,
+  discordUserId: string
+): Promise<boolean> {
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
+  if (!token) {
+    console.error("[tickets] PITBOSS_DISCORD_BOT_TOKEN not set");
+    return false;
+  }
+
+  const res = await fetch(
+    `https://discord.com/api/v10/channels/${channelId}/permissions/${discordUserId}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: 1, // member
+        allow: String(VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY),
+        deny: "0",
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    console.error(
+      "[tickets] addUserToTicketChannel failed:",
+      res.status,
+      await res.text()
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Removes a user's permission overwrite from a ticket channel
+ * entirely (rather than just denying SEND_MESSAGES like
+ * lockTicketChannel does), so they lose VIEW_CHANNEL too and the
+ * channel disappears from their list. Used for /steward removeuser.
+ */
+export async function removeUserFromTicketChannel(
+  channelId: string,
+  discordUserId: string
+): Promise<boolean> {
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
+  if (!token) {
+    console.error("[tickets] PITBOSS_DISCORD_BOT_TOKEN not set");
+    return false;
+  }
+
+  const res = await fetch(
+    `https://discord.com/api/v10/channels/${channelId}/permissions/${discordUserId}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bot ${token}` },
+    }
+  );
+
+  if (!res.ok) {
+    console.error(
+      "[tickets] removeUserFromTicketChannel failed:",
+      res.status,
+      await res.text()
+    );
+    return false;
+  }
+  return true;
+}
+
 export async function postTicketMessage(
   channelId: string,
   content: string
