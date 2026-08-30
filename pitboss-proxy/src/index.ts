@@ -16,23 +16,23 @@
 //    natively), with the one free model as the safety net. Re-check before
 //    Sept 30 — it disappears then.
 //
-// 3. `reasoning` / `steward` / `setup-feedback` / `certgen` / vision-bearing
-//    requests now all run PAID-FIRST: they try callPaidFallback() immediately,
-//    and only drop into the free waterfall pool if no paid key is configured
-//    (env.ANTHROPIC_KEY / env.OPENAI_KEY both unset) or every configured paid
-//    provider fails. Implemented via a `preferPaid` option on
-//    inferWithWaterfall — see that function and its call sites
-//    (handleSteward, handleSetupFeedback, handleInfer, describeEvidenceImages).
+// 3. UPDATE: reasoning / steward / setup-feedback / vision were briefly made
+//    paid-first, then reverted back to free-first-then-paid-fallback for
+//    everything, per Crystal. The `preferPaid` option on inferWithWaterfall
+//    still exists (all call sites currently omit it / pass nothing, which
+//    defaults to free-first) — flip a call site back to
+//    `{ preferPaid: true }` if paid-first is wanted again later.
 //
-// 4. Paid-fallback now skips Anthropic for any request carrying image
-//    content — the image blocks here are built in OpenAI's `image_url`
-//    shape, which Anthropic's API rejects outright. Vision paid-first goes
-//    straight to GPT-4o-mini instead of wasting a guaranteed-failing call
-//    to Claude first. See hasImageContent() / callPaidFallback().
+// 4. Paid-fallback skips Anthropic for any request carrying image content
+//    (still relevant even free-first, since paid fallback still runs after
+//    the free vision model fails) — the image blocks here are built in
+//    OpenAI's `image_url` shape, which Anthropic's API rejects outright.
+//    Falls straight to GPT-4o-mini instead of a guaranteed-failing Claude
+//    call. See hasImageContent() / callPaidFallback().
 //
 // NOTE: handleInfer's mode switch maps 'reasoning' | 'steward' | 'certgen' all
-// to MODELS.reasoning (predates this patch — see poolForMode). All three are
-// preferPaid:true for consistency. Flag if 'certgen' should stay free-first.
+// to MODELS.reasoning (predates this patch — see poolForMode). All run
+// free-first now, same as everything else.
 
 interface Env {
   OPENROUTER_API_KEY: string;
@@ -73,14 +73,15 @@ const MODELS = {
     'nvidia/nemotron-3.5-lightning:free',   // last resort — fast but noticeably weaker (intelligence_index 23.6)
   ],
 
-  // Reasoning / steward — deep thinking models. Now the SAFETY NET for
-  // paid-first routes, not the primary path — see preferPaid. These IDs
-  // were also all dead (confirmed live 2026-08-30) — worth catching since
-  // a safety net full of 404s is silently no safety net at all. Reusing
-  // the same picks as `general`: inkling's description explicitly covers
-  // "general-purpose reasoning" and it supports JSON-via-system-prompt
-  // fine (no response_format/structured_outputs param, but this code
-  // only ever asks for JSON in the prompt and parses manually anyway).
+  // Reasoning / steward — deep thinking models. Free-first, paid fallback
+  // applies if all of these fail. These IDs were also all dead (confirmed
+  // live 2026-08-30) — worth catching regardless of ordering, since a
+  // free pool full of 404s just means every request pays for a paid call
+  // it didn't need to. Reusing the same picks as `general`: inkling's
+  // description explicitly covers "general-purpose reasoning" and it
+  // supports JSON-via-system-prompt fine (no response_format/
+  // structured_outputs param, but this code only ever asks for JSON in
+  // the prompt and parses manually anyway).
   reasoning: [
     'thinkingmachines/inkling:free',
     'thinkingmachines/inkling-small:free',
@@ -97,8 +98,7 @@ const MODELS = {
   // /steward was silently failing before ever reaching paid fallback.
   // Only one genuinely free vision-capable model exists right now, and it
   // has a hard expiration_date of 2026-09-30 — not something to depend on
-  // long-term. Given that, vision is now ALSO paid-first (see
-  // describeEvidenceImages below) with this as the free safety net.
+  // long-term. Free-first (paid fallback still applies after it fails).
   // TODO(Crystal): re-check before 2026-09-30, this model disappears then.
   vision: [
     'dots-studio/dots-3-note-preview:free',
@@ -158,11 +158,10 @@ function poolForMode(mode: string, hasImage: boolean): string[] {
   }
 }
 
-// ADDED — modes that should try paid first, falling into the free pool
-// only as a safety net (no paid key configured, or every paid provider
-// failed). Kept as an explicit allowlist rather than inferring from pool
-// identity, so this stays correct even if pool membership changes later.
-const PAID_FIRST_MODES = new Set(['reasoning', 'steward', 'certgen']);
+// preferPaid still exists as an option on inferWithWaterfall (see below) —
+// no call site currently sets it to true. Everything runs free-first,
+// paid-fallback-last. Flip a call site back to { preferPaid: true } if
+// that route needs to prefer paid again.
 
 // ─── Timeout helper ────────────────────────────────────────────────────────────
 
@@ -423,8 +422,8 @@ Describe what's visible in the attached image(s), in order.`;
       max_tokens: 700,
       temperature: 0.1,
     },
-    env,
-    { preferPaid: true } // ADDED — vision now tries paid (Claude/GPT-4o-mini) first
+    env
+    // Back to free-first, per Crystal.
   );
 
   if ('error' in data) return null;
@@ -497,9 +496,8 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
     );
 
   const pool = poolForMode(mode, hasImage);
-  // CHANGED — image requests now prefer paid too (see vision pool note
-  // above), same as the named reasoning/steward/certgen modes.
-  const preferPaid = hasImage || PAID_FIRST_MODES.has(mode);
+  // Back to free-first for everything, per Crystal — preferPaid still
+  // exists as an option on inferWithWaterfall if this needs to flip again.
   const inferBody = {
     messages: body.messages ?? [
       ...(body.system ? [{ role: 'system', content: body.system }] : []),
@@ -509,7 +507,7 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
     temperature: body.temperature ?? 0.3,
   };
 
-  const data = await inferWithWaterfall(pool, inferBody, env, { preferPaid }); // ADDED options
+  const data = await inferWithWaterfall(pool, inferBody, env);
   if ('error' in data) return jsonResponse(data, 503);
   return jsonResponse(data);
 }
@@ -590,8 +588,8 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
       max_tokens: 1500,
       temperature: 0.1,
     },
-    env,
-    { preferPaid: true } // ADDED — steward tries paid first now
+    env
+    // Back to free-first, per Crystal.
   );
 
   if ('error' in data) return jsonResponse(data, 503);
@@ -650,8 +648,8 @@ DRIVER FEEDBACK: "${feedback_text}"`;
       max_tokens: 1024,
       temperature: 0.2,
     },
-    env,
-    { preferPaid: true } // ADDED — setup-feedback tries paid first now
+    env
+    // Back to free-first, per Crystal.
   );
 
   if ('error' in data) return jsonResponse(data, 503);
@@ -714,7 +712,6 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
     source: 'pitboss-proxy',
     pools: probes.map((p) => (p.status === 'fulfilled' ? p.value : { error: String(p.reason) })),
     models: MODELS,
-    paid_first_modes: [...PAID_FIRST_MODES], // ADDED — visible in /health for quick sanity check
   });
 }
 
