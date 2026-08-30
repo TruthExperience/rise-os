@@ -1,4 +1,26 @@
-// pitboss-proxy/index.js  (Cloudflare Worker — vanilla JS, no deps, Quick Edit compatible)
+// pitboss-proxy/index.ts  (Cloudflare Worker — TypeScript)
+
+// Placeholder Env shape — reconcile against your actual Env interface if one
+// already exists elsewhere in the repo (e.g. generated via `wrangler types`).
+// These are only the vars this file actually reads.
+interface Env {
+  OPENROUTER_API_KEY: string;
+  PITBOSS_INTERNAL_KEY: string;
+  ANTHROPIC_KEY?: string;
+  OPENAI_KEY?: string;
+}
+
+type EvidenceItem = { url: string; label?: string; source?: string };
+
+type InferResult = {
+  response: string;
+  model: string;
+  provider: string;
+  free: boolean;
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
+};
+
+type InferError = { error: string; tried?: string[] };
 
 // ─── Model registry ───────────────────────────────────────────────────────────
 // Ordered by quality per task. All :free. Paid models only appear in PAID_FALLBACK.
@@ -13,7 +35,7 @@ const MODELS = {
     'google/gemma-3-27b-it:free',          // reliable fallback
     'meta-llama/llama-4-scout:free',       // fastest free option
     'meta-llama/llama-3.3-70b-instruct:free',
-    'openrouter/free',                     // auto-router last resort
+    // REMOVED 'openrouter/free' — see reasoning pool note below for why.
   ],
 
   // Reasoning / steward — deep thinking models
@@ -24,7 +46,19 @@ const MODELS = {
     'nvidia/nemotron-3-ultra-253b-v1:free',// 1M context reasoning
     'zhipu-ai/glm-4.5-air:free',           // GLM family, strong reasoning
     'meta-llama/llama-4-maverick:free',
-    'openrouter/free',
+    // REMOVED 'openrouter/free' — this is OpenRouter's free-tier
+    // auto-router, not a specific model. It can select ANY free model on
+    // OpenRouter's roster, including non-chat classifiers. Confirmed in
+    // production: when the named models above were all rate-limited, the
+    // waterfall fell through to 'openrouter/free', which picked
+    // nvidia/nemotron-3.5-content-safety:free — a content-moderation
+    // model, not a completion model. It returned a bare "User Safety:
+    // safe" string instead of JSON, which handleSetupFeedback correctly
+    // rejected as unparseable, surfacing as "flagged for manual review"
+    // on a completely valid driver feedback submission. callPaidFallback
+    // (already implemented below) is now the real last resort for every
+    // pool instead of a non-deterministic router that isn't guaranteed
+    // to return a chat-completion-capable model.
   ],
 
   // Coding
@@ -34,7 +68,7 @@ const MODELS = {
     'qwen/qwen3-235b-a22b:free',
     'meta-llama/llama-4-maverick:free',
     'deepseek/deepseek-chat-v3-0324:free',
-    'openrouter/free',
+    // REMOVED 'openrouter/free' — see reasoning pool note above.
   ],
 
   // Vision
@@ -51,7 +85,7 @@ const MODELS = {
     'deepseek/deepseek-chat-v3-0324:free',
     'google/gemma-3-27b-it:free',
     'mistralai/mistral-small-3.1-24b-instruct:free',
-    'openrouter/free',
+    // REMOVED 'openrouter/free' — see reasoning pool note above.
   ],
 
 };
@@ -74,7 +108,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, X-PitBoss-Key',
 };
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
@@ -85,7 +119,7 @@ function jsonResponse(body, status = 200) {
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)(\?.*)?$/i;
 
-function isLikelyImageUrl(url) {
+function isLikelyImageUrl(url: string): boolean {
   return IMAGE_EXT_RE.test(url.split('?')[0]);
 }
 
@@ -95,7 +129,7 @@ const MAX_EVIDENCE_IMAGES = 4;
 
 // ─── Mode → pool mapping ──────────────────────────────────────────────────────
 
-function poolForMode(mode, hasImage) {
+function poolForMode(mode: string, hasImage: boolean): string[] {
   if (hasImage) return MODELS.vision;
   switch (mode) {
     case 'reasoning':
@@ -131,7 +165,7 @@ const PER_MODEL_TIMEOUT_MS = 10_000;
 const FREE_WATERFALL_BUDGET_MS = 12_000;
 const PAID_FALLBACK_BUDGET_MS = 6_000;
 
-async function fetchWithTimeout(url, options, timeoutMs) {
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -146,7 +180,7 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 // order, skipping any provider whose key isn't set in env. Returns null
 // if none succeed, so the caller can fall back to the existing
 // all-failed error shape.
-async function callPaidFallback(body, env) {
+async function callPaidFallback(body: Record<string, unknown>, env: Env): Promise<InferResult | null> {
   const deadline = Date.now() + PAID_FALLBACK_BUDGET_MS; // ADDED — shared budget across providers
 
   for (const { model, key } of PAID_FALLBACK) {
@@ -175,8 +209,8 @@ async function callPaidFallback(body, env) {
         }, timeout);
 
         if (!res.ok) continue;
-        const data = await res.json();
-        const text = (data.content ?? []).map((b) => b.text ?? '').join('');
+        const data: any = await res.json();
+        const text = (data.content ?? []).map((b: any) => b.text ?? '').join('');
         return {
           response: text,
           model: data.model ?? model,
@@ -197,7 +231,7 @@ async function callPaidFallback(body, env) {
       }, timeout);
 
       if (!res.ok) continue;
-      const data = await res.json();
+      const data: any = await res.json();
       return {
         response: data.choices[0].message.content,
         model: data.model ?? model,
@@ -224,9 +258,13 @@ async function callPaidFallback(body, env) {
 // `env.OPENROUTER_API_KEY` — passing just the string here means
 // `env.OPENROUTER_API_KEY` on that string is undefined, so paid
 // fallback would never trigger even with this function fixed.
-async function inferWithWaterfall(pool, body, env) {
-  const openrouterKey = (env && typeof env === 'object') ? env.OPENROUTER_API_KEY : env;
-  const errors = [];
+async function inferWithWaterfall(
+  pool: string[],
+  body: Record<string, unknown>,
+  env: Env
+): Promise<InferResult | InferError> {
+  const openrouterKey = (env && typeof env === 'object') ? env.OPENROUTER_API_KEY : (env as unknown as string);
+  const errors: string[] = [];
   const deadline = Date.now() + FREE_WATERFALL_BUDGET_MS; // ADDED — shared budget across the whole pool
 
   for (const model of pool) {
@@ -260,7 +298,7 @@ async function inferWithWaterfall(pool, body, env) {
         continue;
       }
 
-      const data = await res.json();
+      const data: any = await res.json();
       return {
         response: data.choices[0].message.content,
         model: data.model ?? model,
@@ -269,7 +307,7 @@ async function inferWithWaterfall(pool, body, env) {
         usage: data.usage ?? null,
       };
 
-    } catch (err) {
+    } catch (err: any) {
       // Label timeout distinctly from other thrown errors so /health /
       // logs can tell "model hung" apart from "model errored".
       if (err && err.name === 'AbortError') {
@@ -300,7 +338,11 @@ async function inferWithWaterfall(pool, body, env) {
 // FIXED — now takes `env` instead of a bare `openrouterKey` string, and
 // passes `env` through to inferWithWaterfall so the vision pass also
 // gets paid-fallback coverage on the same terms as everything else.
-async function describeEvidenceImages(imageUrls, incidentContext, env) {
+async function describeEvidenceImages(
+  imageUrls: string[],
+  incidentContext: string,
+  env: Env
+): Promise<{ description: string; model: string; usage: InferResult['usage'] } | null> {
   const system = `You are a factual image-description assistant for motorsport incident evidence.
 Describe ONLY what is visibly happening in the image(s) — car positions, contact, track position, timing/HUD overlays if visible, any visible damage.
 Do NOT render a verdict, cite rules, or speculate about intent. Stick to what's observable.
@@ -329,7 +371,7 @@ Describe what's visible in the attached image(s), in order.`;
     env
   );
 
-  if (data.error) return null; // caller falls back to text-only reasoning
+  if ('error' in data) return null; // caller falls back to text-only reasoning
 
   return {
     description: data.response,
@@ -359,14 +401,14 @@ const ESPN_RELAY_HEADERS = {
   'Referer': 'https://www.espn.com/',
 };
 
-async function handleEspnRelay(request, env) {
+async function handleEspnRelay(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const target = url.searchParams.get('url');
   if (!target) {
     return jsonResponse({ error: 'Missing url parameter' }, 400);
   }
 
-  let targetUrl;
+  let targetUrl: URL;
   try {
     targetUrl = new URL(target);
   } catch {
@@ -398,13 +440,13 @@ async function handleEspnRelay(request, env) {
 
 // ─── Route handlers ────────────────────────────────────────────────────────────
 
-async function handleInfer(request, env) {
-  const body = await request.json();
+async function handleInfer(request: Request, env: Env): Promise<Response> {
+  const body: any = await request.json();
   const mode = body.mode ?? 'primary';
   const hasImage = Array.isArray(body.messages) &&
-    body.messages.some((m) =>
+    body.messages.some((m: any) =>
       Array.isArray(m.content) &&
-      m.content.some((p) => p.type === 'image_url')
+      m.content.some((p: any) => p.type === 'image_url')
     );
 
   const pool = poolForMode(mode, hasImage);
@@ -418,15 +460,15 @@ async function handleInfer(request, env) {
   };
 
   const data = await inferWithWaterfall(pool, inferBody, env); // FIXED — was env.OPENROUTER_API_KEY
-  if (data.error) return jsonResponse(data, 503);
+  if ('error' in data) return jsonResponse(data, 503);
   return jsonResponse(data);
 }
 
-async function handleSteward(request, env) {
-  const { incident, regulations = [], league = 'AWC' } = await request.json();
+async function handleSteward(request: Request, env: Env): Promise<Response> {
+  const { incident, regulations = [], league = 'AWC' } = await request.json() as any;
 
   const regsBlock = regulations.length > 0
-    ? regulations.map((r) => `Article ${r.article_number} — ${r.title}:\n${r.body}`).join('\n\n')
+    ? regulations.map((r: any) => `Article ${r.article_number} — ${r.title}:\n${r.body}`).join('\n\n')
     : 'No specific regulations provided. Apply standard racing conduct rules.';
 
   // incident.reporter_evidence / incident.accused_evidence are arrays of
@@ -436,8 +478,8 @@ async function handleSteward(request, env) {
   // read incident.reporter_evidence_urls / accused_evidence_urls, which
   // no longer exist on the payload — that mismatch silently dropped all
   // evidence, images included, from every analysis.)
-  const reporterEvidence = incident.reporter_evidence ?? [];
-  const accusedEvidence = incident.accused_evidence ?? [];
+  const reporterEvidence: EvidenceItem[] = incident.reporter_evidence ?? [];
+  const accusedEvidence: EvidenceItem[] = incident.accused_evidence ?? [];
   const allEvidence = [...reporterEvidence, ...accusedEvidence];
   const imageEvidence = allEvidence
     .filter((e) => isLikelyImageUrl(e.url))
@@ -472,7 +514,7 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
 
   if (reporterEvidence.length > 0) {
     promptParts.push(
-      `REPORTER EVIDENCE LINKS:\n${reporterEvidence.map((e) => `- ${e.label ? `${e.label}: ` : ''}${e.url}`).join('\n')}`
+      `REPORTER EVIDENCE LINKS:\n${reporterEvidence.map((e: EvidenceItem) => `- ${e.label ? `${e.label}: ` : ''}${e.url}`).join('\n')}`
     );
   }
 
@@ -482,7 +524,7 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
 
   if (accusedEvidence.length > 0) {
     promptParts.push(
-      `ACCUSED EVIDENCE LINKS:\n${accusedEvidence.map((e) => `- ${e.label ? `${e.label}: ` : ''}${e.url}`).join('\n')}`
+      `ACCUSED EVIDENCE LINKS:\n${accusedEvidence.map((e: EvidenceItem) => `- ${e.label ? `${e.label}: ` : ''}${e.url}`).join('\n')}`
     );
   }
 
@@ -516,7 +558,7 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
     env // FIXED — was env.OPENROUTER_API_KEY
   );
 
-  if (data.error) return jsonResponse(data, 503);
+  if ('error' in data) return jsonResponse(data, 503);
 
   const imageAnalysisMeta = imageAnalysis
     ? { model: imageAnalysis.model, usage: imageAnalysis.usage, image_count: imageUrls.length }
@@ -543,14 +585,14 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
   }
 }
 
-async function handleSetupFeedback(request, env) {
-  const { feedback_text, known_param_keys = [], context = {}, league = 'AWC' } = await request.json();
+async function handleSetupFeedback(request: Request, env: Env): Promise<Response> {
+  const { feedback_text, known_param_keys = [], context = {}, league = 'AWC' } = await request.json() as any;
 
   if (!feedback_text || known_param_keys.length === 0) {
     return jsonResponse({ error: 'feedback_text and known_param_keys are required' }, 400);
   }
 
-  const paramKeysBlock = known_param_keys.map((k) => `- ${k}`).join('\n');
+  const paramKeysBlock = known_param_keys.map((k: string) => `- ${k}`).join('\n');
 
   const system = `You are a race engineering assistant for ${league} that converts driver setup feedback into structured parameter adjustments.
 Return ONLY valid JSON — no markdown, no preamble.
@@ -575,16 +617,16 @@ DRIVER FEEDBACK: "${feedback_text}"`;
     env // FIXED — was env.OPENROUTER_API_KEY
   );
 
-  if (data.error) return jsonResponse(data, 503);
+  if ('error' in data) return jsonResponse(data, 503);
 
   const disclaimer = 'AI-generated suggestion. Review before applying to setup.';
 
   try {
     const raw = data.response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    const parsed = JSON.parse(raw);
+    const parsed: any = JSON.parse(raw);
 
     const validKeys = new Set(known_param_keys);
-    parsed.adjustments = (parsed.adjustments ?? []).filter((a) =>
+    parsed.adjustments = (parsed.adjustments ?? []).filter((a: any) =>
       a && typeof a.param_key === 'string' && validKeys.has(a.param_key) &&
       typeof a.delta === 'number' &&
       ['low', 'medium', 'high'].includes(a.confidence)
@@ -610,7 +652,7 @@ DRIVER FEEDBACK: "${feedback_text}"`;
   }
 }
 
-async function handleHealth(request, env) {
+async function handleHealth(request: Request, env: Env): Promise<Response> {
   // Quick probe of the top model from each pool
   const probes = await Promise.allSettled(
     Object.entries(MODELS).map(async ([pool, models]) => {
@@ -642,7 +684,7 @@ async function handleHealth(request, env) {
 // ─── Router ─────────────────────────────────────────────────────────────────────
 
 export default {
-  async fetch(request, env) {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const { pathname } = url;
     const method = request.method;
