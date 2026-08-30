@@ -1,8 +1,39 @@
 // pitboss-proxy/index.ts  (Cloudflare Worker — TypeScript)
+//
+// CHANGES IN THIS PATCH:
+//
+// 1. `general` / `coding` / `fast` — the OLD free IDs (deepseek/*,
+//    mistralai/*, meta-llama/llama-4-*, qwen/qwen3-235b-a22b:free) are ALL
+//    DEAD. OpenRouter's free-tier catalog fully turned over; DeepSeek and
+//    Mistral currently have zero $0 models at all. Replaced with IDs
+//    confirmed live against OpenRouter's /v1/models on 2026-08-30. Still
+//    free-waterfall-first, paid-fallback-last (unchanged ordering).
+//
+// 2. `vision` — same story, old IDs dead. Only ONE genuinely free
+//    vision-capable model exists right now (dots-studio/dots-3-note-preview:free),
+//    and it has a hard expiration_date of 2026-09-30. Given that fragility,
+//    vision is now ALSO paid-first (Claude / GPT-4o-mini both handle images
+//    natively), with the one free model as the safety net. Re-check before
+//    Sept 30 — it disappears then.
+//
+// 3. `reasoning` / `steward` / `setup-feedback` / `certgen` / vision-bearing
+//    requests now all run PAID-FIRST: they try callPaidFallback() immediately,
+//    and only drop into the free waterfall pool if no paid key is configured
+//    (env.ANTHROPIC_KEY / env.OPENAI_KEY both unset) or every configured paid
+//    provider fails. Implemented via a `preferPaid` option on
+//    inferWithWaterfall — see that function and its call sites
+//    (handleSteward, handleSetupFeedback, handleInfer, describeEvidenceImages).
+//
+// 4. Paid-fallback now skips Anthropic for any request carrying image
+//    content — the image blocks here are built in OpenAI's `image_url`
+//    shape, which Anthropic's API rejects outright. Vision paid-first goes
+//    straight to GPT-4o-mini instead of wasting a guaranteed-failing call
+//    to Claude first. See hasImageContent() / callPaidFallback().
+//
+// NOTE: handleInfer's mode switch maps 'reasoning' | 'steward' | 'certgen' all
+// to MODELS.reasoning (predates this patch — see poolForMode). All three are
+// preferPaid:true for consistency. Flag if 'certgen' should stay free-first.
 
-// Placeholder Env shape — reconcile against your actual Env interface if one
-// already exists elsewhere in the repo (e.g. generated via `wrangler types`).
-// These are only the vars this file actually reads.
 interface Env {
   OPENROUTER_API_KEY: string;
   PITBOSS_INTERNAL_KEY: string;
@@ -22,79 +53,66 @@ type InferResult = {
 
 type InferError = { error: string; tried?: string[] };
 
+type InferOptions = {
+  // ADDED — when true, inferWithWaterfall tries paid providers first via
+  // callPaidFallback(), and only falls into the free waterfall pool if no
+  // paid key is configured or every configured paid provider fails.
+  preferPaid?: boolean;
+};
+
 // ─── Model registry ───────────────────────────────────────────────────────────
-// Ordered by quality per task. All :free. Paid models only appear in PAID_FALLBACK.
 
 const MODELS = {
 
-  // General purpose — quality ordered
+  // General purpose — quality ordered. Confirmed live against OpenRouter's
+  // /v1/models on 2026-08-30. Old catalog (deepseek/*, mistral/*, llama-4/*)
+  // is gone entirely — this whole tier turned over.
   general: [
-    'qwen/qwen3-235b-a22b:free',          // #1 open-weight general reasoning
-    'meta-llama/llama-4-maverick:free',    // strong, vision-capable
-    'deepseek/deepseek-chat-v3-0324:free', // fast, balanced
-    'google/gemma-3-27b-it:free',          // reliable fallback
-    'meta-llama/llama-4-scout:free',       // fastest free option
-    'meta-llama/llama-3.3-70b-instruct:free',
-    // REMOVED 'openrouter/free' — see reasoning pool note below for why.
+    'thinkingmachines/inkling:free',        // 41B active/975B total, best free generalist available
+    'thinkingmachines/inkling-small:free',  // weaker/faster sibling, fallback
+    'nvidia/nemotron-3.5-lightning:free',   // last resort — fast but noticeably weaker (intelligence_index 23.6)
   ],
 
-  // Reasoning / steward — deep thinking models
+  // Reasoning / steward — deep thinking models. Now the SAFETY NET for
+  // paid-first routes, not the primary path — see preferPaid. These IDs
+  // were also all dead (confirmed live 2026-08-30) — worth catching since
+  // a safety net full of 404s is silently no safety net at all. Reusing
+  // the same picks as `general`: inkling's description explicitly covers
+  // "general-purpose reasoning" and it supports JSON-via-system-prompt
+  // fine (no response_format/structured_outputs param, but this code
+  // only ever asks for JSON in the prompt and parses manually anyway).
   reasoning: [
-    'deepseek/deepseek-r1:free',           // #1 open reasoning
-    'deepseek/deepseek-r1-0528:free',      // latest R1
-    'qwen/qwen3-235b-a22b:free',           // dual-mode thinking
-    'nvidia/nemotron-3-ultra-253b-v1:free',// 1M context reasoning
-    'zhipu-ai/glm-4.5-air:free',           // GLM family, strong reasoning
-    'meta-llama/llama-4-maverick:free',
-    // REMOVED 'openrouter/free' — this is OpenRouter's free-tier
-    // auto-router, not a specific model. It can select ANY free model on
-    // OpenRouter's roster, including non-chat classifiers. Confirmed in
-    // production: when the named models above were all rate-limited, the
-    // waterfall fell through to 'openrouter/free', which picked
-    // nvidia/nemotron-3.5-content-safety:free — a content-moderation
-    // model, not a completion model. It returned a bare "User Safety:
-    // safe" string instead of JSON, which handleSetupFeedback correctly
-    // rejected as unparseable, surfacing as "flagged for manual review"
-    // on a completely valid driver feedback submission. callPaidFallback
-    // (already implemented below) is now the real last resort for every
-    // pool instead of a non-deterministic router that isn't guaranteed
-    // to return a chat-completion-capable model.
+    'thinkingmachines/inkling:free',
+    'thinkingmachines/inkling-small:free',
   ],
 
-  // Coding
+  // Coding — confirmed live 2026-08-30.
   coding: [
-    'qwen/qwen3-coder-480b-a35b-instruct:free', // #1 free coding
-    'deepseek/deepseek-r1:free',                 // strong coder
-    'qwen/qwen3-235b-a22b:free',
-    'meta-llama/llama-4-maverick:free',
-    'deepseek/deepseek-chat-v3-0324:free',
-    // REMOVED 'openrouter/free' — see reasoning pool note above.
+    'poolside/laguna-s-2.1:free',      // purpose-built coding agent model, 70.2% Terminal-Bench 2.1
+    'thinkingmachines/inkling:free',   // not coding-specialized but solid fallback (coding_index 52.1)
   ],
 
-  // Vision
+  // Vision — the previous IDs here were all dead (confirmed against live
+  // OpenRouter catalog 2026-08-30), meaning evidence-photo analysis in
+  // /steward was silently failing before ever reaching paid fallback.
+  // Only one genuinely free vision-capable model exists right now, and it
+  // has a hard expiration_date of 2026-09-30 — not something to depend on
+  // long-term. Given that, vision is now ALSO paid-first (see
+  // describeEvidenceImages below) with this as the free safety net.
+  // TODO(Crystal): re-check before 2026-09-30, this model disappears then.
   vision: [
-    'meta-llama/llama-4-maverick:free',
-    'google/gemma-3-27b-it:free',
-    'nvidia/nemotron-nano-vl-12b-v2:free',
-    'moonshotai/kimi-vl-a3b-thinking:free',
+    'dots-studio/dots-3-note-preview:free',
   ],
 
-  // Fast / low latency — shorter context, quicker response
+  // Fast / low latency — confirmed live 2026-08-30.
   fast: [
-    'meta-llama/llama-4-scout:free',
-    'deepseek/deepseek-chat-v3-0324:free',
-    'google/gemma-3-27b-it:free',
-    'mistralai/mistral-small-3.1-24b-instruct:free',
-    // REMOVED 'openrouter/free' — see reasoning pool note above.
+    'nvidia/nemotron-3.5-lightning:free', // built specifically for high-throughput agentic workloads
+    'liquid/lfm-2.5-2.6b:free',           // smaller/faster still; Liquid's own docs say avoid for agentic coding — fine here, this pool isn't coding
+    'thinkingmachines/inkling-small:free',
   ],
 
 };
 
-// Paid fallback — hit when every free model in the pool fails or times out.
-// Each entry names its OWN provider's native API (not routed through
-// OpenRouter) and the env var holding that provider's key. Previously
-// paid fallback always went through OpenRouter regardless of this
-// per-model key naming; callPaidFallback below routes natively instead.
 const PAID_FALLBACK = [
   { model: 'anthropic/claude-sonnet-4-6', key: 'ANTHROPIC_KEY' },
   { model: 'openai/gpt-4o-mini',          key: 'OPENAI_KEY'    },
@@ -123,8 +141,6 @@ function isLikelyImageUrl(url: string): boolean {
   return IMAGE_EXT_RE.test(url.split('?')[0]);
 }
 
-// Evidence images add real latency/cost per request, and free vision
-// models have modest limits — cap how many go in as image blocks.
 const MAX_EVIDENCE_IMAGES = 4;
 
 // ─── Mode → pool mapping ──────────────────────────────────────────────────────
@@ -142,26 +158,15 @@ function poolForMode(mode: string, hasImage: boolean): string[] {
   }
 }
 
-// ─── Timeout helper ────────────────────────────────────────────────────────────
-// ADDED — bounds how long any single model attempt can hang before the
-// waterfall moves on. Without this, one unresponsive free model (as
-// opposed to one that fails fast with 429/503) can silently eat the
-// entire per-model budget and leave no time for the rest of the pool
-// or paid fallback — which then makes the client-side timeout in
-// pitboss-llm.ts the ONLY thing standing between a hung model and a
-// dead Vercel function, instead of a second line of defense.
-const PER_MODEL_TIMEOUT_MS = 10_000;
+// ADDED — modes that should try paid first, falling into the free pool
+// only as a safety net (no paid key configured, or every paid provider
+// failed). Kept as an explicit allowlist rather than inferring from pool
+// identity, so this stays correct even if pool membership changes later.
+const PAID_FIRST_MODES = new Set(['reasoning', 'steward', 'certgen']);
 
-// ADDED — a per-model cap alone doesn't bound the *pool*: the 7-model
-// `general` pool could still take up to 70s sequential before paid
-// fallback starts, which blows past pitboss-llm.ts's client-side abort.
-// These are shared budgets across the whole free/paid phase — each
-// model gets min(PER_MODEL_TIMEOUT_MS, time left in the phase), and the
-// loop stops trying new models once the phase budget is spent, moving
-// on to the next phase (paid fallback, or giving up) instead.
-// Worst case end-to-end: ~18s, comfortably under the 25s client-side
-// timeout in pitboss-llm.ts, which itself sits under Vercel's
-// maxDuration with room for the caller's own fallback logic to run.
+// ─── Timeout helper ────────────────────────────────────────────────────────────
+
+const PER_MODEL_TIMEOUT_MS = 10_000;
 const FREE_WATERFALL_BUDGET_MS = 12_000;
 const PAID_FALLBACK_BUDGET_MS = 6_000;
 
@@ -176,21 +181,24 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: nu
 }
 
 // ─── Paid fallback ─────────────────────────────────────────────────────────────
-// Tries each configured paid provider natively (not via OpenRouter) in
-// order, skipping any provider whose key isn't set in env. Returns null
-// if none succeed, so the caller can fall back to the existing
-// all-failed error shape.
+// Unchanged logic — tries each configured paid provider natively, in order,
+// skipping any whose key isn't set. Returns null if none succeed (including
+// the case where NO key is set at all — callers must check that separately
+// if they need to distinguish "no key configured" from "key configured but
+// call failed", which inferWithWaterfall does via hasPaidKeyConfigured()).
 async function callPaidFallback(body: Record<string, unknown>, env: Env): Promise<InferResult | null> {
-  const deadline = Date.now() + PAID_FALLBACK_BUDGET_MS; // ADDED — shared budget across providers
+  const deadline = Date.now() + PAID_FALLBACK_BUDGET_MS;
+  const skipAnthropic = hasImageContent(body); // ADDED
 
   for (const { model, key } of PAID_FALLBACK) {
     const apiKey = env[key];
     if (!apiKey) continue;
+    if (skipAnthropic && model.startsWith('anthropic/')) continue; // ADDED
 
-    const remaining = deadline - Date.now(); // ADDED
-    if (remaining <= 0) break; // ADDED — budget exhausted, stop trying more providers
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
 
-    const timeout = Math.min(PER_MODEL_TIMEOUT_MS, remaining); // ADDED
+    const timeout = Math.min(PER_MODEL_TIMEOUT_MS, remaining);
 
     try {
       if (model.startsWith('anthropic/')) {
@@ -220,7 +228,6 @@ async function callPaidFallback(body: Record<string, unknown>, env: Env): Promis
         };
       }
 
-      // OpenAI-compatible chat completions
       const res = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -241,39 +248,57 @@ async function callPaidFallback(body: Record<string, unknown>, env: Env): Promis
       };
 
     } catch {
-      continue; // try next paid provider
+      continue;
     }
   }
   return null;
 }
 
-// ─── Core inference with waterfall ───────────────────────────────────────────
-// Returns a plain object (not a Response) so callers can inspect/transform
-// the result before deciding how to respond.
-//
-// FIXED — now takes `env` (not a bare key string) so it can reach
-// env.OPENROUTER_API_KEY for the free waterfall AND fall through to
-// callPaidFallback(body, env) once every free model has failed. All
-// call sites below were updated to pass `env` instead of
-// `env.OPENROUTER_API_KEY` — passing just the string here means
-// `env.OPENROUTER_API_KEY` on that string is undefined, so paid
-// fallback would never trigger even with this function fixed.
-async function inferWithWaterfall(
+// ADDED — lets callers distinguish "no paid key exists at all" from "a paid
+// key exists but the call failed", since preferPaid's safety-net condition
+// is "no key configured OR every provider failed", and the second half is
+// already what callPaidFallback returning null covers.
+function hasPaidKeyConfigured(env: Env): boolean {
+  return Boolean(env.ANTHROPIC_KEY || env.OPENAI_KEY);
+}
+
+// ADDED — image content in this file is always built OpenAI-style
+// ({ type: 'image_url', image_url: { url } }), since it was originally
+// written only for OpenRouter's OpenAI-compatible endpoint. Anthropic's
+// /v1/messages API expects a different shape ({ type: 'image',
+// source: {...} }) and will reject the OpenAI shape outright. Now that
+// vision can hit callPaidFallback directly (paid-first), skip Anthropic
+// for any request carrying image content rather than sending a request
+// guaranteed to fail — the loop falls straight through to OpenAI, which
+// does accept this shape natively.
+function hasImageContent(body: Record<string, unknown>): boolean {
+  const messages = body.messages as any[] | undefined;
+  return Array.isArray(messages) && messages.some((m) =>
+    Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url')
+  );
+}
+
+// ─── Free waterfall (pool loop only, no paid fallback) ────────────────────────
+// EXTRACTED from the old inferWithWaterfall — this is just the free-model
+// loop over `pool`, budgeted the same way as before. It does NOT call
+// callPaidFallback itself; both call orders (free-first-then-paid, and
+// paid-first-then-free-safety-net) are now composed by inferWithWaterfall.
+async function freeWaterfall(
   pool: string[],
   body: Record<string, unknown>,
   env: Env
 ): Promise<InferResult | InferError> {
-  const openrouterKey = (env && typeof env === 'object') ? env.OPENROUTER_API_KEY : (env as unknown as string);
+  const openrouterKey = env.OPENROUTER_API_KEY;
   const errors: string[] = [];
-  const deadline = Date.now() + FREE_WATERFALL_BUDGET_MS; // ADDED — shared budget across the whole pool
+  const deadline = Date.now() + FREE_WATERFALL_BUDGET_MS;
 
   for (const model of pool) {
-    const remaining = deadline - Date.now(); // ADDED
-    if (remaining <= 0) { // ADDED — stop trying more free models, go straight to paid fallback
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
       errors.push(`${model}: skipped, free-waterfall budget exhausted`);
       break;
     }
-    const timeout = Math.min(PER_MODEL_TIMEOUT_MS, remaining); // ADDED
+    const timeout = Math.min(PER_MODEL_TIMEOUT_MS, remaining);
 
     try {
       const res = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
@@ -308,8 +333,6 @@ async function inferWithWaterfall(
       };
 
     } catch (err: any) {
-      // Label timeout distinctly from other thrown errors so /health /
-      // logs can tell "model hung" apart from "model errored".
       if (err && err.name === 'AbortError') {
         errors.push(`${model}: timed out after ${timeout}ms`);
       } else {
@@ -319,25 +342,57 @@ async function inferWithWaterfall(
     }
   }
 
-  // All free failed — try paid fallback if env has any provider key
-  // configured. Requires the real env object (see FIXED note above).
-  if (env && typeof env === 'object') {
+  return { error: 'all_free_models_failed', tried: errors };
+}
+
+// ─── Core inference with waterfall ───────────────────────────────────────────
+// Two orderings, selected by options.preferPaid:
+//
+//  preferPaid=false (default — general/coding/fast/vision):
+//    free pool waterfall -> if all fail, paid fallback -> if that also
+//    fails, return the free-pool error.
+//
+//  preferPaid=true (reasoning/steward/setup-feedback):
+//    if a paid key is configured: try paid fallback first; if it succeeds,
+//    return immediately.
+//    if no paid key is configured, OR paid fallback returns null (every
+//    configured provider failed): fall into the free pool waterfall as a
+//    safety net; if that also fails, return the free-pool error.
+async function inferWithWaterfall(
+  pool: string[],
+  body: Record<string, unknown>,
+  env: Env,
+  options: InferOptions = {}
+): Promise<InferResult | InferError> {
+  if (options.preferPaid) {
+    if (hasPaidKeyConfigured(env)) {
+      const paidResult = await callPaidFallback(body, env);
+      if (paidResult) return paidResult;
+      // every configured paid provider failed — drop to free safety net
+    }
+    // no paid key configured at all — drop to free safety net
+    return await freeWaterfall(pool, body, env);
+  }
+
+  // Default ordering — free first, paid last.
+  const freeResult = await freeWaterfall(pool, body, env);
+  if (!('error' in freeResult)) return freeResult;
+
+  if (hasPaidKeyConfigured(env)) {
     const paidResult = await callPaidFallback(body, env);
     if (paidResult) return paidResult;
   }
 
-  return { error: 'all_free_models_failed', tried: errors };
+  return freeResult;
 }
 
 // ─── Image-description pass (used by /steward) ───────────────────────────────
-// Pass 1: ask a vision model to describe what's visible in each image,
-// purely factually — no verdict, no rule interpretation. Keeps the
-// vision model in its lane and hands the reasoning model clean text
-// it can actually reason well over.
-//
-// FIXED — now takes `env` instead of a bare `openrouterKey` string, and
-// passes `env` through to inferWithWaterfall so the vision pass also
-// gets paid-fallback coverage on the same terms as everything else.
+// CHANGED — vision is now ALSO paid-first, same reasoning as
+// reasoning/steward/setup-feedback: the free vision pool is down to a
+// single model with a hard expiration date, so treating it as the
+// primary path is risky. Paid providers (Claude, GPT-4o-mini) both
+// handle images natively, so this is a safe default with the free
+// model as the safety net if no paid key is configured or paid fails.
 async function describeEvidenceImages(
   imageUrls: string[],
   incidentContext: string,
@@ -368,10 +423,11 @@ Describe what's visible in the attached image(s), in order.`;
       max_tokens: 700,
       temperature: 0.1,
     },
-    env
+    env,
+    { preferPaid: true } // ADDED — vision now tries paid (Claude/GPT-4o-mini) first
   );
 
-  if ('error' in data) return null; // caller falls back to text-only reasoning
+  if ('error' in data) return null;
 
   return {
     description: data.response,
@@ -381,15 +437,6 @@ Describe what's visible in the attached image(s), in order.`;
 }
 
 // ─── ESPN relay (used by rise-os's hbcu-rosters cron) ─────────────────────────
-// ADDED — rise-os's hbcu-rosters cron gets 403'd calling ESPN's undocumented
-// site.api.espn.com directly from Vercel's serverless egress IPs, and that
-// persisted even after switching to full browser headers — points to
-// IP-reputation blocking on ESPN's edge rather than a UA/header check.
-// Relaying through this Worker's egress gives it a different IP range to
-// test against.
-//
-// Locked to a single allowed host so this can't become an open SSRF relay
-// for arbitrary outbound requests.
 
 const ESPN_RELAY_ALLOWED_HOST = 'site.api.espn.com';
 
@@ -450,6 +497,9 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
     );
 
   const pool = poolForMode(mode, hasImage);
+  // CHANGED — image requests now prefer paid too (see vision pool note
+  // above), same as the named reasoning/steward/certgen modes.
+  const preferPaid = hasImage || PAID_FIRST_MODES.has(mode);
   const inferBody = {
     messages: body.messages ?? [
       ...(body.system ? [{ role: 'system', content: body.system }] : []),
@@ -459,7 +509,7 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
     temperature: body.temperature ?? 0.3,
   };
 
-  const data = await inferWithWaterfall(pool, inferBody, env); // FIXED — was env.OPENROUTER_API_KEY
+  const data = await inferWithWaterfall(pool, inferBody, env, { preferPaid }); // ADDED options
   if ('error' in data) return jsonResponse(data, 503);
   return jsonResponse(data);
 }
@@ -471,13 +521,6 @@ async function handleSteward(request: Request, env: Env): Promise<Response> {
     ? regulations.map((r: any) => `Article ${r.article_number} — ${r.title}:\n${r.body}`).join('\n\n')
     : 'No specific regulations provided. Apply standard racing conduct rules.';
 
-  // incident.reporter_evidence / incident.accused_evidence are arrays of
-  // { url, label, source } objects (upload vs link), not flat URL
-  // strings — steward.ts's getIncidentEvidence resolves signed URLs for
-  // Supabase-stored uploads before sending these over. (Previously this
-  // read incident.reporter_evidence_urls / accused_evidence_urls, which
-  // no longer exist on the payload — that mismatch silently dropped all
-  // evidence, images included, from every analysis.)
   const reporterEvidence: EvidenceItem[] = incident.reporter_evidence ?? [];
   const accusedEvidence: EvidenceItem[] = incident.accused_evidence ?? [];
   const allEvidence = [...reporterEvidence, ...accusedEvidence];
@@ -486,15 +529,12 @@ async function handleSteward(request: Request, env: Env): Promise<Response> {
     .slice(0, MAX_EVIDENCE_IMAGES);
   const imageUrls = imageEvidence.map((e) => e.url);
 
-  // Pass 1 — describe images, if any. A failure here (bad URL, expired
-  // Discord CDN link, vision pool down) just means the verdict pass
-  // proceeds without image context rather than failing the whole request.
   let imageAnalysis = null;
   if (imageUrls.length > 0) {
     imageAnalysis = await describeEvidenceImages(
       imageUrls,
       `${incident.incident_type} incident, lap ${incident.lap ?? '?'}`,
-      env // FIXED — was env.OPENROUTER_API_KEY
+      env
     );
   }
 
@@ -503,9 +543,6 @@ Return ONLY valid JSON — no markdown, no preamble.
 Shape: { "verdict": "guilty"|"not_guilty"|"inconclusive", "confidence": "high"|"medium"|"low", "reasoning": string, "cited_articles": string[], "pp_recommendation": {"min": number, "max": number}, "mitigating_factors": string[], "aggravating_factors": string[], "steward_notes": string }
 Base your verdict on ALL evidence provided — the reporter's account, the accused driver's defense (if any), evidence links, the full ticket conversation transcript if included, and the image description if provided. The image description was produced by a separate vision pass and reflects only what is visibly observable — treat it as a factual account, not a verdict.`;
 
-  // Build the prompt incrementally so sections with no data (no defense
-  // yet, no transcript yet, no evidence) are simply omitted rather than
-  // sent as "undefined" or empty noise.
   const promptParts = [
     `INCIDENT: ${incident.incident_type} | TRACK: ${incident.track ?? 'Unknown'} | LAP: ${incident.lap ?? '?'}`,
     `ACCUSED: ${incident.accused_username ?? 'Unknown'}`,
@@ -535,8 +572,6 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
   }
 
   if (incident.ticket_transcript) {
-    // Cap this — a long back-and-forth shouldn't crowd out the
-    // regulations block or blow the model's context budget.
     const transcript = String(incident.ticket_transcript).slice(0, 6000);
     promptParts.push(`FULL TICKET CONVERSATION TRANSCRIPT:\n${transcript}`);
   }
@@ -555,7 +590,8 @@ Base your verdict on ALL evidence provided — the reporter's account, the accus
       max_tokens: 1500,
       temperature: 0.1,
     },
-    env // FIXED — was env.OPENROUTER_API_KEY
+    env,
+    { preferPaid: true } // ADDED — steward tries paid first now
   );
 
   if ('error' in data) return jsonResponse(data, 503);
@@ -614,7 +650,8 @@ DRIVER FEEDBACK: "${feedback_text}"`;
       max_tokens: 1024,
       temperature: 0.2,
     },
-    env // FIXED — was env.OPENROUTER_API_KEY
+    env,
+    { preferPaid: true } // ADDED — setup-feedback tries paid first now
   );
 
   if ('error' in data) return jsonResponse(data, 503);
@@ -653,7 +690,6 @@ DRIVER FEEDBACK: "${feedback_text}"`;
 }
 
 async function handleHealth(request: Request, env: Env): Promise<Response> {
-  // Quick probe of the top model from each pool
   const probes = await Promise.allSettled(
     Object.entries(MODELS).map(async ([pool, models]) => {
       const start = Date.now();
@@ -678,6 +714,7 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
     source: 'pitboss-proxy',
     pools: probes.map((p) => (p.status === 'fulfilled' ? p.value : { error: String(p.reason) })),
     models: MODELS,
+    paid_first_modes: [...PAID_FIRST_MODES], // ADDED — visible in /health for quick sanity check
   });
 }
 
@@ -689,12 +726,10 @@ export default {
     const { pathname } = url;
     const method = request.method;
 
-    // CORS preflight
     if (method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
 
-    // Auth — applies to every route below
     const key = request.headers.get('X-PitBoss-Key');
     if (key !== env.PITBOSS_INTERNAL_KEY) {
       return jsonResponse({ error: 'Unauthorized' }, 401);
