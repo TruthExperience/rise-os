@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
+import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import {
   buildRecommendation,
   applyTeamAndDriverBias,
   applySessionBias,
   applyDriverStyleBias,
+  applyComparisonBias,
 } from '@/lib/pitboss/setup-engine';
 import {
   fetchParamRanges,
@@ -14,7 +16,6 @@ import {
   fetchCareerDriverStats,
   fetchDriverStyleProfile,
 } from '@/lib/pitboss/setup-engine-data';
-import { resolveDriverIdFromSession } from '@/lib/pitboss/resolveDriver';
 
 // Forces this route to opt out of Next.js's static/Data Cache handling.
 // Setup param ranges, overrides, and submissions change via direct SQL/
@@ -28,16 +29,9 @@ interface RecommendRequestBody {
   track_id:      string;
   conditions:    'dry' | 'wet' | 'mixed';
   session_type:  'race' | 'qualifying' | 'sprint' | 'time_trial' | 'practice';
-  // Discord snowflake from session.user.discordId (next-auth jwt strategy,
-  // token.sub / p.id). Resolved server-side to a real pitboss.drivers.id —
-  // never trust a client-supplied driver_id for identity purposes.
-  discord_id?:   string | null;
-  // Optional direct override for non-session callers (e.g. admin tooling,
-  // backfill scripts) that already know the driver row. Ignored if
-  // discord_id resolves successfully.
-  driver_id?:    string | null;
   // In-game team/driver being tuned for — distinct from the pitboss.drivers
-  // identity above. Links to car_class_teams / car_class_team_drivers.
+  // identity resolved below via the session. Links to car_class_teams /
+  // car_class_team_drivers.
   car_team_id?:              string | null;
   car_driver_id?:            string | null;
   car_driver_name_freetext?: string | null;
@@ -49,6 +43,15 @@ interface RecommendRequestBody {
 }
 
 export async function POST(req: NextRequest) {
+  // Driver identity is resolved server-side from the verified session —
+  // never trust a client-supplied discord_id/driver_id for identity
+  // purposes. Prior version accepted `discord_id` in the request body and
+  // passed it straight to a discord_id -> driver_id lookup with no session
+  // check, letting any caller generate/persist a recommendation (and pull
+  // in another driver's private style profile) under an arbitrary driver's
+  // identity. See getAuthedDriver in lib/getSupabaseUserId.ts.
+  const authedDriver = await getAuthedDriver();
+
   const supabaseAdmin = createAdminClient();
   let body: RecommendRequestBody;
   try {
@@ -63,8 +66,6 @@ export async function POST(req: NextRequest) {
     track_id,
     conditions,
     session_type,
-    discord_id = null,
-    driver_id: driverIdOverride = null,
     car_team_id = null,
     car_driver_id = null,
     car_driver_name_freetext = null,
@@ -78,17 +79,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Resolve the real driver id from the Discord snowflake. Falls back to an
-  // explicit driver_id override only when no discord_id was supplied or it
-  // didn't resolve to a known driver — e.g. someone signed in via Discord
-  // but hasn't been added to pitboss.drivers yet.
-  let driver_id: string | null = null;
-  if (discord_id) {
-    driver_id = await resolveDriverIdFromSession(discord_id);
-  }
-  if (!driver_id && driverIdOverride) {
-    driver_id = driverIdOverride;
-  }
+  const driver_id: string | null = authedDriver?.id ?? null;
 
   let paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile;
   try {
@@ -156,6 +147,19 @@ export async function POST(req: NextRequest) {
       paramRanges,
       overrides,
       carFeelPreference: driverStyleProfile.car_feel_preference as any,
+    });
+  }
+
+  // Comparison-driver bias — the LLM-derived weight map generated from
+  // comparison_drivers/car_feel_notes freetext (see driving-style route).
+  // A no-op if that generation hasn't run yet for this driver (null/empty
+  // comparison_bias), same as every other optional layer above.
+  if (driverStyleProfile?.comparison_bias) {
+    engineResult = applyComparisonBias({
+      base: engineResult,
+      paramRanges,
+      overrides,
+      comparisonBias: driverStyleProfile.comparison_bias,
     });
   }
 
