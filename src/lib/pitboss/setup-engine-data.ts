@@ -13,6 +13,7 @@ import type {
   TeamTraits,
   DriverStats,
   CarFeelPreference,
+  ParamWeightMap,
 } from "./setup-engine";
 
 function getSupabase() {
@@ -160,6 +161,12 @@ export interface DriverStyleProfileData {
   car_feel_preference: CarFeelPreference;
   preferred_race_length: string;
   assists: Record<string, unknown>;
+  // LLM-generated from comparison_drivers + car_feel_notes (see the
+  // `comparison_bias` action in /api/pitboss/llm/route.ts). Null/empty
+  // until the driver has saved those freetext fields at least once since
+  // that generation path was added. applyComparisonBias treats either
+  // case as a no-op.
+  comparison_bias: ParamWeightMap | null;
 }
 
 export async function fetchDriverStyleProfile(
@@ -169,7 +176,7 @@ export async function fetchDriverStyleProfile(
   const { data, error } = await supabase
     .schema("pitboss")
     .from("driver_style_profiles")
-    .select("car_feel_preference, preferred_race_length, assists")
+    .select("car_feel_preference, preferred_race_length, assists, comparison_bias")
     .eq("driver_id", driverId)
     .maybeSingle();
 
@@ -183,9 +190,14 @@ export async function fetchDriverStyleProfile(
     throw new Error(`Unexpected car_feel_preference value: ${pref}`);
   }
 
+  const rawBias = data.comparison_bias as Record<string, unknown> | null;
+  const comparisonBias: ParamWeightMap | null =
+    rawBias && Object.keys(rawBias).length > 0 ? (rawBias as ParamWeightMap) : null;
+
   return {
     car_feel_preference: pref as CarFeelPreference,
     preferred_race_length: data.preferred_race_length,
     assists: (data.assists as Record<string, unknown>) ?? {},
+    comparison_bias: comparisonBias,
   };
 }
