@@ -162,6 +162,78 @@ Format: [{ "question": "...", "options": { "A": "...", "B": "...", "C": "...", "
       });
     }
 
+    if (action === 'comparison_bias') {
+      const {
+        comparison_drivers,
+        car_feel_notes,
+        notes,
+        car_feel_preference,
+        known_param_keys,
+      } = payload;
+
+      if (!comparison_drivers && !car_feel_notes) {
+        return NextResponse.json(
+          { error: 'comparison_drivers or car_feel_notes required' },
+          { status: 400 }
+        );
+      }
+      if (!Array.isArray(known_param_keys) || known_param_keys.length === 0) {
+        return NextResponse.json({ error: 'known_param_keys required' }, { status: 400 });
+      }
+
+      // Translates a driver's freeform "I drive like X, defend like Y"
+      // profile into small, directional setup-param weights — the same
+      // { param_key, delta, confidence, reasoning } shape the existing
+      // /setup-feedback worker path already uses for post-race feedback,
+      // reused here for consistency even though this is a distinct
+      // one-time-per-profile-edit generation, not a per-recommendation
+      // adjustment. Weights are a fraction of that param's full range
+      // (like TEAM_TRAIT_PARAM_MAP/CAR_FEEL_PARAM_MAP in setup-engine.ts),
+      // not an absolute in-game unit — kept small since this stacks on
+      // top of the driver's direct car_feel_preference bias, not in place
+      // of it.
+      const result = await pbInfer({
+        mode: 'fast',
+        system: `You are PitBoss AI, translating an F1 25 driver's stated influences and feel preferences into small setup-parameter bias weights.
+
+Valid param keys (only use these, exactly as spelled): ${known_param_keys.join(', ')}
+
+Each weight is a DIRECTIONAL FRACTION in the range -0.15 to 0.15, not a real setup value — it represents "push this param this much toward its max (positive) or min (negative) end of its own range, on top of whatever baseline setup is already generated." Stay conservative: most drivers should get 3-6 weighted params, not all of them, and most weights should sit under 0.08 unless the driver's notes are very specific and strong about a characteristic.
+
+The driver already has a separate direct car_feel_preference of "${car_feel_preference ?? 'not set'}" which already biases the setup — do not duplicate that signal, only add what the comparison drivers / freetext notes suggest ON TOP of it (e.g. a specific real driver's known racing style, tyre management habits, or braking/defending characteristics that aren't already implied by the car_feel_preference alone).
+
+Output valid JSON only — an array of objects, no markdown fencing, no commentary.
+Format: [{ "param_key": "...", "delta": 0.05, "confidence": "low"|"medium"|"high", "reasoning": "..." }]
+If nothing in the notes suggests a meaningful bias beyond the existing car_feel_preference, output an empty array: []`,
+        prompt: `Comparison drivers: ${comparison_drivers ?? 'none given'}
+Car feel notes: ${car_feel_notes ?? 'none given'}
+Additional notes: ${notes ?? 'none given'}
+
+Generate the bias weight array now. Output JSON array only.`,
+        max_tokens: 768,
+        temperature: 0.3,
+      });
+
+      let adjustments;
+      try {
+        adjustments = JSON.parse(result.response.replace(/```json|```/g, '').trim());
+      } catch {
+        return NextResponse.json({
+          adjustments: [],
+          raw: result.response,
+          parse_error: true,
+          model: result.model,
+          provider: result.provider,
+        });
+      }
+
+      return NextResponse.json({
+        adjustments,
+        model: result.model,
+        provider: result.provider,
+      });
+    }
+
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Internal error';
