@@ -355,7 +355,10 @@ export interface DriverStats {
   focus: number; // 0-9
 }
 
-type ParamWeightMap = Partial<Record<string, number>>;
+// Exported so callers outside this file (LLM-generated bias, e.g.
+// driver_style_profiles.comparison_bias) can be typed against the same
+// shape this engine consumes, instead of duck-typing a bare object.
+export type ParamWeightMap = Partial<Record<string, number>>;
 
 const TEAM_TRAIT_PARAM_MAP: Record<keyof TeamTraits, ParamWeightMap> = {
   aero_efficiency: { front_wing_aero: -0.06, rear_wing_aero: -0.06 },
@@ -705,6 +708,74 @@ export function applyDriverStyleBias(params: {
     origin: "trait_adjusted",
     maxDeltaFraction: MAX_STYLE_DELTA_FRACTION,
     modelSuffix: "style-bias-v1",
+    confidenceMultiplier: 1.0,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Comparison-driver bias (LLM-derived, per-driver, freetext-sourced)
+// ---------------------------------------------------------------------------
+//
+// Unlike CAR_FEEL_PARAM_MAP above (a fixed lookup keyed by one of 5 enum
+// values), this layer's weight map is arbitrary and per-driver — generated
+// once from driver_style_profiles.comparison_drivers + car_feel_notes (see
+// the `comparison_bias` action in /api/pitboss/llm) and cached on the row
+// until those text fields change. This function only ever *applies* that
+// cached map; it does not call the LLM itself, keeping this file free of
+// I/O the same way every other bias layer here is.
+//
+// Set below MAX_STYLE_DELTA_FRACTION (0.22): car_feel_preference is a
+// direct categorical self-report, while this is an LLM's interpretation of
+// freetext — one inference step removed, so it gets slightly less trust —
+// but above MAX_TRAIT_DELTA_FRACTION (0.15) since it's still a first-class
+// personalization signal, not an inferred team/car stat. Matches
+// MAX_TELEMETRY_PERFORMANCE_DELTA_FRACTION's tier for that reason.
+//
+// Every weight is re-clamped to +/-0.15 here regardless of what's stored on
+// the row — defense in depth against a bad LLM generation slipping an
+// outsized value past the generation-time validation and sitting on the
+// row indefinitely.
+const MAX_COMPARISON_DELTA_FRACTION = 0.20;
+const COMPARISON_WEIGHT_CLAMP = 0.15;
+
+export function applyComparisonBias(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  comparisonBias?: ParamWeightMap | null;
+}): GeneratedRecommendation {
+  const { base, paramRanges, overrides, comparisonBias } = params;
+
+  if (!comparisonBias || Object.keys(comparisonBias).length === 0) return base;
+
+  const clampedMap: ParamWeightMap = {};
+  for (const [key, weight] of Object.entries(comparisonBias)) {
+    if (typeof weight !== "number" || !Number.isFinite(weight)) continue;
+    clampedMap[key] = clamp(weight, -COMPARISON_WEIGHT_CLAMP, COMPARISON_WEIGHT_CLAMP);
+  }
+  if (Object.keys(clampedMap).length === 0) return base;
+
+  const adjustments = accumulateWeightedDeltas({
+    paramRanges,
+    overrides,
+    sources: [
+      {
+        label: "driver comparison profile",
+        normalizedValue: 1,
+        map: clampedMap,
+      },
+    ],
+  });
+  if (adjustments.length === 0) return base;
+
+  return applyDeltas({
+    base,
+    paramRanges,
+    overrides,
+    adjustments,
+    origin: "trait_adjusted",
+    maxDeltaFraction: MAX_COMPARISON_DELTA_FRACTION,
+    modelSuffix: "comparison-bias-v1",
     confidenceMultiplier: 1.0,
   });
 }
