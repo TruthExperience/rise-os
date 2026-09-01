@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTelemetrySession } from "@/lib/telemetry";
 import { buildCoachingReport } from "@/lib/pitboss/telemetry-coach";
+import { getCachedCoachingReport, persistCoachingReport } from "@/lib/pitboss/coaching-history";
 import { getAuthedDriver } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/server";
 
@@ -70,7 +71,49 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    const cached = await getCachedCoachingReport(sessionUid, lapNum, referenceLapNum ?? null);
+    if (cached) {
+      return NextResponse.json(cached);
+    }
+
     const report = await buildCoachingReport(session, lapNum, referenceLapNum);
+
+    // Best-effort cache write so the next request for this exact
+    // (session_uid, lap_num, reference_lap) pair — and the season-long
+    // trends endpoint — can pick it up. A failure here must not affect
+    // the response; the driver still gets their report either way, just
+    // without it feeding the trend history this one time.
+    try {
+      const admin = createAdminClient();
+      const { data: uploadRow } = await admin
+        .schema("pitboss")
+        .from("setup_telemetry_uploads")
+        .select("track_id, car_class_id, lap_time_seconds")
+        .eq("session_uid", sessionUid)
+        .eq("lap_num", lapNum)
+        .maybeSingle();
+
+      if (session.driverId) {
+        const lapValid = session.laps.find((l) => l.lapNum === lapNum)?.lapValid ?? true;
+        await persistCoachingReport({
+          driverId: session.driverId,
+          trackId: uploadRow?.track_id ?? null,
+          carClassId: uploadRow?.car_class_id ?? null,
+          sessionUid,
+          lapNum,
+          referenceLapNum: referenceLapNum ?? null,
+          lapTimeSeconds: uploadRow?.lap_time_seconds != null ? Number(uploadRow.lap_time_seconds) : null,
+          lapValid,
+          report,
+        });
+      }
+    } catch (cacheErr) {
+      console.error(
+        "[pitboss/telemetry/coach] cache write failed (report still returned):",
+        cacheErr instanceof Error ? cacheErr.message : cacheErr
+      );
+    }
+
     return NextResponse.json(report);
   } catch (err) {
     // buildCoachingReport throws a plain Error (not a DB/auth failure) when
