@@ -53,6 +53,8 @@ async function buildSessionPayload(
   }
 }
 
+type HistoryRow = { question_id: string; last_seen_at: string; seen_count: number }
+
 // Draws a per-driver question set: unseen questions first, topped up with
 // the driver's least-recently-seen ones if the unseen pool runs short.
 // This is what makes rotation per-user rather than global — two drivers
@@ -74,8 +76,8 @@ async function drawQuestionsForDriver(
     .eq('league_id', leagueId)
     .eq('role_code', roleCode)
 
-  const historyMap = new Map(
-    (historyRows ?? []).map((h: any) => [h.question_id, h])
+  const historyMap = new Map<string, HistoryRow>(
+    (historyRows ?? []).map((h: HistoryRow) => [h.question_id, h])
   )
 
   const unseen = questions.filter((q) => !historyMap.has(q.id))
@@ -106,7 +108,7 @@ async function recordQuestionHistory(
   leagueId: string,
   roleCode: string,
   drawnIds: string[],
-  historyMap: Map<string, { seen_count: number }>
+  historyMap: Map<string, HistoryRow>
 ) {
   const nowIso = new Date().toISOString()
   const rows = drawnIds.map((qid) => ({
@@ -370,7 +372,7 @@ export async function POST(req: NextRequest) {
   // Record what this driver was shown so the next draw can rotate away
   // from it. Fire after the cert insert succeeds so a history-write
   // failure never blocks the exam from starting.
-  await recordQuestionHistory(supabase, driver.id, league_id, role_code, drawnIds, historyMap as any)
+  await recordQuestionHistory(supabase, driver.id, league_id, role_code, drawnIds, historyMap)
 
   const sanitized = drawn.map((q) => ({
     id:         q.id,
