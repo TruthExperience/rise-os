@@ -7,6 +7,7 @@ import {
 } from "recharts";
 import { CORNERS, cornerAvg, type Corner, type TelemetrySession } from "@/lib/telemetry-types";
 import CoachingPanel from "@/components/pitboss/CoachingPanel";
+import CoachingTrendsPanel from "@/components/pitboss/CoachingTrendsPanel";
 
 const LAP_COLORS: Record<number, string> = {
   2: "#9B5DE5", 3: "#00C853", 4: "#FFC400",
@@ -427,6 +428,15 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         lapNum={refLap}
         referenceLapNum={refLap !== fastest ? fastest : undefined}
       />
+
+      {/* Season-long trends — aggregates every coached lap this driver
+          has on record (not just this session). Corner-level consistency
+          is track-scoped so it's omitted here (no track_id available
+          client-side, only the track name string) — lap-time and issue-
+          frequency trends still work fine across all tracks. */}
+      {session.driverId && (
+        <CoachingTrendsPanel driverId={session.driverId} />
+      )}
 
       <div style={{ marginTop: 22, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "#3D444D" }}>
         Session {session.sessionUid} · Laps {laps[0]}–{laps[laps.length - 1]} · {firstLap.track}
