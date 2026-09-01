@@ -53,6 +53,82 @@ async function buildSessionPayload(
   }
 }
 
+// Draws a per-driver question set: unseen questions first, topped up with
+// the driver's least-recently-seen ones if the unseen pool runs short.
+// This is what makes rotation per-user rather than global — two drivers
+// sitting the same role at the same time can get different sets even
+// though they're drawing from the same active pool.
+async function drawQuestionsForDriver(
+  supabase: any,
+  driverId: string,
+  leagueId: string,
+  roleCode: string,
+  questions: Array<{ id: string; category: string; question: string; options: unknown; difficulty: string }>,
+  questionCount: number
+) {
+  const { data: historyRows } = await supabase
+    .schema('pitboss')
+    .from('driver_question_history')
+    .select('question_id, last_seen_at, seen_count')
+    .eq('driver_id', driverId)
+    .eq('league_id', leagueId)
+    .eq('role_code', roleCode)
+
+  const historyMap = new Map(
+    (historyRows ?? []).map((h: any) => [h.question_id, h])
+  )
+
+  const unseen = questions.filter((q) => !historyMap.has(q.id))
+  const seenOldestFirst = questions
+    .filter((q) => historyMap.has(q.id))
+    .sort(
+      (a, b) =>
+        new Date(historyMap.get(a.id)!.last_seen_at).getTime() -
+        new Date(historyMap.get(b.id)!.last_seen_at).getTime()
+    )
+
+  let drawn: typeof questions
+  if (unseen.length >= questionCount) {
+    drawn = shuffle(unseen).slice(0, questionCount)
+  } else {
+    // Bank exhausted for this driver — cycle back through their oldest
+    // seen questions rather than failing the draw.
+    const needed = questionCount - unseen.length
+    drawn = shuffle([...unseen, ...seenOldestFirst.slice(0, needed)])
+  }
+
+  return { drawn, historyMap }
+}
+
+async function recordQuestionHistory(
+  supabase: any,
+  driverId: string,
+  leagueId: string,
+  roleCode: string,
+  drawnIds: string[],
+  historyMap: Map<string, { seen_count: number }>
+) {
+  const nowIso = new Date().toISOString()
+  const rows = drawnIds.map((qid) => ({
+    driver_id:    driverId,
+    league_id:    leagueId,
+    role_code:    roleCode,
+    question_id:  qid,
+    last_seen_at: nowIso,
+    seen_count:   (historyMap.get(qid)?.seen_count ?? 0) + 1,
+  }))
+
+  const { error } = await supabase
+    .schema('pitboss')
+    .from('driver_question_history')
+    .upsert(rows, { onConflict: 'driver_id,league_id,role_code,question_id' })
+
+  if (error) {
+    // Non-fatal — worst case a driver sees a repeat sooner than intended.
+    console.error('[cert/start] history upsert failed', error)
+  }
+}
+
 // GET — resume an existing in_progress certification by ID alone.
 // Used when the exam page's sessionStorage has been lost (app backgrounded,
 // tab closed, page shared/reopened later).
@@ -259,7 +335,15 @@ export async function POST(req: NextRequest) {
   }
 
   const attemptNumber = latest ? latest.attempt_number + 1 : 1
-  const drawn = shuffle(questions).slice(0, requirement.question_count)
+
+  const { drawn, historyMap } = await drawQuestionsForDriver(
+    supabase,
+    driver.id,
+    league_id,
+    role_code,
+    questions,
+    requirement.question_count
+  )
   const drawnIds = drawn.map((q) => q.id)
 
   const { data: cert, error: certError } = await supabase
@@ -282,6 +366,11 @@ export async function POST(req: NextRequest) {
     console.error('[cert/start] insert', certError)
     return NextResponse.json({ error: 'Failed to start certification' }, { status: 500 })
   }
+
+  // Record what this driver was shown so the next draw can rotate away
+  // from it. Fire after the cert insert succeeds so a history-write
+  // failure never blocks the exam from starting.
+  await recordQuestionHistory(supabase, driver.id, league_id, role_code, drawnIds, historyMap as any)
 
   const sanitized = drawn.map((q) => ({
     id:         q.id,
