@@ -142,49 +142,73 @@ export async function POST(req: NextRequest) {
 
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
-    const { data: league } = await supabase
-      .schema('rise_os').from('leagues')
-      .select('name').eq('id', cert.league_id).maybeSingle()
-
-    const { data: roleReq } = await supabase
-      .schema('pitboss').from('role_requirements')
-      .select('role_name')
-      .eq('league_id', cert.league_id)
-      .eq('role_code', cert.role_code)
-      .maybeSingle()
-
-    const { data: seqRow } = await supabase
-      .schema('pitboss').from('licence_sequences')
-      .select('id, last_number')
-      .eq('league_id', cert.league_id)
-      .eq('role_code', cert.role_code)
-      .maybeSingle()
-
-    let nextNumber: number
-    if (!seqRow) {
-      nextNumber = 1
-      await supabase.schema('pitboss').from('licence_sequences')
-        .insert({ league_id: cert.league_id, role_code: cert.role_code, last_number: 1 })
-    } else {
-      nextNumber = seqRow.last_number + 1
-      await supabase.schema('pitboss').from('licence_sequences')
-        .update({ last_number: nextNumber }).eq('id', seqRow.id)
-    }
-
-    const licenceNumber = `${cert.role_code}-${String(nextNumber).padStart(5, '0')}`
-
-    const { data: newLicence } = await supabase
+    // Re-certification guard: a driver can retake and pass a role they're
+    // already actively licenced for (e.g. sitting a fresh attempt after a
+    // question pool regen). In that case reuse the existing active licence
+    // instead of minting a duplicate licence_number — a pass should
+    // reaffirm the current licence, not spawn a second one.
+    const { data: existingLicence } = await supabase
       .schema('pitboss').from('licences')
-      .insert({
-        driver_id:      driver.id,
-        league_id:      cert.league_id,
-        licence_number: licenceNumber,
-        role_code:      cert.role_code,
-        title:          `${league?.name ?? 'League'} ${roleReq?.role_name ?? cert.role_code}`,
-        status:         'active',
-      })
       .select('id, licence_number')
-      .single()
+      .eq('driver_id', driver.id)
+      .eq('league_id', cert.league_id)
+      .eq('role_code', cert.role_code)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    let licenceNumber: string | null = existingLicence?.licence_number ?? null
+    let licenceId:     string | null = existingLicence?.id ?? null
+
+    if (!existingLicence) {
+      const { data: league } = await supabase
+        .schema('rise_os').from('leagues')
+        .select('name').eq('id', cert.league_id).maybeSingle()
+
+      const { data: roleReq } = await supabase
+        .schema('pitboss').from('role_requirements')
+        .select('role_name')
+        .eq('league_id', cert.league_id)
+        .eq('role_code', cert.role_code)
+        .maybeSingle()
+
+      const { data: seqRow } = await supabase
+        .schema('pitboss').from('licence_sequences')
+        .select('id, last_number')
+        .eq('league_id', cert.league_id)
+        .eq('role_code', cert.role_code)
+        .maybeSingle()
+
+      let nextNumber: number
+      if (!seqRow) {
+        nextNumber = 1
+        await supabase.schema('pitboss').from('licence_sequences')
+          .insert({ league_id: cert.league_id, role_code: cert.role_code, last_number: 1 })
+      } else {
+        nextNumber = seqRow.last_number + 1
+        await supabase.schema('pitboss').from('licence_sequences')
+          .update({ last_number: nextNumber }).eq('id', seqRow.id)
+      }
+
+      const newLicenceNumber = `${cert.role_code}-${String(nextNumber).padStart(5, '0')}`
+
+      const { data: newLicence } = await supabase
+        .schema('pitboss').from('licences')
+        .insert({
+          driver_id:      driver.id,
+          league_id:      cert.league_id,
+          licence_number: newLicenceNumber,
+          role_code:      cert.role_code,
+          title:          `${league?.name ?? 'League'} ${roleReq?.role_name ?? cert.role_code}`,
+          status:         'active',
+        })
+        .select('id, licence_number')
+        .single()
+
+      licenceNumber = newLicence?.licence_number ?? newLicenceNumber
+      licenceId     = newLicence?.id ?? null
+    }
 
     return NextResponse.json({
       passed:         true,
@@ -193,8 +217,8 @@ export async function POST(req: NextRequest) {
       correct,
       total,
       token,
-      licence_number: newLicence?.licence_number ?? null,
-      licence_id:     newLicence?.id ?? null,
+      licence_number: licenceNumber,
+      licence_id:     licenceId,
       breakdown,
     })
   } else {
