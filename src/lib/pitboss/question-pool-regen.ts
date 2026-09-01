@@ -161,4 +161,104 @@ async function generateQuestionsViaProxy(
     difficulties: string[]
     avoidQuestions: string[]
   }
-):
+): Promise<Array<{
+  category: string
+  question: string
+  options: unknown
+  correct_answer: string
+  explanation?: string
+  difficulty?: string
+  rule_book_id?: string
+}> | null> {
+  if (!PITBOSS_INTERNAL_KEY) {
+    console.error('[question-pool-regen] PITBOSS_INTERNAL_KEY not configured')
+    return null
+  }
+
+  const categoryLine = context.categories.length > 0
+    ? context.categories.join(', ')
+    : 'general league rules and conduct'
+  const difficultyLine = context.difficulties.length > 0
+    ? context.difficulties.join(', ')
+    : 'easy, medium, hard'
+
+  // Cap the avoid-list so we're not shipping hundreds of question texts
+  // into the prompt on a mature pool.
+  const avoidBlock = context.avoidQuestions.slice(0, 40)
+    .map((q) => `- ${q}`)
+    .join('\n')
+
+  const system = `You are a certification exam question generator for ${context.leagueName}, a sim-racing league, generating questions for the "${context.roleName}" (${roleCode}) role.
+Return ONLY a valid JSON array — no markdown, no preamble, no trailing commentary.
+Shape: [ { "category": string, "question": string, "options": string[], "correct_answer": string, "explanation": string, "difficulty": "easy"|"medium"|"hard" } ]
+Rules:
+- Generate exactly ${count} questions.
+- "options" must have 3-5 plausible choices; "correct_answer" must exactly match one of the option strings.
+- Cover roughly this category mix: ${categoryLine}.
+- Vary difficulty across: ${difficultyLine}.
+- Do not duplicate or closely rephrase any question in the AVOID list below.
+- Base questions on realistic league rulebook / stewarding / setup / conduct knowledge appropriate to the role.`
+
+  const promptParts = [
+    `Generate ${count} new certification exam questions for role "${context.roleName}" in ${context.leagueName}.`,
+  ]
+  if (avoidBlock) {
+    promptParts.push(`AVOID questions duplicating or closely rephrasing any of these existing ones:\n${avoidBlock}`)
+  }
+
+  try {
+    const res = await fetch(`${PITBOSS_PROXY_URL}/infer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-PitBoss-Key': PITBOSS_INTERNAL_KEY,
+      },
+      body: JSON.stringify({
+        mode: 'certgen',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: promptParts.join('\n\n') },
+        ],
+        max_tokens: 3000,
+        temperature: 0.5,
+      }),
+    })
+
+    if (!res.ok) {
+      console.error(`[question-pool-regen] proxy /infer returned ${res.status}`)
+      return null
+    }
+
+    const data = await res.json() as { response?: string; error?: string }
+    if (!data.response) {
+      console.error('[question-pool-regen] proxy response missing `response` field', data)
+      return null
+    }
+
+    const parsed = extractTrailingJson(data.response)
+    if (!Array.isArray(parsed)) {
+      console.error('[question-pool-regen] proxy JSON was not an array', parsed)
+      return null
+    }
+
+    const valid = parsed.filter(
+      (q: any) =>
+        q &&
+        typeof q.category === 'string' &&
+        typeof q.question === 'string' &&
+        Array.isArray(q.options) &&
+        typeof q.correct_answer === 'string' &&
+        q.options.includes(q.correct_answer)
+    )
+
+    if (valid.length === 0) {
+      console.error('[question-pool-regen] no valid questions after filtering', parsed)
+      return null
+    }
+
+    return valid
+  } catch (err) {
+    console.error('[question-pool-regen] proxy call failed', err)
+    return null
+  }
+}
