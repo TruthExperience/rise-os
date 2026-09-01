@@ -1,9 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+import { regenerateQuestionPool } from '@/lib/pitboss/question-pool-regen'
 
 const CERT_WINDOW_MS = 60 * 60 * 1000
 const LOCKOUT_HOURS  = 24
+const REGEN_EVERY_N  = 4
+
+// Fires a pool regen once every REGEN_EVERY_N completed exams for this
+// (league, role). Never awaited by the caller's response path — a slow or
+// failing regen should never delay grading feedback to the driver.
+async function maybeTriggerRegen(supabase: any, leagueId: string, roleCode: string) {
+  const { count, error } = await supabase
+    .schema('pitboss')
+    .from('certifications')
+    .select('id', { count: 'exact', head: true })
+    .eq('league_id', leagueId)
+    .eq('role_code', roleCode)
+    .in('status', ['passed', 'failed'])
+
+  if (error) {
+    console.error('[cert/submit] regen count check failed', error)
+    return
+  }
+  if (count && count % REGEN_EVERY_N === 0) {
+    regenerateQuestionPool(leagueId, roleCode).catch((err) =>
+      console.error('[cert/submit] question pool regen failed', err)
+    )
+  }
+}
 
 export async function POST(req: NextRequest) {
   const supabase = createAdminClient()
@@ -62,6 +87,9 @@ export async function POST(req: NextRequest) {
       .from('certifications')
       .update({ status: 'failed', score: 0, completed_at: now.toISOString(), locked_until: lockedUntil.toISOString() })
       .eq('id', certification_id)
+
+    await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
+
     return NextResponse.json(
       { error: 'Time expired — certification failed', locked_until: lockedUntil.toISOString() },
       { status: 422 }
@@ -111,6 +139,8 @@ export async function POST(req: NextRequest) {
       .update({ certified: true, certified_at: now.toISOString() })
       .eq('driver_id', driver.id)
       .eq('league_id', cert.league_id)
+
+    await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
     const { data: league } = await supabase
       .schema('rise_os').from('leagues')
@@ -173,6 +203,8 @@ export async function POST(req: NextRequest) {
     await supabase.schema('pitboss').from('certifications')
       .update({ status: 'failed', score, completed_at: now.toISOString(), locked_until: lockedUntil.toISOString() })
       .eq('id', certification_id)
+
+    await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
     return NextResponse.json({
       passed:       false,
