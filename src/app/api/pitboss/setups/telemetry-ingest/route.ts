@@ -119,6 +119,9 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import { fetchParamRanges } from '@/lib/pitboss/setup-engine-data';
 import type { SessionType } from '@/lib/pitboss/setup-engine';
+import { getTelemetrySession } from '@/lib/telemetry';
+import { buildCoachingReport } from '@/lib/pitboss/telemetry-coach';
+import { persistCoachingReport } from '@/lib/pitboss/coaching-history';
 
 export const dynamic = 'force-dynamic';
 
@@ -528,6 +531,58 @@ export async function POST(req: NextRequest) {
 
   if (telemetryError) {
     console.error('telemetry-ingest: failed to archive raw telemetry (submission still saved):', telemetryError.message);
+  }
+
+  // Dynamic coaching pass — runs immediately after a valid lap lands,
+  // rather than waiting for the driver to open the dashboard later. Only
+  // for valid laps: an invalid lap's corner/braking data is often noisy
+  // (off-track excursions, corner-cutting) and isn't representative
+  // enough to feed into the season-long trend aggregates in
+  // coaching-history.ts. Entirely best-effort — a failure here (LLM
+  // timeout, malformed frames, whatever) must never turn a successful
+  // telemetry ingest into a failed response; the driver can still get a
+  // report later via the on-demand GET route, which falls back to
+  // computing fresh on a cache miss.
+  if (lap.lapValid) {
+    try {
+      const session = await getTelemetrySession(session_uid);
+      if (session) {
+        const currentLap = session.laps.find((l) => l.lapNum === lap.lapNum);
+        if (currentLap) {
+          // Auto-pick this driver's own best *other* valid lap in this
+          // session as the comparison reference, so the dynamic report
+          // says something like "0.3s off your best in T4" without the
+          // driver having to pick a reference lap themselves. Falls back
+          // to no reference (first lap of the session, or nothing else
+          // valid yet) the same way the on-demand route does when the
+          // caller omits reference_lap.
+          const otherValidLaps = session.laps.filter((l) => l.lapNum !== lap.lapNum && l.lapValid);
+          const bestOther = otherValidLaps.reduce<typeof otherValidLaps[number] | null>(
+            (best, candidate) => (!best || candidate.lapTime < best.lapTime ? candidate : best),
+            null
+          );
+          const referenceLapNum = bestOther?.lapNum ?? undefined;
+
+          const report = await buildCoachingReport(session, lap.lapNum, referenceLapNum);
+          await persistCoachingReport({
+            driverId: driver.id,
+            trackId: track_id,
+            carClassId: car_class_id,
+            sessionUid: session_uid,
+            lapNum: lap.lapNum,
+            referenceLapNum: referenceLapNum ?? null,
+            lapTimeSeconds: lap.lapTime,
+            lapValid: lap.lapValid,
+            report,
+          });
+        }
+      }
+    } catch (err) {
+      console.error(
+        'telemetry-ingest: dynamic coaching pass failed (submission still saved, report will compute on-demand instead):',
+        err instanceof Error ? err.message : err
+      );
+    }
   }
 
   return NextResponse.json(
