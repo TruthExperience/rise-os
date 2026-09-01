@@ -14,6 +14,9 @@
     },
     "src/app/api/cron/hbcu-rosters/route.ts": {
       "maxDuration": 300
+    },
+    "src/app/api/pitboss/telemetry/coach/backfill/route.ts": {
+      "maxDuration": 300
     }
   },
   "crons": [
