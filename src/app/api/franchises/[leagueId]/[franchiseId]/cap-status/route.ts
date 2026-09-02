@@ -2,7 +2,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
-import { getAuthedDriver } from "@/lib/pitboss/getSupabaseUserId";
+import { getAuthedDriver } from "@/lib/getSupabaseUserId";
 import { calculateCapHit, calculateLuxuryTax, getLeagueCapConfig, LeagueNotConfiguredError } from "@/lib/pitboss/financial-engine";
 
 export async function GET(
