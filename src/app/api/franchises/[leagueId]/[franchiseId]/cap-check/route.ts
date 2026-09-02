@@ -57,12 +57,12 @@ export async function POST(
 
     if (!apronCheck.allowed) {
       return NextResponse.json(
-        { allowed: false, gate: "hard_apron", ddvCheck, ...apronCheck },
+        { ...apronCheck, gate: "hard_apron", ddvCheck },
         { status: 200 }
       );
     }
 
-    return NextResponse.json({ allowed: true, gate: null, ddvCheck, ...apronCheck });
+    return NextResponse.json({ ...apronCheck, gate: null, ddvCheck });
   } catch (err) {
     if (err instanceof LeagueNotConfiguredError) {
       return NextResponse.json(
