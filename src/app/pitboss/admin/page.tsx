@@ -1,370 +1,218 @@
-'use client'
+// src/app/pitboss/admin/cap-status/page.tsx
+//
+// Franchise Cap Status — sits alongside your other flat admin tools
+// (rulebooks, appeals, cert, drivers, incidents, licences, penalties,
+// results, setups, standings, steward) under /pitboss/admin.
+//
+// Confirmed against src/lib/supabase/server.ts and src/lib/getAuthedDriver.ts
+// (getAuthedDriver already uses this exact factory + .schema('pitboss')
+// pattern for a non-public-schema admin query — same approach here).
+import { createAdminClient } from "@/lib/supabase/server";
 
-import { Suspense, useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
-import { useSession } from 'next-auth/react'
+// Required: this page fetches live wallet/cap data on every request and
+// must not be statically prerendered at build time. Without this, the
+// build fails with "Dynamic server usage: no-store fetch" during
+// prerendering — confirmed as the actual cause of the two failed
+// production deployments on 2026-09-02.
+export const dynamic = "force-dynamic";
 
-interface League {
-  id: string
-  name: string
-  slug: string
-  pitboss_status: string
-}
+const LEAGUE_ID = "3a005e8d-c35f-4a57-aa27-c59c0c3812e2"; // TRL
+const SEASON = "1";
 
-interface UploadState {
-  loading: boolean
-  success: boolean
-  error: string | null
-  questionsGenerated: number
-}
+type Franchise = {
+  id: string;
+  name: string;
+  abbreviation: string | null;
+  division: string;
+  logo_url: string | null;
+  primary_color: string | null;
+  secondary_color: string | null;
+  gm_id: string | null;
+};
 
-function PitBossAdminInner() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  const { data: session, status } = useSession()
-  const [leagues, setLeagues]         = useState<League[]>([])
-  const [selectedLeague, setSelectedLeague] = useState<string>('')
-  const [roleCode, setRoleCode]       = useState<string>('')
-  const [docVersion, setDocVersion]   = useState<string>('')
-  const [file, setFile]               = useState<File | null>(null)
-  const [uploadState, setUploadState] = useState<UploadState>({
-    loading: false,
-    success: false,
-    error: null,
-    questionsGenerated: 0,
+type Wallet = {
+  franchise_id: string;
+  balance: number;
+  starting_wallet: number;
+};
+
+type CapConfig = {
+  division: string;
+  soft_cap: number;
+  hard_apron: number;
+};
+
+const DIVISION_LABELS: Record<string, string> = {
+  F1: "F1 · 2026",
+  F1_25: "F1 · 2025",
+  F2: "F2",
+};
+
+const DIVISION_ORDER = ["F1", "F1_25", "F2"];
+
+function formatMoney(n: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
   })
-  // NOTE: added 'cap' — Cap Status tab. Follows the same pattern as
-  // 'drivers'/'certs': a button that routes to the standalone page rather
-  // than rendering inline (cap-status is its own full page/component).
-  const [activeTab, setActiveTab]     = useState<'rulebook' | 'drivers' | 'certs' | 'cap'>('rulebook')
+    .format(n)
+    .replace("$", "$TRL ");
+}
 
-  useEffect(() => {
-    if (status === 'unauthenticated') router.push('/login')
-  }, [status, router])
+async function getData() {
+  const supabase = createAdminClient();
 
-  useEffect(() => {
-    if (status !== 'authenticated') return
-    fetch('/api/leagues')
-      .then((r) => r.json())
-      .then((data) => {
-        const all = data.leagues ?? data
-        setLeagues(all)
+  const { data: franchises, error: franchiseErr } = await supabase
+    .schema("rise_os")
+    .from("franchises")
+    .select("id, name, abbreviation, division, logo_url, primary_color, secondary_color, gm_id")
+    .eq("league_id", LEAGUE_ID)
+    .order("division")
+    .order("name");
 
-        const leagueIdParam = searchParams.get('league_id')
-        if (leagueIdParam && all.some((l: League) => l.id === leagueIdParam)) {
-          setSelectedLeague(leagueIdParam)
-        } else if (all.length > 0) {
-          setSelectedLeague(all[0].id)
-        }
-      })
-  }, [status, searchParams])
+  if (franchiseErr) throw franchiseErr;
 
-  async function handleUpload() {
-    if (!file || !selectedLeague || !roleCode) {
-      setUploadState((s) => ({
-        ...s,
-        error: 'Please select a league, role, and PDF file.',
-      }))
-      return
-    }
+  const { data: wallets, error: walletErr } = await supabase
+    .schema("pitboss")
+    .from("franchise_wallets")
+    .select("franchise_id, balance, starting_wallet")
+    .eq("league_id", LEAGUE_ID)
+    .eq("season", SEASON);
 
-    setUploadState({ loading: true, success: false, error: null, questionsGenerated: 0 })
+  if (walletErr) throw walletErr;
 
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('league_id', selectedLeague)
-      formData.append('role_code', roleCode)
-      formData.append('doc_version', docVersion || '1.0')
+  const { data: caps, error: capErr } = await supabase
+    .schema("pitboss")
+    .from("league_financial_config")
+    .select("division, soft_cap, hard_apron")
+    .eq("league_id", LEAGUE_ID);
 
-      const res = await fetch('/api/pitboss/rulebook/upload', {
-        method: 'POST',
-        body: formData,
-      })
-      const data = await res.json()
+  if (capErr) throw capErr;
 
-      if (!res.ok) {
-        setUploadState({
-          loading: false,
-          success: false,
-          error: data.error ?? 'Upload failed',
-          questionsGenerated: 0,
-        })
-        return
-      }
+  return {
+    franchises: (franchises ?? []) as Franchise[],
+    wallets: (wallets ?? []) as Wallet[],
+    caps: (caps ?? []) as CapConfig[],
+  };
+}
 
-      setUploadState({
-        loading: false,
-        success: true,
-        error: null,
-        questionsGenerated: data.questions_generated ?? 0,
-      })
-      setFile(null)
-      setRoleCode('')
-      setDocVersion('')
-    } catch {
-      setUploadState({
-        loading: false,
-        success: false,
-        error: 'Network error — try again',
-        questionsGenerated: 0,
-      })
-    }
-  }
+export default async function CapStatusPage() {
+  const { franchises, wallets, caps } = await getData();
 
-  const currentLeague = leagues.find((l) => l.id === selectedLeague)
+  const walletByFranchise = new Map(wallets.map((w) => [w.franchise_id, w]));
+  const capByDivision = new Map(caps.map((c) => [c.division, c]));
 
-  if (status === 'loading') {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-rise-black">
-        <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
-      </main>
-    )
-  }
+  const byDivision = DIVISION_ORDER.map((division) => ({
+    division,
+    label: DIVISION_LABELS[division] ?? division,
+    cap: capByDivision.get(division),
+    teams: franchises.filter((f) => f.division === division),
+  })).filter((group) => group.teams.length > 0);
 
   return (
-    <main className="min-h-screen bg-rise-black px-4 py-8">
-      {/* Header */}
-      <button
-        onClick={() => router.back()}
-        className="flex items-center gap-2 text-white/40 text-sm mb-6"
-      >
-        ← Back
-      </button>
-
-      <div className="mb-6">
-        <h1 className="text-2xl font-black text-white">
-          PitBoss <span className="text-rise-red">Admin</span>
-        </h1>
-        <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
-          Commissioner Tools
+    <main className="min-h-screen bg-[#0C0D0F] text-[#EDEDEE]">
+      <header className="border-b border-[#232428] px-6 py-8 sm:px-10">
+        <p className="text-sm tracking-wide text-[#8A8D93]">Truth Racing League</p>
+        <h1 className="mt-1 text-3xl font-semibold sm:text-4xl">Franchise Cap Status</h1>
+        <p className="mt-2 max-w-xl text-sm text-[#8A8D93]">
+          Live wallet balances against each division&rsquo;s Soft Cap and Hard
+          Apron, per CRRB Financial Regulations v2.2.
         </p>
-      </div>
+      </header>
 
-      {/* League Selector */}
-      <div className="mb-6">
-        <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
-          Active League
-        </label>
-        <select
-          value={selectedLeague}
-          onChange={(e) => setSelectedLeague(e.target.value)}
-          className="w-full rounded-xl bg-white/5 border border-white/10 px-4 py-3 text-white text-sm focus:outline-none focus:border-rise-red"
-        >
-          {leagues.map((l) => (
-            <option key={l.id} value={l.id} className="bg-[#1A1A1A]">
-              {l.name} ({l.slug})
-            </option>
-          ))}
-        </select>
-      </div>
+      <div className="mx-auto max-w-6xl px-6 py-10 sm:px-10">
+        {byDivision.map((group) => (
+          <section key={group.division} className="mb-14 last:mb-0">
+            <div className="mb-5 flex items-baseline justify-between border-b border-[#232428] pb-3">
+              <h2 className="text-lg font-medium">{group.label}</h2>
+              {group.cap && (
+                <p className="text-sm text-[#8A8D93]">
+                  Soft cap {formatMoney(group.cap.soft_cap)} &middot; Hard apron{" "}
+                  {formatMoney(group.cap.hard_apron)}
+                </p>
+              )}
+            </div>
 
-      {/* Tabs */}
-      <div className="flex gap-2 mb-6">
-        {(['rulebook', 'drivers', 'certs', 'cap'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`flex-1 rounded-xl py-2 text-xs font-bold uppercase tracking-wide transition-colors ${
-              activeTab === tab
-                ? 'bg-rise-red text-white'
-                : 'bg-white/5 text-white/40 border border-white/10'
-            }`}
-          >
-            {tab === 'rulebook' ? 'Rulebook' : tab === 'drivers' ? 'Drivers' : tab === 'certs' ? 'Certs' : 'Cap'}
-          </button>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {group.teams.map((team) => {
+                const wallet = walletByFranchise.get(team.id);
+                const cap = group.cap;
+                const spend = wallet
+                  ? wallet.starting_wallet - wallet.balance
+                  : 0;
+                const softCapPct = cap
+                  ? Math.min(100, (spend / cap.soft_cap) * 100)
+                  : 0;
+                const accent = team.primary_color ?? "#3A3C42";
+
+                return (
+                  <article
+                    key={team.id}
+                    className="rounded-md border border-[#232428] bg-[#131417] p-5"
+                    style={{ borderLeftColor: accent, borderLeftWidth: "3px" }}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        {team.logo_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={team.logo_url}
+                            alt=""
+                            className="h-8 w-8 object-contain"
+                          />
+                        ) : (
+                          <div
+                            className="flex h-8 w-8 items-center justify-center rounded-sm text-xs font-medium"
+                            style={{ backgroundColor: accent + "22", color: accent }}
+                          >
+                            {team.abbreviation ?? "—"}
+                          </div>
+                        )}
+                        <h3 className="text-sm font-medium leading-tight">
+                          {team.name}
+                        </h3>
+                      </div>
+                      {!team.gm_id && (
+                        <span className="shrink-0 rounded-sm bg-[#3A2A1F] px-2 py-0.5 text-[11px] text-[#E8A25C]">
+                          No GM
+                        </span>
+                      )}
+                    </div>
+
+                    {wallet ? (
+                      <div className="mt-4">
+                        <div className="flex items-baseline justify-between text-sm">
+                          <span className="text-[#8A8D93]">Wallet</span>
+                          <span className="tabular-nums font-medium">
+                            {formatMoney(wallet.balance)}
+                          </span>
+                        </div>
+                        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#232428]">
+                          <div
+                            className="h-full rounded-full"
+                            style={{
+                              width: `${softCapPct}%`,
+                              backgroundColor: accent,
+                            }}
+                          />
+                        </div>
+                        <p className="mt-1.5 text-[11px] text-[#8A8D93]">
+                          {formatMoney(spend)} spent of {cap ? formatMoney(cap.soft_cap) : "—"} soft cap
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="mt-4 text-sm text-[#8A8D93]">
+                        No wallet on record for season {SEASON}.
+                      </p>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </section>
         ))}
       </div>
-
-      {/* ── RULEBOOK TAB ── */}
-      {activeTab === 'rulebook' && (
-        <div className="flex flex-col gap-4">
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-            <h2 className="text-sm font-bold text-white mb-1">Upload Rulebook</h2>
-            <p className="text-xs text-white/30 mb-4">
-              Upload a PDF rulebook to auto-generate certification questions via AI.
-            </p>
-
-            {/* Role Code */}
-            <div className="mb-3">
-              <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
-                Role Code
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. DRV, STW, COM"
-                value={roleCode}
-                onChange={(e) => setRoleCode(e.target.value.toUpperCase())}
-                className="w-full rounded-xl bg-white/5 border border-white/10 px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-rise-red"
-              />
-            </div>
-
-            {/* Doc Version */}
-            <div className="mb-3">
-              <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
-                Document Version
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. v2.0"
-                value={docVersion}
-                onChange={(e) => setDocVersion(e.target.value)}
-                className="w-full rounded-xl bg-white/5 border border-white/10 px-4 py-3 text-white placeholder-white/20 text-sm focus:outline-none focus:border-rise-red"
-              />
-            </div>
-
-            {/* File Upload */}
-            <div className="mb-5">
-              <label className="text-xs text-white/40 uppercase tracking-widest mb-2 block">
-                PDF File
-              </label>
-              <label className="flex flex-col items-center justify-center w-full rounded-xl border-2 border-dashed border-white/10 bg-white/5 px-4 py-6 cursor-pointer hover:border-rise-red/50 transition-colors">
-                <span className="text-2xl mb-2">📄</span>
-                <span className="text-sm text-white/50">
-                  {file ? file.name : 'Tap to select PDF'}
-                </span>
-                {file && (
-                  <span className="text-xs text-white/30 mt-1">
-                    {(file.size / 1024).toFixed(0)} KB
-                  </span>
-                )}
-                <input
-                  type="file"
-                  accept=".pdf"
-                  className="hidden"
-                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                />
-              </label>
-            </div>
-
-            {/* Error */}
-            {uploadState.error && (
-              <div className="mb-4 rounded-xl border border-rise-red/40 bg-rise-red/10 px-4 py-3">
-                <p className="text-xs text-rise-red">{uploadState.error}</p>
-              </div>
-            )}
-
-            {/* Success */}
-            {uploadState.success && (
-              <div className="mb-4 rounded-xl border border-green-500/40 bg-green-500/10 px-4 py-3">
-                <p className="text-xs text-green-400">
-                  ✅ Uploaded successfully — {uploadState.questionsGenerated} questions generated
-                </p>
-              </div>
-            )}
-
-            {/* Upload Button */}
-            <button
-              onClick={handleUpload}
-              disabled={uploadState.loading || !file || !roleCode || !selectedLeague}
-              className="w-full rounded-xl bg-rise-red py-3 text-sm font-bold text-white disabled:opacity-40 transition-opacity"
-            >
-              {uploadState.loading ? 'Uploading & Generating...' : 'Upload Rulebook'}
-            </button>
-          </div>
-
-          {/* League Info */}
-          {currentLeague && (
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-              <h2 className="text-sm font-bold text-white mb-3">League Info</h2>
-              <div className="flex flex-col gap-2">
-                <div className="flex justify-between">
-                  <span className="text-xs text-white/40">Name</span>
-                  <span className="text-xs text-white">{currentLeague.name}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-xs text-white/40">Slug</span>
-                  <span className="text-xs text-white">{currentLeague.slug}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-xs text-white/40">Status</span>
-                  <span className={`text-xs font-bold ${
-                    currentLeague.pitboss_status === 'active'
-                      ? 'text-green-400'
-                      : currentLeague.pitboss_status === 'trial'
-                      ? 'text-yellow-400'
-                      : 'text-white/30'
-                  }`}>
-                    {currentLeague.pitboss_status.toUpperCase()}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── DRIVERS TAB ── */}
-      {activeTab === 'drivers' && (
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <h2 className="text-sm font-bold text-white mb-1">Driver Management</h2>
-          <p className="text-xs text-white/30 mb-4">
-            View and manage drivers registered to this league.
-          </p>
-          <button
-            onClick={() => router.push(`/pitboss/drivers?league_id=${selectedLeague}`)}
-            className="w-full rounded-xl bg-white/10 border border-white/10 py-3 text-sm font-bold text-white"
-          >
-            View Drivers →
-          </button>
-        </div>
-      )}
-
-      {/* ── CERTS TAB ── */}
-      {activeTab === 'certs' && (
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <h2 className="text-sm font-bold text-white mb-1">Certification Management</h2>
-          <p className="text-xs text-white/30 mb-4">
-            View exam results and manage certifications for this league.
-          </p>
-          <button
-            onClick={() => router.push(`/pitboss/cert/admin?league_id=${selectedLeague}`)}
-            className="w-full rounded-xl bg-white/10 border border-white/10 py-3 text-sm font-bold text-white"
-          >
-            View Certifications →
-          </button>
-        </div>
-      )}
-
-      {/* ── CAP TAB ── */}
-      {activeTab === 'cap' && (
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <h2 className="text-sm font-bold text-white mb-1">Franchise Cap Status</h2>
-          <p className="text-xs text-white/30 mb-4">
-            View live wallet balances against each division&rsquo;s Soft Cap and
-            Hard Apron.
-          </p>
-          {/*
-            NOTE: /pitboss/admin/cap-status currently hardcodes LEAGUE_ID
-            (TRL) rather than reading it from a query param, so this button
-            does not yet pass league_id through the way Drivers/Certs do.
-            If you want the league selector above to control which
-            league's cap status is shown, cap-status/page.tsx needs to
-            read searchParams.get('league_id') instead of the hardcoded
-            constant — flag this back to me if you want that wired up.
-          */}
-          <button
-            onClick={() => router.push('/pitboss/admin/cap-status')}
-            className="w-full rounded-xl bg-white/10 border border-white/10 py-3 text-sm font-bold text-white"
-          >
-            View Cap Status →
-          </button>
-        </div>
-      )}
     </main>
-  )
-}
-
-export default function PitBossAdminPage() {
-  return (
-    <Suspense
-      fallback={
-        <main className="flex min-h-screen items-center justify-center bg-rise-black">
-          <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
-        </main>
-      }
-    >
-      <PitBossAdminInner />
-    </Suspense>
-  )
+  );
 }
