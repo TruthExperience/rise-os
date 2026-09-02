@@ -33,7 +33,10 @@ function PitBossAdminInner() {
     error: null,
     questionsGenerated: 0,
   })
-  const [activeTab, setActiveTab]     = useState<'rulebook' | 'drivers' | 'certs'>('rulebook')
+  // NOTE: added 'cap' — Cap Status tab. Follows the same pattern as
+  // 'drivers'/'certs': a button that routes to the standalone page rather
+  // than rendering inline (cap-status is its own full page/component).
+  const [activeTab, setActiveTab]     = useState<'rulebook' | 'drivers' | 'certs' | 'cap'>('rulebook')
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -158,7 +161,7 @@ function PitBossAdminInner() {
 
       {/* Tabs */}
       <div className="flex gap-2 mb-6">
-        {(['rulebook', 'drivers', 'certs'] as const).map((tab) => (
+        {(['rulebook', 'drivers', 'certs', 'cap'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -168,7 +171,7 @@ function PitBossAdminInner() {
                 : 'bg-white/5 text-white/40 border border-white/10'
             }`}
           >
-            {tab === 'rulebook' ? 'Rulebook' : tab === 'drivers' ? 'Drivers' : 'Certs'}
+            {tab === 'rulebook' ? 'Rulebook' : tab === 'drivers' ? 'Drivers' : tab === 'certs' ? 'Certs' : 'Cap'}
           </button>
         ))}
       </div>
@@ -319,6 +322,32 @@ function PitBossAdminInner() {
             className="w-full rounded-xl bg-white/10 border border-white/10 py-3 text-sm font-bold text-white"
           >
             View Certifications →
+          </button>
+        </div>
+      )}
+
+      {/* ── CAP TAB ── */}
+      {activeTab === 'cap' && (
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <h2 className="text-sm font-bold text-white mb-1">Franchise Cap Status</h2>
+          <p className="text-xs text-white/30 mb-4">
+            View live wallet balances against each division&rsquo;s Soft Cap and
+            Hard Apron.
+          </p>
+          {/*
+            NOTE: /pitboss/admin/cap-status currently hardcodes LEAGUE_ID
+            (TRL) rather than reading it from a query param, so this button
+            does not yet pass league_id through the way Drivers/Certs do.
+            If you want the league selector above to control which
+            league's cap status is shown, cap-status/page.tsx needs to
+            read searchParams.get('league_id') instead of the hardcoded
+            constant — flag this back to me if you want that wired up.
+          */}
+          <button
+            onClick={() => router.push('/pitboss/admin/cap-status')}
+            className="w-full rounded-xl bg-white/10 border border-white/10 py-3 text-sm font-bold text-white"
+          >
+            View Cap Status →
           </button>
         </div>
       )}
