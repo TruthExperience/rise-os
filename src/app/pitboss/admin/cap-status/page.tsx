@@ -4,12 +4,10 @@
 // (rulebooks, appeals, cert, drivers, incidents, licences, penalties,
 // results, setups, standings, steward) under /pitboss/admin.
 //
-// ASSUMPTION: src/lib/supabase/admin.ts exports a function that returns a
-// service-role Supabase client, e.g. `export function createAdminClient() {...}`.
-// If the actual export name/shape differs (default export, singleton instance,
-// etc.), adjust the import + call on the next two lines only — nothing else
-// in this file depends on the exact signature beyond `.schema(x).from(y)`.
-import { createAdminClient } from "@/lib/supabase/admin";
+// Confirmed against src/lib/supabase/server.ts and src/lib/getAuthedDriver.ts
+// (getAuthedDriver already uses this exact factory + .schema('pitboss')
+// pattern for a non-public-schema admin query — same approach here).
+import { createAdminClient } from "@/lib/supabase/server";
 
 const LEAGUE_ID = "3a005e8d-c35f-4a57-aa27-c59c0c3812e2"; // TRL
 const SEASON = "1";
