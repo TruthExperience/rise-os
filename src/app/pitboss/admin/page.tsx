@@ -45,10 +45,11 @@ type CapConfig = {
 const DIVISION_LABELS: Record<string, string> = {
   F1: "F1 · 2026",
   F1_25: "F1 · 2025",
-  F2: "F2",
+  F2_24: "F2 · 2024",
+  F2_25: "F2 · 2025",
 };
 
-const DIVISION_ORDER = ["F1", "F1_25", "F2"];
+const DIVISION_ORDER = ["F1", "F1_25", "F2_24", "F2_25"];
 
 function formatMoney(n: number) {
   return new Intl.NumberFormat("en-US", {
