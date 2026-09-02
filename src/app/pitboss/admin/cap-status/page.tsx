@@ -9,6 +9,13 @@
 // pattern for a non-public-schema admin query — same approach here).
 import { createAdminClient } from "@/lib/supabase/server";
 
+// Required: this page fetches live wallet/cap data on every request and
+// must not be statically prerendered at build time. Without this, the
+// build fails with "Dynamic server usage: no-store fetch" during
+// prerendering — confirmed as the actual cause of the two failed
+// production deployments on 2026-09-02.
+export const dynamic = "force-dynamic";
+
 const LEAGUE_ID = "3a005e8d-c35f-4a57-aa27-c59c0c3812e2"; // TRL
 const SEASON = "1";
 
