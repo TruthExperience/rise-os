@@ -2,14 +2,11 @@ import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 
-// NOTE: this file is new — pitboss.race_rounds, pitboss.race_checkins,
-// and pitboss.race_grids don't exist yet as of this commit. Table/column
-// names below are a starting guess to match the /checkin, /checkin-status,
-// /checkin-remind, /generate-grid options already registered with Discord
-// (see the register-commands route). Adjust to match your actual schema
-// once the migration is written.
+// Tables now confirmed against live schema:
+//   rise_os.calendar_rounds   (was guessed as pitboss.race_rounds)
+//   pitboss.round_checkins    (was guessed as pitboss.race_checkins)
+//   pitboss.round_grid_entries (was guessed as pitboss.race_grids)
 
-// Same admin/steward gate other management commands (roster, driver) use.
 const ADMIN_FLAGS = [
   "is_owner",
   "is_co_owner",
@@ -23,9 +20,6 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
 
 type CheckinStatus = "confirmed" | "tentative" | "declined";
 
-// Duplicated from driver.ts rather than imported — same reasoning as the
-// EDITOR_FLAGS duplication there: worth centralizing once a third command
-// needs it.
 async function getOrCreateDriver(discordId: string, resolvedUsername: string | undefined) {
   const supabase = createAdminClient();
   let { data: driver } = await supabase
@@ -52,26 +46,31 @@ async function getOrCreateDriver(discordId: string, resolvedUsername: string | u
 
 /**
  * Resolves a round from a free-text `round` option (matched against
- * round_number if numeric, else round_name), or falls back to the next
+ * round_number if numeric, else name), or falls back to the next
  * upcoming round for the league/season if none was given.
+ *
+ * NOTE: calendar_rounds lives in the rise_os schema, not pitboss.
  */
 async function resolveRound(leagueId: string, roundInput: string | undefined, seasonInput: string | undefined) {
   const supabase = createAdminClient();
   let query = supabase
-    .schema("pitboss")
-    .from("race_rounds")
-    .select("id, season, round_number, round_name, race_date")
+    .schema("rise_os")
+    .from("calendar_rounds")
+    .select("id, season_number, round_number, name, race_date")
     .eq("league_id", leagueId);
 
   if (seasonInput) {
-    query = query.eq("season", seasonInput);
+    const seasonNum = Number(seasonInput);
+    query = Number.isFinite(seasonNum)
+      ? query.eq("season_number", seasonNum)
+      : query; // ignore malformed season input rather than erroring silently
   }
 
   if (roundInput) {
     const asNumber = Number(roundInput);
     query = Number.isFinite(asNumber)
       ? query.eq("round_number", asNumber)
-      : query.ilike("round_name", `%${roundInput}%`);
+      : query.ilike("name", `%${roundInput}%`);
     const { data, error } = await query.limit(1).maybeSingle();
     if (error) return { error: error.message } as const;
     if (!data) return { error: `No round matching "${roundInput}" found.` } as const;
@@ -88,8 +87,8 @@ async function resolveRound(leagueId: string, roundInput: string | undefined, se
   return { round: data } as const;
 }
 
-function roundLabel(round: { round_name: string | null; round_number: number }) {
-  return round.round_name ?? `Round ${round.round_number}`;
+function roundLabel(round: { name: string | null; round_number: number | null }) {
+  return round.name ?? (round.round_number != null ? `Round ${round.round_number}` : "this round");
 }
 
 registerCommand("checkin", async (ctx) => {
@@ -112,9 +111,15 @@ registerCommand("checkin", async (ctx) => {
   const supabase = createAdminClient();
   const { error: upsertError } = await supabase
     .schema("pitboss")
-    .from("race_checkins")
+    .from("round_checkins")
     .upsert(
-      { round_id: round.id, driver_id: driverResult.driver.id, status },
+      {
+        round_id: round.id,
+        driver_id: driverResult.driver.id,
+        league_id: ctx.leagueId,
+        status,
+        checked_in_at: new Date().toISOString(),
+      },
       { onConflict: "round_id,driver_id" }
     );
 
@@ -141,7 +146,7 @@ registerCommand("checkin-status", async (ctx) => {
   const supabase = createAdminClient();
   const { data: checkins, error } = await supabase
     .schema("pitboss")
-    .from("race_checkins")
+    .from("round_checkins")
     .select("status, driver_id, drivers(discord_id)")
     .eq("round_id", round.id);
 
@@ -174,10 +179,6 @@ registerCommand("checkin-remind", async (ctx) => {
     return { content: "You don't have permission to send check-in reminders.", ephemeral: true };
   }
 
-  // Deferred: pulling roster + check-ins and posting the reminder could
-  // take longer than Discord's 3s ACK window, same pattern as
-  // steward_analyse. See router.ts for how `defer`/`background` are
-  // handled.
   return {
     defer: true,
     ephemeral: false,
@@ -189,12 +190,14 @@ registerCommand("checkin-remind", async (ctx) => {
       const round = roundResult.round;
       const supabase = createAdminClient();
 
+      // franchise_rosters.season is TEXT, calendar_rounds.season_number is an
+      // integer — cast for the comparison.
       const { data: rostered, error: rosterErr } = await supabase
         .schema("pitboss")
         .from("franchise_rosters")
         .select("driver_id, drivers(discord_id)")
         .eq("league_id", ctx.leagueId)
-        .eq("season", round.season)
+        .eq("season", String(round.season_number))
         .is("released_at", null);
 
       if (rosterErr) {
@@ -204,7 +207,7 @@ registerCommand("checkin-remind", async (ctx) => {
 
       const { data: checkins, error: checkinErr } = await supabase
         .schema("pitboss")
-        .from("race_checkins")
+        .from("round_checkins")
         .select("driver_id")
         .eq("round_id", round.id);
 
@@ -266,7 +269,7 @@ registerCommand("generate-grid", async (ctx) => {
   if (!regenerate) {
     const { data: existing } = await supabase
       .schema("pitboss")
-      .from("race_grids")
+      .from("round_grid_entries")
       .select("id")
       .eq("round_id", round.id)
       .limit(1);
@@ -280,7 +283,7 @@ registerCommand("generate-grid", async (ctx) => {
 
   const { data: confirmed, error: confirmedErr } = await supabase
     .schema("pitboss")
-    .from("race_checkins")
+    .from("round_checkins")
     .select("driver_id, drivers(discord_id)")
     .eq("round_id", round.id)
     .eq("status", "confirmed");
@@ -297,9 +300,9 @@ registerCommand("generate-grid", async (ctx) => {
   const { data: rosters, error: rosterErr } = await supabase
     .schema("pitboss")
     .from("franchise_rosters")
-    .select("driver_id, franchise_id, franchises(name)")
+    .select("driver_id, franchise_id, tier, franchises(name)")
     .eq("league_id", ctx.leagueId)
-    .eq("season", round.season)
+    .eq("season", String(round.season_number))
     .is("released_at", null)
     .in("driver_id", driverIds);
 
@@ -309,28 +312,36 @@ registerCommand("generate-grid", async (ctx) => {
   }
 
   if (regenerate) {
-    await supabase.schema("pitboss").from("race_grids").delete().eq("round_id", round.id);
+    await supabase.schema("pitboss").from("round_grid_entries").delete().eq("round_id", round.id);
   }
 
+  // franchise_id is NOT NULL on round_grid_entries — any confirmed driver
+  // without an active roster row is silently dropped here rather than
+  // inserted with a null franchise_id. Surface that gap to the caller.
   const rows = (rosters ?? []).map((r) => ({
     round_id: round.id,
     league_id: ctx.leagueId,
     driver_id: r.driver_id,
     franchise_id: r.franchise_id,
+    tier: r.tier,
     generated_by: ctx.discordUserId,
   }));
 
-  const { error: insertErr } = await supabase.schema("pitboss").from("race_grids").insert(rows);
+  const { error: insertErr } = await supabase.schema("pitboss").from("round_grid_entries").insert(rows);
   if (insertErr) {
     console.error("[generate-grid] grid insert failed:", insertErr);
     return { content: `Something went wrong saving the grid: ${insertErr.message}`, ephemeral: true };
   }
 
+  const skipped = confirmed.length - rows.length;
   const lines = [`**Grid — ${roundLabel(round)}** (${rows.length} drivers)`];
   for (const r of rosters ?? []) {
     const discordId = (confirmed.find((c) => c.driver_id === r.driver_id) as any)?.drivers?.discord_id;
     const franchiseName = (r as any).franchises?.name ?? "Unknown";
     lines.push(`${franchiseName}: ${discordId ? `<@${discordId}>` : r.driver_id}`);
+  }
+  if (skipped > 0) {
+    lines.push(`_${skipped} confirmed driver(s) skipped — no active roster entry for season ${round.season_number}._`);
   }
 
   return { content: lines.join("\n"), ephemeral: false };
