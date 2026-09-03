@@ -36,7 +36,16 @@ function normalizeSeason(raw: string): { season: string } | { error: string } {
 // the other, instead of requiring someone to notice the miss and
 // manually add a duplicate alias row (which is what happened last time —
 // the driver signed before signing_t2 existed and got no market value).
+//
+// Also handles a bare numeric tier ("2" with no T/D prefix at all) —
+// people type it that way often enough that it needs both prefixes
+// tried, not just a same-prefix swap. This was missed in the first pass:
+// tierKey "2" doesn't start with "t" or "d", so no alias was generated
+// and only "signing_2" (which never exists) was tried.
 function tierAliasKeys(tierKey: string): string[] {
+  if (/^\d+$/.test(tierKey)) {
+    return [`t${tierKey}`, `d${tierKey}`, tierKey];
+  }
   const keys = [tierKey];
   if (tierKey.startsWith("t")) keys.push("d" + tierKey.slice(1));
   else if (tierKey.startsWith("d")) keys.push("t" + tierKey.slice(1));
