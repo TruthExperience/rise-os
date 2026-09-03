@@ -371,6 +371,13 @@ registerCommand("tp_view", async (ctx) => {
     return { content: `No Team Principals set for season ${season}.`, ephemeral: true };
   }
 
+  const lines = [`**Team Principals (${season})**`];
+  rows.forEach((row) => {
+    const teamName = (row as any).car_class_teams.team_name;
+    const driverName = (row as any).drivers.display_name ?? (row as any).drivers.discord_username ?? "Unknown";
+    lines.push(`${teamName} — ${driverName}`);
+  });
+
   return { content: lines.join("\n"), ephemeral: true };
 });
 
