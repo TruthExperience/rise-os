@@ -84,6 +84,26 @@ function raceLights(raceTimeIso: string | null): string {
 }
 
 /**
+ * Digital HH:MM:SS countdown, computed fresh at render time (same
+ * "computed on build, not live" caveat as raceLights — this freezes
+ * until the embed is next rebuilt, either by a button click or,
+ * once wired up, the checkin-countdown cron).
+ */
+function formatDigitalCountdown(raceTimeIso: string | null): string | null {
+  if (!raceTimeIso) return null;
+  const msRemaining = new Date(raceTimeIso).getTime() - Date.now();
+  if (msRemaining <= 0) return null; // raceLights already shows LIGHTS OUT
+
+  const totalSeconds = Math.floor(msRemaining / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+
+  return `⏱️ **${pad(hours)}:${pad(minutes)}:${pad(seconds)}**`;
+}
+
+/**
  * Flag emojis are built from two Unicode "regional indicator" code
  * points, one per ISO 3166-1 alpha-2 letter (🇨🇳 = 🇨 + 🇳 = "cn").
  * This decodes flag_emoji back into that 2-letter code so we can pull
@@ -133,6 +153,8 @@ export function buildCheckinEmbed(params: {
       `⏰ **Start:** <t:${unix}:F>  (<t:${unix}:R>)`,
       raceLights(post.race_time)
     );
+    const digital = formatDigitalCountdown(post.race_time);
+    if (digital) descriptionParts.push(digital);
   }
 
   const legendField = {
