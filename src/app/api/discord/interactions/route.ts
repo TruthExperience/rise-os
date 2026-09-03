@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { InteractionType, InteractionResponseType } from "discord-interactions";
 import { verifyDiscordRequest } from "@/lib/discord/verify";
 import { routeCommand } from "@/lib/discord/commands/router";
+import { routeComponent } from "@/lib/discord/components/router";
 
 /**
  * Single entry point for every Discord slash command / component
@@ -36,10 +37,8 @@ export async function POST(req: NextRequest) {
   }
 
   if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
-    return NextResponse.json({
-      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-      data: { content: "Component interactions aren't wired up yet.", flags: 64 },
-    });
+    const response = await routeComponent(interaction);
+    return NextResponse.json(response);
   }
 
   return new NextResponse("Unhandled interaction type", { status: 400 });
