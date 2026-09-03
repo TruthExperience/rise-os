@@ -297,7 +297,7 @@ registerCommand("ddv_edit", async (ctx) => {
       p_reason: reason,
       p_actor_discord_id: ctx.discordUserId,
     })
-    .single();
+    .single<{ current_ddv: number }>();
 
   if (error) {
     console.error("[ddv_edit] rpc failed:", error);
