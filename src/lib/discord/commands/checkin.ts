@@ -27,6 +27,18 @@ import {
 // race_date/circuit). Any resolveRound() call that doesn't pass a
 // divisionId is ambiguous once both divisions have rows for that round —
 // every command below resolves a division first and threads it through.
+//
+// PATCH (2026-09-03): franchise_rosters (pitboss schema) and franchises
+// (rise_os schema) live in different exposed PostgREST schemas.
+// PostgREST's multi-schema (db-schemas) support builds relationship
+// visibility per exposed schema rather than as one merged graph, so
+// resource-embedding shorthand across schemas (`franchises(name)`) fails
+// with "could not find a relationship in the schema cache" even though
+// the FK (franchise_rosters_franchise_id_fkey -> rise_os.franchises.id)
+// is completely valid at the Postgres level, and regardless of schema
+// cache freshness. generate-grid now fetches franchise_rosters and
+// franchises as two separate queries and joins them client-side. Do not
+// reintroduce an embedded `franchises(...)` select on franchise_rosters.
 
 const ADMIN_FLAGS = [
   "is_owner",
@@ -600,7 +612,7 @@ registerCommand("generate-grid", async (ctx) => {
   const { data: rosters, error: rosterErr } = await supabase
     .schema("pitboss")
     .from("franchise_rosters")
-    .select("driver_id, franchise_id, tier, franchises(name)")
+    .select("driver_id, franchise_id, tier")
     .eq("league_id", ctx.leagueId)
     .eq("season", String(round.season_number))
     .is("released_at", null)
@@ -610,6 +622,24 @@ registerCommand("generate-grid", async (ctx) => {
     console.error("[generate-grid] roster lookup failed:", rosterErr);
     return { content: `Something went wrong pulling rosters: ${rosterErr.message}`, ephemeral: true };
   }
+
+  // franchise_rosters (pitboss) and franchises (rise_os) live in
+  // different exposed PostgREST schemas — cross-schema embeds
+  // (`franchises(name)`) aren't resolvable via the schema cache even
+  // though the FK is valid, so franchise names are fetched separately
+  // and joined in-memory below. See PATCH note at top of file.
+  const franchiseIds = [...new Set((rosters ?? []).map((r) => r.franchise_id))];
+  const { data: franchises, error: franchiseErr } = await supabase
+    .schema("rise_os")
+    .from("franchises")
+    .select("id, name")
+    .in("id", franchiseIds);
+
+  if (franchiseErr) {
+    console.error("[generate-grid] franchise lookup failed:", franchiseErr);
+    return { content: `Something went wrong pulling franchise names: ${franchiseErr.message}`, ephemeral: true };
+  }
+  const franchiseNameById = new Map((franchises ?? []).map((f) => [f.id, f.name]));
 
   if (regenerate) {
     await supabase.schema("pitboss").from("round_grid_entries").delete().eq("round_id", round.id);
@@ -637,7 +667,7 @@ registerCommand("generate-grid", async (ctx) => {
   const lines = [`**Grid — ${roundLabel(round)} — Division ${division.division_code}** (${rows.length} drivers)`];
   for (const r of rosters ?? []) {
     const discordId = (confirmed.find((c) => c.driver_id === r.driver_id) as any)?.drivers?.discord_id;
-    const franchiseName = (r as any).franchises?.name ?? "Unknown";
+    const franchiseName = franchiseNameById.get(r.franchise_id) ?? "Unknown";
     lines.push(`${franchiseName}: ${discordId ? `<@${discordId}>` : r.driver_id}`);
   }
   if (skipped > 0) {
@@ -646,3 +676,16 @@ registerCommand("generate-grid", async (ctx) => {
 
   return { content: lines.join("\n"), ephemeral: false };
 });
+
+// Side-effect import: registers the roster_* commands.
+import "./roster";
+// Side-effect import: registers the kb_* commands.
+import "./kb";
+// Side-effect import: registers the steward_* commands.
+import "./steward";
+// Side-effect import: registers the appeal_* commands.
+import "./appeal";
+// Side-effect import: registers the kick/ban/lockdown/endlockdown commands.
+import "./moderation";
+// Side-effect import: registers the sign-driver/release-driver commands.
+import "./driver";
