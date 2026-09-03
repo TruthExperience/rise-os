@@ -183,3 +183,5 @@ import "./contract";
 import "./checkin";
 // Side-effect import: registers the cap_* commands.
 import "./cap";
+// Side-effect import: registers the ddv_* and tp_view commands.
+import "./ddv";
