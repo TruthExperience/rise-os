@@ -35,6 +35,12 @@ export async function GET() {
     { name: "Tier 2", value: "Tier 2" },
   ];
 
+  const checkinStatusChoices = [
+    { name: "Confirmed", value: "confirmed" },
+    { name: "Tentative", value: "tentative" },
+    { name: "Declined", value: "declined" },
+  ];
+
   const commands = [
     {
       name: "ping",
@@ -290,6 +296,145 @@ export async function GET() {
               required: false,
             },
           ],
+        },
+      ],
+    },
+    {
+      name: "sign-driver",
+      description: "Sign a driver to a franchise (employment — contracts/cap, not the EA car-class roster)",
+      options: [
+        {
+          type: 6, // USER
+          name: "driver",
+          description: "Driver to sign",
+          required: true,
+        },
+        {
+          type: 3, // STRING
+          name: "franchise",
+          description: "Franchise name or abbreviation (e.g. McLaren, or 'McLaren 25' if a division match is ambiguous)",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season (e.g. 2026)",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "tier",
+          description: "Contract/pricing tier (e.g. T1, T2, D1, Reserve) — league-specific",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "release-driver",
+      description: "Release a driver from their current franchise",
+      options: [
+        {
+          type: 6, // USER
+          name: "driver",
+          description: "Driver to release",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season (e.g. 2026)",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "reason",
+          description: "Reason for release",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "checkin",
+      description: "Check in (or out) for an upcoming race",
+      options: [
+        {
+          type: 3, // STRING
+          name: "status",
+          description: "Your attendance status",
+          required: true,
+          choices: checkinStatusChoices,
+        },
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name (defaults to the next scheduled race)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season number (defaults to the round's season)",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "checkin-status",
+      description: "View check-in status for a race round (stewards/admins)",
+      options: [
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name (defaults to the next scheduled race)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season number (defaults to the round's season)",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "checkin-remind",
+      description: "Ping everyone who hasn't checked in for a race round",
+      options: [
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name (defaults to the next scheduled race)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season number (defaults to the round's season)",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "generate-grid",
+      description: "Build the team lineup grid from confirmed check-ins",
+      options: [
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name (defaults to the next scheduled race)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season number (defaults to the round's season)",
+          required: false,
+        },
+        {
+          type: 5, // BOOLEAN
+          name: "regenerate",
+          description: "Rebuild an existing grid for this round",
+          required: false,
         },
       ],
     },
