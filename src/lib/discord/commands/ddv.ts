@@ -144,6 +144,51 @@ async function requireLeagueOwner(ctx: {
   return null;
 }
 
+// TP can view DDV for drivers on their own team roster (current season) —
+// narrower than requireLeagueOwner: TP status is per-team (team_rosters),
+// not the league-wide owner/co-owner role.
+async function isTeamPrincipalOfDriver(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  requesterDiscordId: string,
+  targetDriverId: string
+): Promise<boolean> {
+  const { data: requester } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id")
+    .eq("discord_id", requesterDiscordId)
+    .maybeSingle();
+  if (!requester) return false;
+
+  const season = await resolveCurrentSeason(supabase, leagueId);
+  if (!season) return false;
+
+  const { data: tpTeams } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("car_class_team_id")
+    .eq("league_id", leagueId)
+    .eq("season", season)
+    .eq("driver_id", requester.id)
+    .eq("is_team_principal", true);
+
+  if (!tpTeams || tpTeams.length === 0) return false;
+  const teamIds = tpTeams.map((r) => r.car_class_team_id);
+
+  const { data: targetOnTeam } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("driver_id")
+    .eq("league_id", leagueId)
+    .eq("season", season)
+    .eq("driver_id", targetDriverId)
+    .in("car_class_team_id", teamIds)
+    .maybeSingle();
+
+  return !!targetOnTeam;
+}
+
 function fmtDDV(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return `$${n.toLocaleString("en-US")} $TRL`;
@@ -154,11 +199,19 @@ registerCommand("ddv_view", async (ctx) => {
   // Defaults to yourself, matching contract_view's convention.
   const targetDiscordId = (ctx.options.driver as string | undefined) ?? ctx.discordUserId;
 
-  // Looking up your own DDV is always allowed; looking up someone else's
-  // requires owner/co-owner, same gate as ddv_edit.
+  // Looking up your own DDV is always allowed. Looking up someone else's
+  // requires owner/co-owner, OR being the TP of that driver's own team.
   if (targetDiscordId !== ctx.discordUserId) {
-    const denied = await requireLeagueOwner(ctx);
-    if (denied) return { content: denied, ephemeral: true };
+    const ownerDenied = await requireLeagueOwner(ctx);
+    if (ownerDenied) {
+      const targetLookup = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
+      const isTP =
+        targetLookup.driver &&
+        (await isTeamPrincipalOfDriver(supabase, ctx.leagueId, ctx.discordUserId, targetLookup.driver.id));
+      if (!isTP) {
+        return { content: "Only the league owner, co-owner, or that driver's Team Principal can do that.", ephemeral: true };
+      }
+    }
   }
 
   const resolved = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
