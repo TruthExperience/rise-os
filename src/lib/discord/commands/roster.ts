@@ -29,53 +29,103 @@ const EDITOR_FLAGS = [
   "is_steward",
 ] as const;
 
-
+// roster_view was previously reading pitboss.team_rosters, joined to
+// pitboss.car_class_teams for the team name. car_class_teams has no
+// league_id and no FK to rise_os.franchises — it's purely reference
+// data for setup-generation physics (aero_efficiency, engine_power,
+// etc.), keyed by a shared car class across all four leagues. It has
+// nothing to do with who's actually signed to a franchise.
+//
+// The real, league-scoped roster data (what /sign-driver and
+// /release-driver read and write) lives in pitboss.franchise_rosters,
+// pointing at rise_os.franchises. That's the source of truth this
+// should have been reading all along — team_rosters/car_class_teams
+// stay untouched for their actual purpose (setup generation).
 registerCommand("roster_view", async (ctx) => {
   const supabase = createAdminClient();
   const tier = ctx.options.tier as string | undefined;
 
-  let query = supabase
+  let rosterQuery = supabase
     .schema("pitboss")
-    .from("team_rosters")
-    .select(
-      "tier, is_team_principal, car_class_teams(team_name), drivers(discord_username)"
-    )
-    .eq("league_id", ctx.leagueId);
+    .from("franchise_rosters")
+    .select("driver_id, franchise_id, tier, season")
+    .eq("league_id", ctx.leagueId)
+    .is("released_at", null);
 
-  if (tier) query = query.eq("tier", tier);
+  if (tier) rosterQuery = rosterQuery.eq("tier", tier);
 
-  const { data, error } = await query;
-  if (error || !data) {
-    console.error("[roster_view] query failed:", error);
+  const { data: rosterRows, error: rosterError } = await rosterQuery;
+  if (rosterError || !rosterRows) {
+    console.error("[roster_view] franchise_rosters query failed:", rosterError);
     return {
-      content: `Couldn't load the roster right now: ${error?.message ?? "unknown error"}`,
+      content: `Couldn't load the roster right now: ${rosterError?.message ?? "unknown error"}`,
       ephemeral: true,
     };
   }
-  if (data.length === 0) {
+  if (rosterRows.length === 0) {
     return {
       content: tier
-        ? `No roster found for ${tier}.`
+        ? `No roster found for tier "${tier}".`
         : "No roster found for this league.",
       ephemeral: true,
     };
   }
 
+  const franchiseIds = [...new Set(rosterRows.map((r) => r.franchise_id))];
+  const driverIds = [...new Set(rosterRows.map((r) => r.driver_id))];
+
+  const [{ data: franchises, error: franchiseErr }, { data: drivers, error: driverErr }, { data: memberships }] =
+    await Promise.all([
+      supabase.schema("rise_os").from("franchises").select("id, name").in("id", franchiseIds),
+      supabase.schema("pitboss").from("drivers").select("id, discord_username").in("id", driverIds),
+      supabase
+        .schema("pitboss")
+        .from("driver_leagues")
+        .select("driver_id, is_team_principal")
+        .eq("league_id", ctx.leagueId)
+        .in("driver_id", driverIds),
+    ]);
+
+  if (franchiseErr || driverErr) {
+    console.error("[roster_view] lookup failed:", franchiseErr ?? driverErr);
+    return {
+      content: `Couldn't load roster details: ${(franchiseErr ?? driverErr)?.message ?? "unknown error"}`,
+      ephemeral: true,
+    };
+  }
+
+  const franchiseNameById = new Map((franchises ?? []).map((f) => [f.id, f.name]));
+  const driverNameById = new Map((drivers ?? []).map((d) => [d.id, d.discord_username ?? "Unknown driver"]));
+  const isTpByDriverId = new Map((memberships ?? []).map((m) => [m.driver_id, !!m.is_team_principal]));
+
   const byTeam: Record<string, string[]> = {};
-  for (const row of data as any[]) {
-    const teamName = row.car_class_teams?.team_name ?? "Unknown team";
-    const driverName = row.drivers?.discord_username ?? "Unknown driver";
-    const label = row.is_team_principal ? `${driverName} (TP)` : driverName;
+  for (const row of rosterRows) {
+    const teamName = franchiseNameById.get(row.franchise_id) ?? "Unknown franchise";
+    const driverName = driverNameById.get(row.driver_id) ?? "Unknown driver";
+    const label = isTpByDriverId.get(row.driver_id) ? `${driverName} (TP)` : driverName;
     byTeam[teamName] = byTeam[teamName] ?? [];
     byTeam[teamName].push(label);
   }
 
   const lines = Object.entries(byTeam)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([team, drivers]) => `**${team}**: ${drivers.join(", ")}`);
+    .map(([team, driverList]) => `**${team}**: ${driverList.join(", ")}`);
 
   return { content: lines.join("\n"), ephemeral: false };
 });
+
+// NOTE: roster_assign / roster_remove below still read and write
+// pitboss.team_rosters (via car_class_teams), which is now visually
+// disconnected from roster_view above. They weren't touched in this
+// pass because redirecting them to franchise_rosters means teaching
+// them to resolve rise_os.franchises the way sign-driver's
+// resolveFranchise() does (division disambiguation, etc.) instead of
+// the flat car_class_teams lookup — a bigger change than "make roster
+// view show what's actually signed." Until that's done, anyone using
+// roster_assign instead of /sign-driver will again be invisible to
+// roster_view. Worth deciding soon: either migrate these two onto
+// franchise_rosters, or retire them in favor of /sign-driver and
+// /release-driver entirely.
 
 registerCommand("roster_assign", async (ctx) => {
   const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
