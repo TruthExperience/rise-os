@@ -99,7 +99,7 @@ registerCommand("checkin", async (ctx) => {
 
   const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
   if ("error" in roundResult) {
-    return { content: roundResult.error, ephemeral: true };
+    return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
   }
   const round = roundResult.round;
 
@@ -139,7 +139,7 @@ registerCommand("checkin-status", async (ctx) => {
 
   const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
   if ("error" in roundResult) {
-    return { content: roundResult.error, ephemeral: true };
+    return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
   }
   const round = roundResult.round;
 
@@ -185,7 +185,7 @@ registerCommand("checkin-remind", async (ctx) => {
     background: async () => {
       const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
       if ("error" in roundResult) {
-        return { content: roundResult.error };
+        return { content: roundResult.error ?? "Something went wrong resolving the round." };
       }
       const round = roundResult.round;
       const supabase = createAdminClient();
@@ -261,7 +261,7 @@ registerCommand("generate-grid", async (ctx) => {
 
   const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
   if ("error" in roundResult) {
-    return { content: roundResult.error, ephemeral: true };
+    return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
   }
   const round = roundResult.round;
   const supabase = createAdminClient();
