@@ -1,11 +1,26 @@
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
+import {
+  buildCheckinEmbed,
+  buildCheckinComponents,
+  roundLabel,
+  CHECKIN_STATUSES,
+  type CheckinStatus,
+} from "./checkin-embed";
 
 // Tables now confirmed against live schema:
-//   rise_os.calendar_rounds   (was guessed as pitboss.race_rounds)
-//   pitboss.round_checkins    (was guessed as pitboss.race_checkins)
+//   rise_os.calendar_rounds    (was guessed as pitboss.race_rounds)
+//   pitboss.round_checkins     (was guessed as pitboss.race_checkins)
 //   pitboss.round_grid_entries (was guessed as pitboss.race_grids)
+//   rise_os.league_divisions   (new — added for per-division check-in channels)
+//   pitboss.round_checkin_posts (new — tracks the posted embed per round+division)
+//
+// round_checkins.status CHECK extended to also allow 'healer' and 'damage'
+// (matching the Discord button labels), on top of the original
+// confirmed/tentative/declined/no_response. round_checkins also gained a
+// division_id column (FK -> rise_os.league_divisions) so a response is
+// scoped to D1 or D2.
 
 const ADMIN_FLAGS = [
   "is_owner",
@@ -18,9 +33,10 @@ const ADMIN_FLAGS = [
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
-type CheckinStatus = "confirmed" | "tentative" | "declined";
-
-async function getOrCreateDriver(discordId: string, resolvedUsername: string | undefined) {
+export async function getOrCreateDriver(
+  discordId: string,
+  resolvedUsername: string | undefined
+) {
   const supabase = createAdminClient();
   let { data: driver } = await supabase
     .schema("pitboss")
@@ -51,12 +67,16 @@ async function getOrCreateDriver(discordId: string, resolvedUsername: string | u
  *
  * NOTE: calendar_rounds lives in the rise_os schema, not pitboss.
  */
-async function resolveRound(leagueId: string, roundInput: string | undefined, seasonInput: string | undefined) {
+export async function resolveRound(
+  leagueId: string,
+  roundInput: string | undefined,
+  seasonInput: string | undefined
+) {
   const supabase = createAdminClient();
   let query = supabase
     .schema("rise_os")
     .from("calendar_rounds")
-    .select("id, season_number, round_number, name, race_date")
+    .select("id, season_number, round_number, name, race_date, circuit, country, flag_emoji")
     .eq("league_id", leagueId);
 
   if (seasonInput) {
@@ -87,8 +107,54 @@ async function resolveRound(leagueId: string, roundInput: string | undefined, se
   return { round: data } as const;
 }
 
-function roundLabel(round: { name: string | null; round_number: number | null }) {
-  return round.name ?? (round.round_number != null ? `Round ${round.round_number}` : "this round");
+/**
+ * Resolves a division (D1/D2/etc.) for the league, case-insensitively.
+ * A league with no rows in league_divisions has no per-division
+ * check-in channels set up yet — surfaced as an error rather than a
+ * silent fallback.
+ */
+async function resolveDivision(leagueId: string, divisionInput: string) {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .schema("rise_os")
+    .from("league_divisions")
+    .select("id, division_code, discord_checkin_channel_id")
+    .eq("league_id", leagueId)
+    .ilike("division_code", divisionInput)
+    .maybeSingle();
+
+  if (error) return { error: error.message } as const;
+  if (!data) return { error: `No division "${divisionInput}" set up for this league.` } as const;
+  if (!data.discord_checkin_channel_id) {
+    return { error: `Division ${data.division_code} has no check-in channel configured.` } as const;
+  }
+  return { division: data } as const;
+}
+
+/**
+ * Pulls every response for a round+division, grouped by status, as
+ * discord_id arrays — the shape buildCheckinEmbed expects.
+ */
+async function fetchGroupedCheckins(roundId: string, divisionId: string) {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("round_checkins")
+    .select("status, drivers(discord_id)")
+    .eq("round_id", roundId)
+    .eq("division_id", divisionId);
+
+  if (error) return { error: error.message } as const;
+
+  const grouped: Partial<Record<CheckinStatus, string[]>> = {};
+  for (const row of data ?? []) {
+    const discordId = (row as any).drivers?.discord_id;
+    const status = row.status as CheckinStatus;
+    if (!discordId || !CHECKIN_STATUSES.includes(status)) continue;
+    grouped[status] = grouped[status] ?? [];
+    grouped[status]!.push(discordId);
+  }
+  return { grouped } as const;
 }
 
 registerCommand("checkin", async (ctx) => {
@@ -155,7 +221,13 @@ registerCommand("checkin-status", async (ctx) => {
     return { content: `Something went wrong pulling check-ins: ${error.message}`, ephemeral: true };
   }
 
-  const byStatus: Record<CheckinStatus, string[]> = { confirmed: [], tentative: [], declined: [] };
+  const byStatus: Record<CheckinStatus, string[]> = {
+    confirmed: [],
+    tentative: [],
+    declined: [],
+    healer: [],
+    damage: [],
+  };
   for (const row of checkins ?? []) {
     const discordId = (row as any).drivers?.discord_id;
     if (discordId && row.status in byStatus) {
@@ -168,6 +240,8 @@ registerCommand("checkin-status", async (ctx) => {
     `Confirmed (${byStatus.confirmed.length}): ${byStatus.confirmed.join(", ") || "none"}`,
     `Tentative (${byStatus.tentative.length}): ${byStatus.tentative.join(", ") || "none"}`,
     `Declined (${byStatus.declined.length}): ${byStatus.declined.join(", ") || "none"}`,
+    `Healer (${byStatus.healer.length}): ${byStatus.healer.join(", ") || "none"}`,
+    `Damage (${byStatus.damage.length}): ${byStatus.damage.join(", ") || "none"}`,
   ];
 
   return { content: lines.join("\n"), ephemeral: true };
@@ -248,6 +322,127 @@ registerCommand("checkin-remind", async (ctx) => {
 
       return { content: `Reminded ${missing.length} driver(s) who hadn't checked in for ${roundLabel(round)}.` };
     },
+  };
+});
+
+/**
+ * Admin command: posts the rich check-in embed (track/weather/ping
+ * delivery/countdown + 5 status buttons) to a division's dedicated
+ * check-in channel. One post per round+division — re-running this
+ * for the same round/division updates the existing row and posts a
+ * fresh message (the old one is left as-is; not deleted, since we
+ * don't retain enough context here to safely delete a prior message
+ * a driver may have already interacted with).
+ *
+ * Options: round (optional, defaults to next upcoming), season
+ * (optional), division (required: e.g. "D1"), weather (optional free
+ * text), ping_delivery (optional free text, defaults to "Channel
+ * only"), race_time (optional ISO 8601 datetime — if omitted, falls
+ * back to the round's race_date at 15:00 UTC so the countdown still
+ * has something to render against).
+ */
+registerCommand("checkin-create", async (ctx) => {
+  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
+    return { content: "You don't have permission to create a check-in.", ephemeral: true };
+  }
+
+  const divisionInput = ctx.options.division as string | undefined;
+  if (!divisionInput) {
+    return { content: "division is required (e.g. \"D1\").", ephemeral: true };
+  }
+
+  const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
+  if ("error" in roundResult) {
+    return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
+  }
+  const round = roundResult.round;
+
+  const divisionResult = await resolveDivision(ctx.leagueId, divisionInput);
+  if ("error" in divisionResult) {
+    return { content: divisionResult.error, ephemeral: true };
+  }
+  const division = divisionResult.division;
+
+  const weatherText = (ctx.options.weather as string | undefined) ?? null;
+  const pingDelivery = (ctx.options.ping_delivery as string | undefined) ?? "Channel only";
+  const raceTime =
+    (ctx.options.race_time as string | undefined) ??
+    (round.race_date ? `${round.race_date}T15:00:00Z` : null);
+
+  const supabase = createAdminClient();
+
+  const { data: post, error: postError } = await supabase
+    .schema("pitboss")
+    .from("round_checkin_posts")
+    .upsert(
+      {
+        round_id: round.id,
+        division_id: division.id,
+        discord_channel_id: division.discord_checkin_channel_id,
+        weather_text: weatherText,
+        ping_delivery: pingDelivery,
+        race_time: raceTime,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "round_id,division_id" }
+    )
+    .select("id, weather_text, ping_delivery, race_time")
+    .single();
+
+  if (postError || !post) {
+    console.error("[checkin-create] post upsert failed:", postError);
+    return { content: `Something went wrong saving the check-in post: ${postError?.message ?? "unknown error"}`, ephemeral: true };
+  }
+
+  const groupedResult = await fetchGroupedCheckins(round.id, division.id);
+  if ("error" in groupedResult) {
+    return { content: `Something went wrong pulling existing check-ins: ${groupedResult.error}`, ephemeral: true };
+  }
+
+  const embed = buildCheckinEmbed({
+    round,
+    divisionCode: division.division_code,
+    post,
+    grouped: groupedResult.grouped,
+  });
+  const components = buildCheckinComponents(post.id);
+
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
+  if (!token) {
+    return { content: "PITBOSS_DISCORD_BOT_TOKEN not set — can't post the check-in.", ephemeral: true };
+  }
+
+  const res = await fetch(`${DISCORD_API_BASE}/channels/${division.discord_checkin_channel_id}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ embeds: [embed], components }),
+  });
+
+  if (!res.ok) {
+    console.error("[checkin-create] channel post failed:", res.status, await res.text());
+    return { content: `Check-in post failed to send (${res.status}).`, ephemeral: true };
+  }
+
+  const posted = await res.json();
+  const { error: msgIdError } = await supabase
+    .schema("pitboss")
+    .from("round_checkin_posts")
+    .update({ discord_message_id: posted.id })
+    .eq("id", post.id);
+
+  if (msgIdError) {
+    console.error("[checkin-create] failed to save discord_message_id:", msgIdError);
+    // Not fatal to the user — the message posted fine, buttons still work
+    // (they carry the post id, not the message id). Logged for follow-up.
+  }
+
+  return {
+    content: `Check-in posted for ${roundLabel(round)} — Division ${division.division_code}.`,
+    ephemeral: true,
   };
 });
 
