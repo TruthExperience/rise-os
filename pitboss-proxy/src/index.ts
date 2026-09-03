@@ -249,6 +249,179 @@ async function inferWithWaterfall(pool: string[], body: any, env: any, options: 
   return freeResult;
 }
 
+// ---------------------------------------------------------------------
+// Checkin countdown cron — added for the live digital countdown / lights
+// re-render feature. Duplicated from src/lib/pitboss/checkin-embed.ts
+// (Next.js app) — Workers can't resolve that package's path aliases,
+// and these are pure functions with zero deps, so duplication beats a
+// fragile cross-package import. If the source functions change, update
+// here too.
+// ---------------------------------------------------------------------
+
+function raceLights(raceTimeIso: string | null): string {
+  if (!raceTimeIso) return "";
+  const msRemaining = new Date(raceTimeIso).getTime() - Date.now();
+  const minsRemaining = msRemaining / 60000;
+
+  if (minsRemaining <= 0) return "🟢🟢🟢🟢🟢  **LIGHTS OUT — GO!**";
+  if (minsRemaining <= 5) return "🔴🔴🔴🔴🔴  **Formation lap — get ready**";
+  if (minsRemaining <= 30) return "🔴🔴🔴⚫⚫  **Grid forming**";
+  if (minsRemaining <= 60) return "🔴🔴⚫⚫⚫  **Pit lane opens soon**";
+  return "🔴⚫⚫⚫⚫  **Session upcoming**";
+}
+
+function formatDigitalCountdown(raceTimeIso: string | null): string | null {
+  if (!raceTimeIso) return null;
+  const msRemaining = new Date(raceTimeIso).getTime() - Date.now();
+  if (msRemaining <= 0) return null;
+
+  const totalSeconds = Math.floor(msRemaining / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+
+  return `⏱️ **${pad(hours)}:${pad(minutes)}:${pad(seconds)}**`;
+}
+
+// Rebuilds just the description block's countdown/lights lines, given
+// the fields already present on a posted embed. We PATCH description
+// only — fields (status lists) are untouched by the cron, since those
+// only change via button clicks, not time passing.
+function refreshCountdownDescription(description: string, raceTimeIso: string): string {
+  const lines = description.split("\n");
+  const startIdx = lines.findIndex((l) => l.startsWith("⏰ **Start:**"));
+  if (startIdx === -1) return description; // no countdown block present, leave as-is
+
+  // Everything from the "—————" separator right before "⏰ Start" onward
+  // is the countdown block (separator, start line, lights, digital).
+  const preludeEnd = startIdx > 0 && lines[startIdx - 1] === "—————" ? startIdx - 1 : startIdx;
+  const head = lines.slice(0, preludeEnd);
+
+  const unix = Math.floor(new Date(raceTimeIso).getTime() / 1000);
+  const rebuilt = [
+    "—————",
+    `⏰ **Start:** <t:${unix}:F>  (<t:${unix}:R>)`,
+    raceLights(raceTimeIso),
+  ];
+  const digital = formatDigitalCountdown(raceTimeIso);
+  if (digital) rebuilt.push(digital);
+
+  return [...head, ...rebuilt].join("\n");
+}
+
+const DISCORD_API_BASE = "https://discord.com/api/v10";
+
+async function fetchActiveCheckinPosts(env: any) {
+  // Active window: race_time between now and 90 minutes out. Anything
+  // further out doesn't need per-minute refresh; anything with
+  // race_time already passed gets one final LIGHTS OUT patch below,
+  // then naturally drops out of this window on the next run.
+  const now = new Date();
+  const soon = new Date(now.getTime() + 90 * 60 * 1000);
+  const url = `${env.SUPABASE_URL}/rest/v1/round_checkin_posts` +
+    `?select=id,discord_channel_id,discord_message_id,race_time,description_frozen` +
+    `&race_time=gte.${now.toISOString()}` +
+    `&race_time=lte.${soon.toISOString()}` +
+    `&discord_message_id=not.is.null` +
+    `&description_frozen=is.false`;
+
+  const res = await fetch(url, {
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      "Accept-Profile": "pitboss",
+    },
+  });
+  if (!res.ok) {
+    console.error("[checkin-countdown] supabase fetch failed:", res.status, await res.text());
+    return [];
+  }
+  return await res.json();
+}
+
+async function markPostFrozen(postId: string, env: any) {
+  await fetch(`${env.SUPABASE_URL}/rest/v1/round_checkin_posts?id=eq.${postId}`, {
+    method: "PATCH",
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Profile": "pitboss",
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify({ description_frozen: true }),
+  });
+}
+
+async function handleCheckinCountdownTick(env: any) {
+  const posts = await fetchActiveCheckinPosts(env);
+  if (posts.length === 0) return { checked: 0, patched: 0 };
+
+  const token = env.PITBOSS_DISCORD_BOT_TOKEN;
+  if (!token) {
+    console.error("[checkin-countdown] PITBOSS_DISCORD_BOT_TOKEN not set — skipping tick.");
+    return { checked: posts.length, patched: 0, error: "no_bot_token" };
+  }
+
+  let patched = 0;
+  for (const post of posts) {
+    try {
+      const msgRes = await fetch(
+        `${DISCORD_API_BASE}/channels/${post.discord_channel_id}/messages/${post.discord_message_id}`,
+        { headers: { Authorization: `Bot ${token}` } }
+      );
+      if (!msgRes.ok) {
+        console.error(`[checkin-countdown] fetch message failed for post ${post.id}:`, msgRes.status);
+        continue;
+      }
+      const message = await msgRes.json();
+      const embed = message.embeds?.[0];
+      if (!embed) continue;
+
+      const newDescription = refreshCountdownDescription(embed.description ?? "", post.race_time);
+      const patchRes = await fetch(
+        `${DISCORD_API_BASE}/channels/${post.discord_channel_id}/messages/${post.discord_message_id}`,
+        {
+          method: "PATCH",
+          headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ embeds: [{ ...embed, description: newDescription }] }),
+        }
+      );
+      if (!patchRes.ok) {
+        console.error(`[checkin-countdown] patch failed for post ${post.id}:`, patchRes.status, await patchRes.text());
+        continue;
+      }
+      patched++;
+
+      // race_time has passed as of this tick — one last LIGHTS OUT
+      // patch just went out above; freeze so future ticks skip it.
+      if (new Date(post.race_time).getTime() - Date.now() <= 0) {
+        await markPostFrozen(post.id, env);
+      }
+    } catch (err) {
+      console.error(`[checkin-countdown] tick failed for post ${post.id}:`, err);
+      continue;
+    }
+  }
+  return { checked: posts.length, patched };
+}
+
 // ... describeEvidenceImages, handleEspnRelay, handleInfer, handleSteward,
 // handleSetupFeedback, handleHealth, and the default export fetch handler
-// are UNCHANGED from what's currently deployed — only MODELS changed above.
+// are UNCHANGED from what's currently deployed — only MODELS changed
+// above, and the checkin-countdown block + scheduled() export below
+// are new.
+
+export default {
+  // fetch(request, env, ctx) — UNCHANGED, existing handler stays exactly
+  // as currently deployed.
+
+  async scheduled(event: ScheduledEvent, env: any, ctx: ExecutionContext) {
+    ctx.waitUntil(
+      handleCheckinCountdownTick(env).then((result) => {
+        console.log("[checkin-countdown] tick result:", JSON.stringify(result));
+      })
+    );
+  },
+};
