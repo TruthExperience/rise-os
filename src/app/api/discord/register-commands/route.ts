@@ -52,10 +52,15 @@ export async function GET(req: NextRequest) {
     { name: "Tier 2", value: "Tier 2" },
   ];
 
+  // Extended to match round_checkins.status CHECK, which now also allows
+  // 'healer' (D2 drivers / D1 reserves / team principals) and 'damage'
+  // (commentator-only) alongside the original three.
   const checkinStatusChoices = [
     { name: "Confirmed", value: "confirmed" },
     { name: "Tentative", value: "tentative" },
     { name: "Declined", value: "declined" },
+    { name: "Healer (D2 / reserve / TP)", value: "healer" },
+    { name: "Damage (commentator)", value: "damage" },
   ];
 
   const commands = [
@@ -452,6 +457,48 @@ export async function GET(req: NextRequest) {
           type: 3,
           name: "season",
           description: "Season number (defaults to the round's season)",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "checkin-create",
+      description: "Post the race check-in card (track/weather/countdown + buttons) to a division's channel",
+      options: [
+        {
+          type: 3,
+          name: "division",
+          description: "Division code (e.g. D1, D2)",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name (defaults to the next scheduled race)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season number (defaults to the round's season)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "weather",
+          description: "Weather description (e.g. '16°C, Clouds')",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "ping_delivery",
+          description: "How pings are delivered for this race (e.g. 'Channel only', 'Role ping')",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "race_time",
+          description: "Race start time, ISO 8601 (e.g. 2026-09-06T15:00:00Z) — defaults to the round's date at 15:00 UTC",
           required: false,
         },
       ],
