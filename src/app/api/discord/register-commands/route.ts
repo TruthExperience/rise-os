@@ -198,6 +198,32 @@ export async function GET(req: NextRequest) {
         },
         {
           type: 1,
+          name: "assign",
+          description: "Assign this incident ticket to a steward (head steward only, run inside the ticket)",
+          options: [
+            {
+              type: 6,
+              name: "steward",
+              description: "Steward to assign this ticket to",
+              required: true,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "requesthelp",
+          description: "Flag this ticket for help from other stewards (run inside the ticket)",
+          options: [
+            {
+              type: 3,
+              name: "note",
+              description: "What you need help with",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
           name: "adduser",
           description: "Add a user to this incident ticket channel (run inside the ticket)",
           options: [
