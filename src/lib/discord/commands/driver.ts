@@ -80,7 +80,7 @@ registerCommand("sign-driver", async (ctx) => {
 
   const franchiseResult = await resolveFranchise(ctx.leagueId, franchiseInput);
   if ("error" in franchiseResult) {
-    return { content: franchiseResult.error, ephemeral: true };
+    return { content: `${franchiseResult.error}`, ephemeral: true };
   }
   const franchise = franchiseResult.franchise;
 
