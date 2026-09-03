@@ -176,6 +176,8 @@ import "./appeal";
 import "./moderation";
 // Side-effect import: registers the sign-driver/release-driver commands.
 import "./driver";
+// Side-effect import: registers the contract_* commands.
+import "./contract";
 // Side-effect import: registers the checkin/checkin-status/checkin-remind/
 // checkin-create/generate-grid commands.
 import "./checkin";
