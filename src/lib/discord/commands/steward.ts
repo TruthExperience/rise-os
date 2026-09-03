@@ -261,13 +261,46 @@ async function requireSteward(ctx: {
   return null;
 }
 
+// Head-steward gate for /steward assign — deliberately checked against
+// pitboss.driver_leagues.is_head_steward rather than a Discord role, so
+// this stays a single source of truth with the web app's permission
+// checks (getAuthedDriver / driver_leagues) instead of drifting from a
+// second, Discord-only concept of "head steward".
+async function requireHeadSteward(ctx: {
+  leagueId: string;
+  discordUserId: string;
+}): Promise<string | null> {
+  const supabase = createAdminClient();
+  const { data: driver } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id")
+    .eq("discord_id", ctx.discordUserId)
+    .maybeSingle();
+
+  if (!driver) return "Only the head steward can do that.";
+
+  const { data: role } = await supabase
+    .schema("pitboss")
+    .from("driver_leagues")
+    .select("is_head_steward")
+    .eq("driver_id", driver.id)
+    .eq("league_id", ctx.leagueId)
+    .maybeSingle();
+
+  if (!role?.is_head_steward) {
+    return "Only the head steward can do that.";
+  }
+  return null;
+}
+
 async function findIncidentByChannel(leagueId: string, channelId: string) {
   const supabase = createAdminClient();
   const { data } = await supabase
     .schema("pitboss")
     .from("incidents")
     .select(
-      "id, status, ticket_closed_at, ticket_transcript, reported_by, accused_driver_id, ticket_number, drivers!incidents_reported_by_fkey(discord_id)"
+      "id, status, ticket_closed_at, ticket_transcript, reported_by, accused_driver_id, ticket_number, assigned_steward_id, assigned_by, help_requested, drivers!incidents_reported_by_fkey(discord_id), assigned_steward:drivers!incidents_assigned_steward_id_fkey(discord_id)"
     )
     .eq("league_id", leagueId)
     .eq("ticket_channel_id", channelId)
@@ -896,4 +929,149 @@ registerCommand("steward_verdict", async (ctx) => {
   );
 
   return { content: "Verdict recorded and posted to the ticket.", ephemeral: false };
+});
+
+registerCommand("steward_assign", async (ctx) => {
+  const denied = await requireHeadSteward(ctx);
+  if (denied) return { content: denied, ephemeral: true };
+
+  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  if (!incident) {
+    return {
+      content: "This channel isn't linked to an incident ticket.",
+      ephemeral: true,
+    };
+  }
+  if (incident.ticket_closed_at) {
+    return {
+      content: "This ticket is closed — reopen it before reassigning.",
+      ephemeral: true,
+    };
+  }
+
+  const targetUserId = ctx.options.steward as string | undefined;
+  if (!targetUserId) {
+    return { content: "No steward specified.", ephemeral: true };
+  }
+
+  const supabase = createAdminClient();
+
+  const { data: targetDriver } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id")
+    .eq("discord_id", targetUserId)
+    .maybeSingle();
+
+  if (!targetDriver) {
+    return {
+      content:
+        "That user doesn't have a driver record yet — they need to interact with the bot once first.",
+      ephemeral: true,
+    };
+  }
+
+  const { data: targetRole } = await supabase
+    .schema("pitboss")
+    .from("driver_leagues")
+    .select("is_steward")
+    .eq("driver_id", targetDriver.id)
+    .eq("league_id", ctx.leagueId)
+    .maybeSingle();
+
+  if (!targetRole?.is_steward) {
+    return { content: "That user isn't a steward in this league.", ephemeral: true };
+  }
+
+  const assignerDriverId = await getOrCreateDriverId(ctx.discordUserId);
+
+  const { error } = await supabase
+    .schema("pitboss")
+    .from("incidents")
+    .update({
+      assigned_steward_id: targetDriver.id,
+      assigned_by: assignerDriverId,
+      assigned_at: new Date().toISOString(),
+      help_requested: false,
+      help_requested_at: null,
+      help_notes: null,
+    })
+    .eq("id", incident.id);
+
+  if (error) {
+    console.error("[steward_assign] update failed:", error);
+    return { content: `Couldn't assign the ticket: ${error.message}`, ephemeral: true };
+  }
+
+  const username = ctx.resolvedUsers[targetUserId]?.username ?? targetUserId;
+  await postTicketMessage(
+    ctx.channelId,
+    `📋 This ticket has been assigned to <@${targetUserId}> (${username}) by <@${ctx.discordUserId}>.`
+  );
+
+  return { content: `Assigned to ${username}.`, ephemeral: true };
+});
+
+registerCommand("steward_requesthelp", async (ctx) => {
+  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  if (!incident) {
+    return {
+      content: "This channel isn't linked to an incident ticket.",
+      ephemeral: true,
+    };
+  }
+
+  const assignedDiscordId = (incident as any).assigned_steward?.discord_id as
+    | string
+    | undefined;
+  if (!assignedDiscordId || assignedDiscordId !== ctx.discordUserId) {
+    return {
+      content: "Only the steward this ticket is assigned to can request help.",
+      ephemeral: true,
+    };
+  }
+  if (incident.ticket_closed_at) {
+    return { content: "This ticket is closed.", ephemeral: true };
+  }
+
+  const note = ctx.options.note as string | undefined;
+  const supabase = createAdminClient();
+
+  const { error } = await supabase
+    .schema("pitboss")
+    .from("incidents")
+    .update({
+      help_requested: true,
+      help_requested_at: new Date().toISOString(),
+      help_notes: note ?? null,
+    })
+    .eq("id", incident.id);
+
+  if (error) {
+    console.error("[steward_requesthelp] update failed:", error);
+    return { content: `Couldn't flag this for help: ${error.message}`, ephemeral: true };
+  }
+
+  const { data: leagueConfig } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("discord_steward_role_id")
+    .eq("id", ctx.leagueId)
+    .maybeSingle();
+
+  const rolePrefix = leagueConfig?.discord_steward_role_id
+    ? `<@&${leagueConfig.discord_steward_role_id}> `
+    : "";
+
+  await postTicketMessage(
+    ctx.channelId,
+    [
+      `🆘 ${rolePrefix}<@${ctx.discordUserId}> requested assistance on this ticket.`,
+      note ? `> ${note}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+
+  return { content: "Help requested — stewards have been pinged in the ticket.", ephemeral: true };
 });
