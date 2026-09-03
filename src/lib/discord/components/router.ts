@@ -86,26 +86,57 @@ async function handleCheckinButton(interaction: any, customId: string) {
   if ("error" in driverResult) {
     return ephemeralError(`Couldn't resolve your driver record: ${driverResult.error}`);
   }
+  const driverId = driverResult.driver.id;
 
-  const { error: upsertError } = await supabase
+  // Deselect: clicking the status you already have on file clears your
+  // response instead of re-saving it. Anything else (no existing
+  // response, or a different status) upserts as before.
+  const { data: existing, error: existingError } = await supabase
     .schema("pitboss")
     .from("round_checkins")
-    .upsert(
-      {
-        round_id: post.round_id,
-        driver_id: driverResult.driver.id,
-        league_id: league.id,
-        division_id: post.division_id,
-        status,
-        checked_in_at: new Date().toISOString(),
-        responded_via: "button",
-      },
-      { onConflict: "round_id,driver_id" }
-    );
+    .select("status")
+    .eq("round_id", post.round_id)
+    .eq("driver_id", driverId)
+    .maybeSingle();
 
-  if (upsertError) {
-    console.error("[checkin_btn] upsert failed:", upsertError);
-    return ephemeralError(`Something went wrong saving your response: ${upsertError.message}`);
+  if (existingError) {
+    console.error("[checkin_btn] existing-response lookup failed:", existingError);
+    return ephemeralError(`Something went wrong checking your current response: ${existingError.message}`);
+  }
+
+  if (existing && existing.status === status) {
+    const { error: deleteError } = await supabase
+      .schema("pitboss")
+      .from("round_checkins")
+      .delete()
+      .eq("round_id", post.round_id)
+      .eq("driver_id", driverId);
+
+    if (deleteError) {
+      console.error("[checkin_btn] deselect delete failed:", deleteError);
+      return ephemeralError(`Something went wrong clearing your response: ${deleteError.message}`);
+    }
+  } else {
+    const { error: upsertError } = await supabase
+      .schema("pitboss")
+      .from("round_checkins")
+      .upsert(
+        {
+          round_id: post.round_id,
+          driver_id: driverId,
+          league_id: league.id,
+          division_id: post.division_id,
+          status,
+          checked_in_at: new Date().toISOString(),
+          responded_via: "button",
+        },
+        { onConflict: "round_id,driver_id" }
+      );
+
+    if (upsertError) {
+      console.error("[checkin_btn] upsert failed:", upsertError);
+      return ephemeralError(`Something went wrong saving your response: ${upsertError.message}`);
+    }
   }
 
   const { data: checkins, error: checkinsError } = await supabase
