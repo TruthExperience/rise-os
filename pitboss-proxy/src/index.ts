@@ -15,6 +15,14 @@
 // production because it was left as a comment ("UNCHANGED from what's
 // currently deployed") instead of the real code being merged in. This
 // restores the full handler set alongside the cron addition.
+//
+// PATCH (2026-09-03): checkin-countdown cron split into two tiers.
+// Imminent posts (race_time within 90 min) still patch every tick, same
+// as before. Posts farther out (up to 48h) now also get patched, but
+// only on every 5th tick (~every 5 min) instead of never — previously
+// anything outside the 90-minute window was silently skipped forever,
+// which is why a countdown for a race >90 min away only ever moved on a
+// check-in button click (embed rebuild), never from the cron itself.
 
 interface Env {
   OPENROUTER_API_KEY: string;
@@ -678,7 +686,7 @@ function formatDigitalCountdown(raceTimeIso: string | null): string | null {
   const seconds = totalSeconds % 60;
   const pad = (n: number) => String(n).padStart(2, "0");
 
-  return `⏱️ **${pad(hours)}:${pad(minutes)}:${pad(seconds)}**`;
+  return `⏱ **${pad(hours)}:${pad(minutes)}:${pad(seconds)}**`;
 }
 
 function refreshCountdownDescription(description: string, raceTimeIso: string): string {
@@ -703,13 +711,32 @@ function refreshCountdownDescription(description: string, raceTimeIso: string): 
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
-async function fetchActiveCheckinPosts(env: any) {
-  const now = new Date();
-  const soon = new Date(now.getTime() + 90 * 60 * 1000);
+interface CheckinPostRow {
+  id: string;
+  discord_channel_id: string;
+  discord_message_id: string;
+  race_time: string;
+  description_frozen: boolean;
+}
+
+// PATCH (2026-09-03): split into two tiers instead of one 90-minute
+// window. Previously, any post whose race_time was more than 90 minutes
+// out was silently excluded from every tick, forever — the countdown for
+// it only ever moved when a driver clicked a check-in button (which
+// rebuilds the embed directly, bypassing this fetch entirely). Now
+// anything within 48h gets picked up too, just less frequently.
+
+const IMMINENT_WINDOW_MS = 90 * 60 * 1000; // every tick, same as before
+const UPCOMING_WINDOW_MS = 48 * 60 * 60 * 1000; // every 5th tick only
+const UPCOMING_TICK_INTERVAL_MIN = 5;
+
+async function fetchCheckinPosts(env: any, fromMs: number, toMs: number): Promise<CheckinPostRow[]> {
+  const from = new Date(fromMs).toISOString();
+  const to = new Date(toMs).toISOString();
   const url = `${env.SUPABASE_URL}/rest/v1/round_checkin_posts` +
     `?select=id,discord_channel_id,discord_message_id,race_time,description_frozen` +
-    `&race_time=gte.${now.toISOString()}` +
-    `&race_time=lte.${soon.toISOString()}` +
+    `&race_time=gte.${from}` +
+    `&race_time=lte.${to}` +
     `&discord_message_id=not.is.null` +
     `&description_frozen=is.false`;
 
@@ -727,6 +754,36 @@ async function fetchActiveCheckinPosts(env: any) {
   return await res.json();
 }
 
+/** Imminent tier: race_time within the next 90 minutes. Every tick. */
+async function fetchImminentCheckinPosts(env: any): Promise<CheckinPostRow[]> {
+  const now = Date.now();
+  return fetchCheckinPosts(env, now, now + IMMINENT_WINDOW_MS);
+}
+
+/**
+ * Upcoming tier: race_time between 90 minutes and 48 hours out. Only
+ * fetched on every 5th tick (~every 5 min) — a race that's hours away
+ * doesn't need second-by-second freshness, just visible movement over
+ * time. Keeps Discord edit + Supabase read volume down for leagues
+ * running many simultaneous division check-ins.
+ */
+async function fetchUpcomingCheckinPosts(env: any): Promise<CheckinPostRow[]> {
+  const now = Date.now();
+  return fetchCheckinPosts(env, now + IMMINENT_WINDOW_MS, now + UPCOMING_WINDOW_MS);
+}
+
+/**
+ * Whether this tick should also process the upcoming tier. Gated on
+ * wall-clock minute rather than an in-memory counter, since a Worker's
+ * scheduled() invocation doesn't persist state between ticks — using
+ * the minute-of-hour keeps this deterministic across restarts/redeploys
+ * instead of drifting based on when the Worker happened to last run.
+ */
+function isUpcomingTierTick(scheduledTimeMs: number): boolean {
+  const minute = new Date(scheduledTimeMs).getUTCMinutes();
+  return minute % UPCOMING_TICK_INTERVAL_MIN === 0;
+}
+
 async function markPostFrozen(postId: string, env: any) {
   await fetch(`${env.SUPABASE_URL}/rest/v1/round_checkin_posts?id=eq.${postId}`, {
     method: "PATCH",
@@ -741,55 +798,76 @@ async function markPostFrozen(postId: string, env: any) {
   });
 }
 
-async function handleCheckinCountdownTick(env: any) {
-  const posts = await fetchActiveCheckinPosts(env);
-  if (posts.length === 0) return { checked: 0, patched: 0 };
+async function patchCheckinPost(post: CheckinPostRow, token: string, env: any): Promise<boolean> {
+  const msgRes = await fetch(
+    `${DISCORD_API_BASE}/channels/${post.discord_channel_id}/messages/${post.discord_message_id}`,
+    { headers: { Authorization: `Bot ${token}` } }
+  );
+  if (!msgRes.ok) {
+    console.error(`[checkin-countdown] fetch message failed for post ${post.id}:`, msgRes.status);
+    return false;
+  }
+  const message: any = await msgRes.json();
+  const embed = message.embeds?.[0];
+  if (!embed) return false;
 
+  const newDescription = refreshCountdownDescription(embed.description ?? "", post.race_time);
+  const patchRes = await fetch(
+    `${DISCORD_API_BASE}/channels/${post.discord_channel_id}/messages/${post.discord_message_id}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ embeds: [{ ...embed, description: newDescription }] })
+    }
+  );
+  if (!patchRes.ok) {
+    console.error(`[checkin-countdown] patch failed for post ${post.id}:`, patchRes.status, await patchRes.text());
+    return false;
+  }
+
+  if (new Date(post.race_time).getTime() - Date.now() <= 0) {
+    await markPostFrozen(post.id, env);
+  }
+  return true;
+}
+
+async function handleCheckinCountdownTick(env: any, scheduledTimeMs: number = Date.now()) {
   const token = env.PITBOSS_DISCORD_BOT_TOKEN;
   if (!token) {
     console.error("[checkin-countdown] PITBOSS_DISCORD_BOT_TOKEN not set — skipping tick.");
-    return { checked: posts.length, patched: 0, error: "no_bot_token" };
+    return { checked: 0, patched: 0, error: "no_bot_token" };
+  }
+
+  const runUpcomingTier = isUpcomingTierTick(scheduledTimeMs);
+
+  const [imminentPosts, upcomingPosts] = await Promise.all([
+    fetchImminentCheckinPosts(env),
+    runUpcomingTier ? fetchUpcomingCheckinPosts(env) : Promise.resolve([] as CheckinPostRow[])
+  ]);
+
+  const posts = [...imminentPosts, ...upcomingPosts];
+  if (posts.length === 0) {
+    return { checked: 0, patched: 0, ranUpcomingTier: runUpcomingTier };
   }
 
   let patched = 0;
   for (const post of posts) {
     try {
-      const msgRes = await fetch(
-        `${DISCORD_API_BASE}/channels/${post.discord_channel_id}/messages/${post.discord_message_id}`,
-        { headers: { Authorization: `Bot ${token}` } }
-      );
-      if (!msgRes.ok) {
-        console.error(`[checkin-countdown] fetch message failed for post ${post.id}:`, msgRes.status);
-        continue;
-      }
-      const message = await msgRes.json();
-      const embed = message.embeds?.[0];
-      if (!embed) continue;
-
-      const newDescription = refreshCountdownDescription(embed.description ?? "", post.race_time);
-      const patchRes = await fetch(
-        `${DISCORD_API_BASE}/channels/${post.discord_channel_id}/messages/${post.discord_message_id}`,
-        {
-          method: "PATCH",
-          headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ embeds: [{ ...embed, description: newDescription }] })
-        }
-      );
-      if (!patchRes.ok) {
-        console.error(`[checkin-countdown] patch failed for post ${post.id}:`, patchRes.status, await patchRes.text());
-        continue;
-      }
-      patched++;
-
-      if (new Date(post.race_time).getTime() - Date.now() <= 0) {
-        await markPostFrozen(post.id, env);
-      }
+      const ok = await patchCheckinPost(post, token, env);
+      if (ok) patched++;
     } catch (err) {
       console.error(`[checkin-countdown] tick failed for post ${post.id}:`, err);
       continue;
     }
   }
-  return { checked: posts.length, patched };
+
+  return {
+    checked: posts.length,
+    patched,
+    imminent: imminentPosts.length,
+    upcoming: upcomingPosts.length,
+    ranUpcomingTier: runUpcomingTier
+  };
 }
 
 // ─── Router ─────────────────────────────────────────────────────────────────
@@ -834,7 +912,7 @@ export default {
 
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(
-      handleCheckinCountdownTick(env).then((result) => {
+      handleCheckinCountdownTick(env, event.scheduledTime).then((result) => {
         console.log("[checkin-countdown] tick result:", JSON.stringify(result));
       })
     );
