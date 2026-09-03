@@ -1,10 +1,10 @@
 // registry.ts
 //
 // Central registry for Discord slash command handlers. Individual command
-// files (steward.ts, appeal.ts, driver.ts, roster.ts, etc.) call
-// registerCommand() at module load time to add themselves here; router.ts
-// reads commandRegistry to dispatch an incoming interaction to the right
-// handler.
+// files (steward.ts, appeal.ts, driver.ts, roster.ts, moderation.ts, etc.)
+// call registerCommand() at module load time to add themselves here;
+// router.ts reads commandRegistry to dispatch an incoming interaction to
+// the right handler.
 
 export type CommandContext = {
   discordUserId: string;
@@ -15,10 +15,13 @@ export type CommandContext = {
   resolvedUsers: Record<string, { username: string }>;
 };
 
-export type CommandResponse = {
-  content: string;
-  ephemeral?: boolean;
-};
+// Most commands respond immediately with a message. Slow commands (e.g.
+// lockdown/kick/ban touching many members) instead defer the interaction
+// and do the real work in `background`, which resolves to the eventual
+// follow-up message Discord should post once it finishes.
+export type CommandResponse =
+  | { content: string; ephemeral?: boolean }
+  | { defer: boolean; ephemeral?: boolean; background: () => Promise<{ content: string }> };
 
 export type CommandHandler = (ctx: CommandContext) => Promise<CommandResponse>;
 
