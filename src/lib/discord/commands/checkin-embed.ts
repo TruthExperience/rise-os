@@ -28,6 +28,17 @@ const STATUS_META: Record<
   damage: { label: "Damage", emoji: "🗡️", buttonStyle: 2 }, // SECONDARY
 };
 
+// What each button means for this league. Shown as a legend field so
+// drivers know what to press without asking in chat.
+const STATUS_MEANINGS: Record<CheckinStatus, string> = {
+  confirmed: "D1 tick only",
+  declined: "Unavailable for both Divisions to tick",
+  tentative:
+    "not sure but must be changed on the day — if not, you will not be racing (D1 tick only)",
+  healer: "for D2 drivers, D1 reserves, and Team Principals to tick",
+  damage: "only Commentator to tick",
+};
+
 export interface CheckinRoundInfo {
   name: string | null;
   round_number: number | null;
@@ -73,6 +84,29 @@ function raceLights(raceTimeIso: string | null): string {
 }
 
 /**
+ * Flag emojis are built from two Unicode "regional indicator" code
+ * points, one per ISO 3166-1 alpha-2 letter (🇨🇳 = 🇨 + 🇳 = "cn").
+ * This decodes flag_emoji back into that 2-letter code so we can pull
+ * a real flag image from a CDN without storing a separate image URL.
+ */
+function flagEmojiToCountryCode(flagEmoji: string | null): string | null {
+  if (!flagEmoji) return null;
+  const codePoints = Array.from(flagEmoji).map((char) => char.codePointAt(0) ?? 0);
+  if (codePoints.length !== 2) return null;
+
+  const REGIONAL_INDICATOR_BASE = 0x1f1e6; // 🇦
+  const letters = codePoints.map((cp) => cp - REGIONAL_INDICATOR_BASE);
+  if (letters.some((n) => n < 0 || n > 25)) return null;
+
+  return letters.map((n) => String.fromCharCode(97 + n)).join(""); // e.g. "cn"
+}
+
+function flagImageUrl(flagEmoji: string | null): string | undefined {
+  const code = flagEmojiToCountryCode(flagEmoji);
+  return code ? `https://flagcdn.com/w320/${code}.png` : undefined;
+}
+
+/**
  * grouped[status] = array of discord user IDs who responded with that
  * status. Missing/empty arrays render as "none".
  */
@@ -101,7 +135,15 @@ export function buildCheckinEmbed(params: {
     );
   }
 
-  const fields = CHECKIN_STATUSES.map((status) => {
+  const legendField = {
+    name: "How to Respond",
+    value: CHECKIN_STATUSES.map(
+      (status) => `${STATUS_META[status].emoji} **${STATUS_META[status].label}** = ${STATUS_MEANINGS[status]}`
+    ).join("\n"),
+    inline: false,
+  };
+
+  const statusFields = CHECKIN_STATUSES.map((status) => {
     const meta = STATUS_META[status];
     const ids = grouped[status] ?? [];
     return {
@@ -111,10 +153,13 @@ export function buildCheckinEmbed(params: {
     };
   });
 
+  const flagUrl = flagImageUrl(round.flag_emoji);
+
   return {
     title: `${round.flag_emoji ?? "🏁"} ${roundLabel(round)} — Division ${divisionCode}`,
     description: descriptionParts.join("\n"),
-    fields,
+    fields: [legendField, ...statusFields],
+    image: flagUrl ? { url: flagUrl } : undefined,
     color: 0xe10600,
   };
 }
