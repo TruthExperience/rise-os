@@ -360,7 +360,7 @@ registerCommand("checkin-create", async (ctx) => {
 
   const divisionResult = await resolveDivision(ctx.leagueId, divisionInput);
   if ("error" in divisionResult) {
-    return { content: divisionResult.error, ephemeral: true };
+    return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
   const division = divisionResult.division;
 
