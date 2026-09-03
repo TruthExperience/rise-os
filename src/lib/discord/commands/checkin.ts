@@ -21,6 +21,12 @@ import {
 // confirmed/tentative/declined/no_response. round_checkins also gained a
 // division_id column (FK -> rise_os.league_divisions) so a response is
 // scoped to D1 or D2.
+//
+// division_id now exists on calendar_rounds too, and D1/D2 rows reuse the
+// same round_number (e.g. two separate "round 5" rows with different
+// race_date/circuit). Any resolveRound() call that doesn't pass a
+// divisionId is ambiguous once both divisions have rows for that round —
+// every command below resolves a division first and threads it through.
 
 const ADMIN_FLAGS = [
   "is_owner",
@@ -65,19 +71,30 @@ export async function getOrCreateDriver(
  * round_number if numeric, else name), or falls back to the next
  * upcoming round for the league/season if none was given.
  *
+ * Pass `divisionId` whenever it's known — D1 and D2 rows share
+ * round_number values (and can share names/dates ranges), so an
+ * unscoped lookup can silently return the wrong division's round once
+ * both divisions have calendars loaded. `divisionId` is optional only
+ * to support leagues that haven't set up divisions at all.
+ *
  * NOTE: calendar_rounds lives in the rise_os schema, not pitboss.
  */
 export async function resolveRound(
   leagueId: string,
   roundInput: string | undefined,
-  seasonInput: string | undefined
+  seasonInput: string | undefined,
+  divisionId?: string
 ) {
   const supabase = createAdminClient();
   let query = supabase
     .schema("rise_os")
     .from("calendar_rounds")
-    .select("id, season_number, round_number, name, race_date, circuit, country, flag_emoji")
+    .select("id, season_number, round_number, name, race_date, circuit, country, flag_emoji, division_id")
     .eq("league_id", leagueId);
+
+  if (divisionId) {
+    query = query.eq("division_id", divisionId);
+  }
 
   if (seasonInput) {
     const seasonNum = Number(seasonInput);
@@ -108,7 +125,9 @@ export async function resolveRound(
 }
 
 /**
- * Resolves a division (D1/D2/etc.) for the league, case-insensitively.
+ * Resolves a division (D1/D2/etc.) for the league, case-insensitively,
+ * from an explicit division code. Used by admin commands (checkin-create)
+ * where the invoking channel isn't necessarily the division's own channel.
  * A league with no rows in league_divisions has no per-division
  * check-in channels set up yet — surfaced as an error rather than a
  * silent fallback.
@@ -127,6 +146,34 @@ async function resolveDivision(leagueId: string, divisionInput: string) {
   if (!data) return { error: `No division "${divisionInput}" set up for this league.` } as const;
   if (!data.discord_checkin_channel_id) {
     return { error: `Division ${data.division_code} has no check-in channel configured.` } as const;
+  }
+  return { division: data } as const;
+}
+
+/**
+ * Resolves a division by matching the invoking channel against
+ * league_divisions.discord_checkin_channel_id. Used by the
+ * driver/general-purpose commands (checkin, checkin-status,
+ * checkin-remind, generate-grid), which don't take a division option —
+ * running them in a division's check-in channel is what scopes them.
+ * Returns an error if the channel isn't registered to any division,
+ * rather than falling back to an ambiguous league-wide lookup.
+ */
+async function resolveDivisionByChannel(leagueId: string, channelId: string) {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .schema("rise_os")
+    .from("league_divisions")
+    .select("id, division_code, discord_checkin_channel_id")
+    .eq("league_id", leagueId)
+    .eq("discord_checkin_channel_id", channelId)
+    .maybeSingle();
+
+  if (error) return { error: error.message } as const;
+  if (!data) {
+    return {
+      error: "This command needs to be run in a division's check-in channel — couldn't match this channel to a division.",
+    } as const;
   }
   return { division: data } as const;
 }
@@ -163,7 +210,18 @@ registerCommand("checkin", async (ctx) => {
     return { content: "status is required.", ephemeral: true };
   }
 
-  const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
+  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  if ("error" in divisionResult) {
+    return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
+  }
+  const division = divisionResult.division;
+
+  const roundResult = await resolveRound(
+    ctx.leagueId,
+    ctx.options.round as string | undefined,
+    ctx.options.season as string | undefined,
+    division.id
+  );
   if ("error" in roundResult) {
     return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
   }
@@ -181,6 +239,7 @@ registerCommand("checkin", async (ctx) => {
     .upsert(
       {
         round_id: round.id,
+        division_id: division.id,
         driver_id: driverResult.driver.id,
         league_id: ctx.leagueId,
         status,
@@ -203,7 +262,18 @@ registerCommand("checkin-status", async (ctx) => {
     return { content: "You don't have permission to view check-in status.", ephemeral: true };
   }
 
-  const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
+  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  if ("error" in divisionResult) {
+    return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
+  }
+  const division = divisionResult.division;
+
+  const roundResult = await resolveRound(
+    ctx.leagueId,
+    ctx.options.round as string | undefined,
+    ctx.options.season as string | undefined,
+    division.id
+  );
   if ("error" in roundResult) {
     return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
   }
@@ -214,7 +284,8 @@ registerCommand("checkin-status", async (ctx) => {
     .schema("pitboss")
     .from("round_checkins")
     .select("status, driver_id, drivers(discord_id)")
-    .eq("round_id", round.id);
+    .eq("round_id", round.id)
+    .eq("division_id", division.id);
 
   if (error) {
     console.error("[checkin-status] lookup failed:", error);
@@ -236,7 +307,7 @@ registerCommand("checkin-status", async (ctx) => {
   }
 
   const lines = [
-    `**Check-in status — ${roundLabel(round)}**`,
+    `**Check-in status — ${roundLabel(round)} — Division ${division.division_code}**`,
     `Confirmed (${byStatus.confirmed.length}): ${byStatus.confirmed.join(", ") || "none"}`,
     `Tentative (${byStatus.tentative.length}): ${byStatus.tentative.join(", ") || "none"}`,
     `Declined (${byStatus.declined.length}): ${byStatus.declined.join(", ") || "none"}`,
@@ -253,11 +324,22 @@ registerCommand("checkin-remind", async (ctx) => {
     return { content: "You don't have permission to send check-in reminders.", ephemeral: true };
   }
 
+  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  if ("error" in divisionResult) {
+    return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
+  }
+  const division = divisionResult.division;
+
   return {
     defer: true,
     ephemeral: false,
     background: async () => {
-      const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
+      const roundResult = await resolveRound(
+        ctx.leagueId,
+        ctx.options.round as string | undefined,
+        ctx.options.season as string | undefined,
+        division.id
+      );
       if ("error" in roundResult) {
         return { content: roundResult.error ?? "Something went wrong resolving the round." };
       }
@@ -283,7 +365,8 @@ registerCommand("checkin-remind", async (ctx) => {
         .schema("pitboss")
         .from("round_checkins")
         .select("driver_id")
-        .eq("round_id", round.id);
+        .eq("round_id", round.id)
+        .eq("division_id", division.id);
 
       if (checkinErr) {
         console.error("[checkin-remind] check-in lookup failed:", checkinErr);
@@ -340,6 +423,11 @@ registerCommand("checkin-remind", async (ctx) => {
  * only"), race_time (optional ISO 8601 datetime — if omitted, falls
  * back to the round's race_date at 15:00 UTC so the countdown still
  * has something to render against).
+ *
+ * Division is resolved from the `division` option, not the invoking
+ * channel — this command is typically run from an admin/mod channel,
+ * not the division's own check-in channel, so it uses resolveDivision
+ * (explicit code) rather than resolveDivisionByChannel.
  */
 registerCommand("checkin-create", async (ctx) => {
   const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
@@ -352,17 +440,22 @@ registerCommand("checkin-create", async (ctx) => {
     return { content: "division is required (e.g. \"D1\").", ephemeral: true };
   }
 
-  const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
-  if ("error" in roundResult) {
-    return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
-  }
-  const round = roundResult.round;
-
   const divisionResult = await resolveDivision(ctx.leagueId, divisionInput);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
   const division = divisionResult.division;
+
+  const roundResult = await resolveRound(
+    ctx.leagueId,
+    ctx.options.round as string | undefined,
+    ctx.options.season as string | undefined,
+    division.id
+  );
+  if ("error" in roundResult) {
+    return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
+  }
+  const round = roundResult.round;
 
   const weatherText = (ctx.options.weather as string | undefined) ?? null;
   const pingDelivery = (ctx.options.ping_delivery as string | undefined) ?? "Channel only";
@@ -452,9 +545,20 @@ registerCommand("generate-grid", async (ctx) => {
     return { content: "You don't have permission to generate the grid.", ephemeral: true };
   }
 
+  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  if ("error" in divisionResult) {
+    return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
+  }
+  const division = divisionResult.division;
+
   const regenerate = Boolean(ctx.options.regenerate);
 
-  const roundResult = await resolveRound(ctx.leagueId, ctx.options.round as string | undefined, ctx.options.season as string | undefined);
+  const roundResult = await resolveRound(
+    ctx.leagueId,
+    ctx.options.round as string | undefined,
+    ctx.options.season as string | undefined,
+    division.id
+  );
   if ("error" in roundResult) {
     return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
   }
@@ -481,6 +585,7 @@ registerCommand("generate-grid", async (ctx) => {
     .from("round_checkins")
     .select("driver_id, drivers(discord_id)")
     .eq("round_id", round.id)
+    .eq("division_id", division.id)
     .eq("status", "confirmed");
 
   if (confirmedErr) {
@@ -529,7 +634,7 @@ registerCommand("generate-grid", async (ctx) => {
   }
 
   const skipped = confirmed.length - rows.length;
-  const lines = [`**Grid — ${roundLabel(round)}** (${rows.length} drivers)`];
+  const lines = [`**Grid — ${roundLabel(round)} — Division ${division.division_code}** (${rows.length} drivers)`];
   for (const r of rosters ?? []) {
     const discordId = (confirmed.find((c) => c.driver_id === r.driver_id) as any)?.drivers?.discord_id;
     const franchiseName = (r as any).franchises?.name ?? "Unknown";
