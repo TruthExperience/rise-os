@@ -1,11 +1,27 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 
 /**
  * One-time-use endpoint to register Discord slash commands.
- * Visit this URL once in a browser to register commands with Discord.
+ * Protected by REGISTER_COMMANDS_SECRET — pass it as ?secret=... in the URL.
  * DELETE THIS FILE after confirming it worked.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const secret = req.nextUrl.searchParams.get("secret");
+  const expected = process.env.REGISTER_COMMANDS_SECRET;
+
+  if (!expected) {
+    return NextResponse.json(
+      { error: "REGISTER_COMMANDS_SECRET not set" },
+      { status: 500 }
+    );
+  }
+
+  if (secret !== expected) {
+    return new NextResponse("Unauthorized", { status: 401 });
+  }
+
   const appId = process.env.PITBOSS_DISCORD_APPLICATION_ID;
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
 
@@ -52,12 +68,12 @@ export async function GET() {
       description: "Report and check race incidents",
       options: [
         {
-          type: 1, // SUB_COMMAND
+          type: 1,
           name: "report",
           description: "File an incident report",
           options: [
             {
-              type: 3, // STRING
+              type: 3,
               name: "type",
               description: "Incident type (e.g. Collision / Contact, Track Limits)",
               required: true,
@@ -69,13 +85,13 @@ export async function GET() {
               required: true,
             },
             {
-              type: 6, // USER
+              type: 6,
               name: "accused",
               description: "Driver the report is against",
               required: false,
             },
             {
-              type: 4, // INTEGER
+              type: 4,
               name: "lap",
               description: "Lap number",
               required: false,
@@ -120,7 +136,7 @@ export async function GET() {
           description: "Submit your defense if you've been named in an incident (run inside the ticket)",
           options: [
             {
-              type: 3, // STRING
+              type: 3,
               name: "response",
               description: "Your side of what happened",
               required: true,
@@ -144,7 +160,7 @@ export async function GET() {
           description: "Record the final steward verdict (run inside the ticket)",
           options: [
             {
-              type: 3, // STRING
+              type: 3,
               name: "verdict",
               description: "The ruling",
               required: true,
@@ -156,7 +172,7 @@ export async function GET() {
               required: false,
             },
             {
-              type: 4, // INTEGER
+              type: 4,
               name: "points",
               description: "Penalty points",
               required: false,
@@ -181,7 +197,7 @@ export async function GET() {
           description: "Add a user to this incident ticket channel (run inside the ticket)",
           options: [
             {
-              type: 6, // USER
+              type: 6,
               name: "user",
               description: "User to add to the ticket",
               required: true,
@@ -194,7 +210,7 @@ export async function GET() {
           description: "Remove a user from this incident ticket channel (run inside the ticket)",
           options: [
             {
-              type: 6, // USER
+              type: 6,
               name: "user",
               description: "User to remove from the ticket",
               required: true,
@@ -208,12 +224,12 @@ export async function GET() {
       description: "Look up league rulebook articles",
       options: [
         {
-          type: 1, // SUB_COMMAND
+          type: 1,
           name: "search",
           description: "Search the rulebook",
           options: [
             {
-              type: 3, // STRING
+              type: 3,
               name: "query",
               description: "What to search for",
               required: true,
@@ -227,12 +243,12 @@ export async function GET() {
       description: "Manage league team rosters",
       options: [
         {
-          type: 1, // SUB_COMMAND
+          type: 1,
           name: "view",
           description: "View the current roster",
           options: [
             {
-              type: 3, // STRING
+              type: 3,
               name: "tier",
               description: "Filter by tier",
               required: false,
@@ -246,7 +262,7 @@ export async function GET() {
           description: "Assign a driver to a team",
           options: [
             {
-              type: 6, // USER
+              type: 6,
               name: "driver",
               description: "Driver to assign",
               required: true,
@@ -266,7 +282,7 @@ export async function GET() {
               choices: tierChoices,
             },
             {
-              type: 5, // BOOLEAN
+              type: 5,
               name: "principal",
               description: "Assign as Team Principal?",
               required: false,
@@ -305,13 +321,13 @@ export async function GET() {
       description: "Sign a driver to a franchise (employment — contracts/cap, not the EA car-class roster)",
       options: [
         {
-          type: 6, // USER
+          type: 6,
           name: "driver",
           description: "Driver to sign",
           required: true,
         },
         {
-          type: 3, // STRING
+          type: 3,
           name: "franchise",
           description: "Franchise name or abbreviation (e.g. McLaren, or 'McLaren 25' if a division match is ambiguous)",
           required: true,
@@ -335,7 +351,7 @@ export async function GET() {
       description: "Release a driver from their current franchise",
       options: [
         {
-          type: 6, // USER
+          type: 6,
           name: "driver",
           description: "Driver to release",
           required: true,
@@ -359,7 +375,7 @@ export async function GET() {
       description: "Check in (or out) for an upcoming race",
       options: [
         {
-          type: 3, // STRING
+          type: 3,
           name: "status",
           description: "Your attendance status",
           required: true,
@@ -432,7 +448,7 @@ export async function GET() {
           required: false,
         },
         {
-          type: 5, // BOOLEAN
+          type: 5,
           name: "regenerate",
           description: "Rebuild an existing grid for this round",
           required: false,
@@ -444,12 +460,12 @@ export async function GET() {
       description: "File or review an appeal on a resolved incident",
       options: [
         {
-          type: 1, // SUB_COMMAND
+          type: 1,
           name: "file",
           description: "File an appeal on a resolved or dismissed incident",
           options: [
             {
-              type: 3, // STRING
+              type: 3,
               name: "incident",
               description: "Incident short ID",
               required: true,
@@ -473,7 +489,7 @@ export async function GET() {
           description: "Steward: rule on an open appeal",
           options: [
             {
-              type: 3, // STRING
+              type: 3,
               name: "incident",
               description: "Incident short ID",
               required: true,
@@ -502,7 +518,7 @@ export async function GET() {
               required: false,
             },
             {
-              type: 4, // INTEGER
+              type: 4,
               name: "new_points",
               description: "Revised penalty points (if overturned)",
               required: false,
@@ -524,13 +540,13 @@ export async function GET() {
       dm_permission: false,
       options: [
         {
-          type: 6, // USER
+          type: 6,
           name: "user",
           description: "Member to kick",
           required: true,
         },
         {
-          type: 3, // STRING
+          type: 3,
           name: "reason",
           description: "Reason for the kick",
           required: false,
@@ -544,13 +560,13 @@ export async function GET() {
       dm_permission: false,
       options: [
         {
-          type: 6, // USER
+          type: 6,
           name: "user",
           description: "Member to ban",
           required: true,
         },
         {
-          type: 3, // STRING
+          type: 3,
           name: "reason",
           description: "Reason for the ban",
           required: false,
@@ -564,7 +580,7 @@ export async function GET() {
       dm_permission: false,
       options: [
         {
-          type: 3, // STRING
+          type: 3,
           name: "reason",
           description: "Reason for the lockdown",
           required: false,
