@@ -8,6 +8,11 @@ type DriverMatch = {
   discordId: string;
 };
 
+type TeamMatch = {
+  id: string;
+  teamName: string;
+};
+
 // Driver options are Discord user mentions (type 6) throughout this
 // codebase (contract_view, roster_assign, sign-driver) — not free-text
 // name search like cap_edit's franchise option. Resolve by discord_id,
@@ -59,6 +64,53 @@ async function resolveDriverByDiscordId(
   };
 }
 
+// TP is per-team, scoped by team_rosters (car_class_team_id + league_id +
+// season) — NOT rise_os.franchises.gm_id, and NOT driver_leagues.is_team_principal
+// (that's the global per-league role flag requireLeagueOwner checks below; a
+// driver can hold that role without being any specific team's TP this season).
+async function resolveTeamByName(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  teamName: string
+): Promise<{ team?: TeamMatch; error?: string }> {
+  const { data: rosterRow, error } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("car_class_team_id, car_class_teams!inner(id, team_name)")
+    .eq("league_id", leagueId)
+    .ilike("car_class_teams.team_name", `%${teamName}%`)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[tp_view] team lookup failed:", error);
+    return { error: `Couldn't look up that team: ${error.message}` };
+  }
+  if (!rosterRow) {
+    return { error: `No team matching "${teamName}" found in this league.` };
+  }
+
+  const team = (rosterRow as any).car_class_teams;
+  return { team: { id: team.id, teamName: team.team_name } };
+}
+
+async function resolveCurrentSeason(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("season")
+    .eq("league_id", leagueId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data.season;
+}
+
 // Gated on driver_leagues.is_owner / is_co_owner, matching the
 // requireLeagueOwner() convention already used by cap_edit and
 // kick/ban/lockdown. Deliberately not leagues.commissioner_id — that
@@ -101,6 +153,13 @@ registerCommand("ddv_view", async (ctx) => {
   const supabase = createAdminClient();
   // Defaults to yourself, matching contract_view's convention.
   const targetDiscordId = (ctx.options.driver as string | undefined) ?? ctx.discordUserId;
+
+  // Looking up your own DDV is always allowed; looking up someone else's
+  // requires owner/co-owner, same gate as ddv_edit.
+  if (targetDiscordId !== ctx.discordUserId) {
+    const denied = await requireLeagueOwner(ctx);
+    if (denied) return { content: denied, ephemeral: true };
+  }
 
   const resolved = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
   if (resolved.error || !resolved.driver) {
@@ -199,4 +258,71 @@ registerCommand("ddv_edit", async (ctx) => {
     content: `Updated **${resolved.driver.displayName}**'s DDV: ${fmtDDV(previousDDV)} → ${fmtDDV(newDDV)}${clampedNote}.\nReason: ${reason}`,
     ephemeral: false,
   };
+});
+
+registerCommand("tp_view", async (ctx) => {
+  const supabase = createAdminClient();
+  const teamName = ctx.options.team as string | undefined;
+  const season = (ctx.options.season as string | undefined) ?? (await resolveCurrentSeason(supabase, ctx.leagueId));
+
+  if (!season) {
+    return { content: "No team rosters found for this league yet.", ephemeral: true };
+  }
+
+  // Single team: resolve team, list its TP(s) for the season.
+  if (teamName) {
+    const resolved = await resolveTeamByName(supabase, ctx.leagueId, teamName);
+    if (resolved.error || !resolved.team) {
+      return { content: resolved.error ?? "Couldn't resolve a team.", ephemeral: true };
+    }
+
+    const { data: tps, error } = await supabase
+      .schema("pitboss")
+      .from("team_rosters")
+      .select("driver_id, drivers!inner(display_name, discord_username)")
+      .eq("league_id", ctx.leagueId)
+      .eq("car_class_team_id", resolved.team.id)
+      .eq("season", season)
+      .eq("is_team_principal", true);
+
+    if (error) {
+      console.error("[tp_view] tp lookup failed:", error);
+      return { content: `Couldn't load TP: ${error.message}`, ephemeral: true };
+    }
+    if (!tps || tps.length === 0) {
+      return {
+        content: `**${resolved.team.teamName}** has no Team Principal set for season ${season}.`,
+        ephemeral: true,
+      };
+    }
+
+    const names = tps.map((r) => (r as any).drivers.display_name ?? (r as any).drivers.discord_username).join(", ");
+    return { content: `**${resolved.team.teamName}** TP (${season}): ${names}`, ephemeral: true };
+  }
+
+  // No team given: list every team's TP for the season.
+  const { data: rows, error } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("car_class_teams!inner(team_name), drivers!inner(display_name, discord_username)")
+    .eq("league_id", ctx.leagueId)
+    .eq("season", season)
+    .eq("is_team_principal", true)
+    .order("team_name", { referencedTable: "car_class_teams" });
+
+  if (error) {
+    console.error("[tp_view] league tp lookup failed:", error);
+    return { content: `Couldn't load TPs: ${error.message}`, ephemeral: true };
+  }
+  if (!rows || rows.length === 0) {
+    return { content: `No Team Principals set for season ${season}.`, ephemeral: true };
+  }
+
+  const lines = [`**Team Principals — Season ${season}**`];
+  for (const row of rows as any[]) {
+    const name = row.drivers.display_name ?? row.drivers.discord_username ?? "Unknown";
+    lines.push(`${row.car_class_teams.team_name}: ${name}`);
+  }
+
+  return { content: lines.join("\n"), ephemeral: true };
 });
