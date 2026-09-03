@@ -307,6 +307,80 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      name: "ddv",
+      description: "View or adjust a driver's Dynamic Driver Value",
+      options: [
+        {
+          type: 1,
+          name: "view",
+          description: "View a driver's DDV (defaults to yourself)",
+          options: [
+            {
+              type: 6,
+              name: "driver",
+              description: "Driver to look up (defaults to yourself)",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "edit",
+          description: "Manually set a driver's DDV (league owner/co-owner only)",
+          options: [
+            {
+              type: 6,
+              name: "driver",
+              description: "Driver to adjust",
+              required: true,
+            },
+            {
+              type: 10,
+              name: "ddv",
+              description: "New DDV amount",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "reason",
+              description: "Reason for the manual adjustment",
+              required: true,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "leaderboard",
+          description: "View the league's DDV leaderboard, ranked by current DDV",
+        },
+      ],
+    },
+    {
+      name: "tp",
+      description: "View Team Principal assignments",
+      options: [
+        {
+          type: 1,
+          name: "view",
+          description: "View a team's Team Principal, or list every team's TP",
+          options: [
+            {
+              type: 3,
+              name: "team",
+              description: "Team name (omit to list every team's TP)",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "season",
+              description: "Season code (defaults to the league's current season)",
+              required: false,
+            },
+          ],
+        },
+      ],
+    },
+    {
       name: "kb",
       description: "Look up league rulebook articles",
       options: [
