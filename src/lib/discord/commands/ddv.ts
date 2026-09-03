@@ -5,57 +5,56 @@ import { createAdminClient } from "@/lib/supabase/server";
 type DriverMatch = {
   id: string;
   displayName: string;
-  discordId: string | null;
+  discordId: string;
 };
 
-async function resolveDriver(
+// Driver options are Discord user mentions (type 6) throughout this
+// codebase (contract_view, roster_assign, sign-driver) — not free-text
+// name search like cap_edit's franchise option. Resolve by discord_id,
+// then confirm league membership via driver_leagues.
+async function resolveDriverByDiscordId(
   supabase: ReturnType<typeof createAdminClient>,
   leagueId: string,
-  query: string
+  discordUserId: string
 ): Promise<{ driver?: DriverMatch; error?: string }> {
-  const { data: memberships, error: membershipError } = await supabase
-    .schema("pitboss")
-    .from("driver_leagues")
-    .select("driver_id")
-    .eq("league_id", leagueId);
-
-  if (membershipError) {
-    console.error("[ddv] driver_leagues lookup failed:", membershipError);
-    return { error: `Couldn't look up drivers in this league: ${membershipError.message}` };
-  }
-  if (!memberships || memberships.length === 0) {
-    return { error: "No drivers found in this league." };
-  }
-
-  const { data, error } = await supabase
+  const { data: driver, error } = await supabase
     .schema("pitboss")
     .from("drivers")
     .select("id, display_name, discord_username, discord_id")
-    .in(
-      "id",
-      memberships.map((m) => m.driver_id)
-    )
-    .or(`display_name.ilike.%${query}%,discord_username.ilike.%${query}%`);
+    .eq("discord_id", discordUserId)
+    .maybeSingle();
 
   if (error) {
     console.error("[ddv] driver lookup failed:", error);
     return { error: `Couldn't look up that driver: ${error.message}` };
   }
-  if (!data || data.length === 0) {
-    return { error: `No driver matching "${query}" in this league.` };
+  if (!driver) {
+    return { error: `No PitBoss driver record found for <@${discordUserId}>.` };
   }
-  if (data.length > 1) {
-    const names = data.map((d) => d.display_name ?? d.discord_username).join(", ");
+
+  const { data: membership, error: membershipError } = await supabase
+    .schema("pitboss")
+    .from("driver_leagues")
+    .select("driver_id")
+    .eq("driver_id", driver.id)
+    .eq("league_id", leagueId)
+    .maybeSingle();
+
+  if (membershipError) {
+    console.error("[ddv] driver_leagues lookup failed:", membershipError);
+    return { error: `Couldn't confirm league membership: ${membershipError.message}` };
+  }
+  if (!membership) {
     return {
-      error: `That matches more than one driver: ${names}. Be more specific.`,
+      error: `${driver.display_name ?? driver.discord_username ?? "That driver"} isn't a member of this league.`,
     };
   }
 
   return {
     driver: {
-      id: data[0].id,
-      displayName: data[0].display_name ?? data[0].discord_username ?? "Unknown Driver",
-      discordId: data[0].discord_id,
+      id: driver.id,
+      displayName: driver.display_name ?? driver.discord_username ?? "Unknown Driver",
+      discordId: driver.discord_id,
     },
   };
 }
@@ -94,19 +93,16 @@ async function requireLeagueOwner(ctx: {
 }
 
 function fmtDDV(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "—";
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return `$${n.toLocaleString("en-US")} $TRL`;
 }
 
 registerCommand("ddv_view", async (ctx) => {
   const supabase = createAdminClient();
-  const query = ctx.options.driver as string | undefined;
+  // Defaults to yourself, matching contract_view's convention.
+  const targetDiscordId = (ctx.options.driver as string | undefined) ?? ctx.discordUserId;
 
-  if (!query) {
-    return { content: "Specify a driver.", ephemeral: true };
-  }
-
-  const resolved = await resolveDriver(supabase, ctx.leagueId, query);
+  const resolved = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
   if (resolved.error || !resolved.driver) {
     return { content: resolved.error ?? "Couldn't resolve a driver.", ephemeral: true };
   }
@@ -143,11 +139,11 @@ registerCommand("ddv_edit", async (ctx) => {
   const denied = await requireLeagueOwner(ctx);
   if (denied) return { content: denied, ephemeral: true };
 
-  const query = ctx.options.driver as string | undefined;
+  const targetDiscordId = ctx.options.driver as string | undefined;
   const amount = ctx.options.ddv as number | undefined;
   const reason = ctx.options.reason as string | undefined;
 
-  if (!query) {
+  if (!targetDiscordId) {
     return { content: "Specify a driver.", ephemeral: true };
   }
   if (amount === undefined || amount < 0) {
@@ -158,7 +154,7 @@ registerCommand("ddv_edit", async (ctx) => {
   }
 
   const supabase = createAdminClient();
-  const resolved = await resolveDriver(supabase, ctx.leagueId, query);
+  const resolved = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
   if (resolved.error || !resolved.driver) {
     return { content: resolved.error ?? "Couldn't resolve a driver.", ephemeral: true };
   }
