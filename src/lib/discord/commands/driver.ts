@@ -14,6 +14,35 @@ const EDITOR_FLAGS = [
   "is_steward",
 ] as const;
 
+// season is a free-text Discord option, so people type "3", "3 seasons",
+// "Season 3", etc. Every write and every lookup MUST go through this so
+// sign-driver and release-driver always agree on what's stored — a raw
+// string mismatch here is what caused the 2026-09-03 stuck-roster bug
+// (signed with "3 seasons", release attempts tried "3" / "1" / "audi 26
+// 3seasons", none of which matched the literal stored string).
+function normalizeSeason(raw: string): { season: string } | { error: string } {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/\d+/);
+  if (!match) {
+    return { error: `Season must contain a number (e.g. "3"). Got: "${raw}".` };
+  }
+  return { season: match[0] };
+}
+
+// HRL (and similarly modeled event-economy leagues) use D<n>/Reserve and
+// T<n> interchangeably for the same signing tier ("T2 is D2" — league
+// admin, 2026-09-03). Try both prefixes when resolving a signing_<tier>
+// rule so a rule defined under one naming convention still resolves for
+// the other, instead of requiring someone to notice the miss and
+// manually add a duplicate alias row (which is what happened last time —
+// the driver signed before signing_t2 existed and got no market value).
+function tierAliasKeys(tierKey: string): string[] {
+  const keys = [tierKey];
+  if (tierKey.startsWith("t")) keys.push("d" + tierKey.slice(1));
+  else if (tierKey.startsWith("d")) keys.push("t" + tierKey.slice(1));
+  return keys;
+}
+
 async function resolveFranchise(leagueId: string, input: string) {
   const supabase = createAdminClient();
   const { data, error } = await supabase
@@ -70,11 +99,17 @@ registerCommand("sign-driver", async (ctx) => {
   const targetDiscordId = ctx.options.driver as string;
   const franchiseInput = ctx.options.franchise as string;
   const tierInput = ((ctx.options.tier as string) ?? "").trim();
-  const season = ctx.options.season as string;
+  const rawSeason = ctx.options.season as string;
 
-  if (!targetDiscordId || !franchiseInput || !season) {
+  if (!targetDiscordId || !franchiseInput || !rawSeason) {
     return { content: "driver, franchise, and season are all required.", ephemeral: true };
   }
+
+  const seasonResult = normalizeSeason(rawSeason);
+  if ("error" in seasonResult) {
+    return { content: seasonResult.error, ephemeral: true };
+  }
+  const season = seasonResult.season;
 
   const supabase = createAdminClient();
 
@@ -92,15 +127,17 @@ registerCommand("sign-driver", async (ctx) => {
   const driver = driverResult.driver;
 
   // Refuse to double-sign: a driver can only hold one active roster spot
-  // per league/season (enforced at the DB level too, via a partial unique
-  // index — this check just gives a clearer error message).
+  // per league at a time (enforced at the DB level too, via a partial
+  // unique index — this check just gives a clearer error message).
+  // Matched on driver+league+released_at only — NOT season — because
+  // season is free text and a formatting mismatch here previously let a
+  // driver get double-signed under two different season strings.
   const { data: existingActive, error: existingErr } = await supabase
     .schema("pitboss")
     .from("franchise_rosters")
-    .select("id, franchise_id")
+    .select("id, franchise_id, season")
     .eq("driver_id", driver.id)
     .eq("league_id", ctx.leagueId)
-    .eq("season", season)
     .is("released_at", null)
     .maybeSingle();
 
@@ -112,8 +149,8 @@ registerCommand("sign-driver", async (ctx) => {
     return {
       content:
         existingActive.franchise_id === franchise.id
-          ? `<@${targetDiscordId}> is already signed to ${franchise.name} for ${season}.`
-          : `<@${targetDiscordId}> is already signed to another franchise for ${season}. Release them first.`,
+          ? `<@${targetDiscordId}> is already signed to ${franchise.name} (season ${existingActive.season}).`
+          : `<@${targetDiscordId}> is already signed to another franchise (season ${existingActive.season}). Release them first.`,
       ephemeral: true,
     };
   }
@@ -168,6 +205,7 @@ registerCommand("sign-driver", async (ctx) => {
   const financialNotes: string[] = [];
 
   if (capConfig && capConfig.length > 0) {
+    const contractClass = tierInput ? tierInput.toUpperCase() : "T1";
     const { error: contractError } = await supabase
       .schema("pitboss")
       .from("driver_contracts")
@@ -175,7 +213,7 @@ registerCommand("sign-driver", async (ctx) => {
         driver_id: driver.id,
         franchise_id: franchise.id,
         league_id: ctx.leagueId,
-        contract_class: tierInput || "T1",
+        contract_class: contractClass,
         division: franchise.division,
         season_start: season,
         status: "active",
@@ -186,28 +224,45 @@ registerCommand("sign-driver", async (ctx) => {
         `Roster saved, but the contract record failed: ${contractError.message}. Needs manual follow-up.`
       );
     } else {
-      financialNotes.push(`Contract created (${tierInput || "T1"}).`);
+      financialNotes.push(`Contract created (${contractClass}).`);
     }
   } else {
     const tierKey = tierInput.toLowerCase().replace(/\s+/g, "_");
-    const ruleKey = tierKey ? `signing_${tierKey}` : null;
 
-    if (!ruleKey) {
+    if (!tierKey) {
       financialNotes.push(
         "No tier given, so no starting market value was set — this league prices signings by tier (e.g. D1/D2/Reserve)."
       );
     } else {
-      const { data: rule, error: ruleError } = await supabase
-        .schema("pitboss")
-        .from("league_event_economy_rules")
-        .select("driver_value_delta")
-        .eq("league_id", ctx.leagueId)
-        .eq("rule_key", ruleKey)
-        .maybeSingle();
+      let rule: { driver_value_delta: number | string | null } | null = null;
+      let lookupError: string | null = null;
 
-      if (ruleError || !rule) {
+      for (const candidateKey of tierAliasKeys(tierKey)) {
+        const { data, error: ruleError } = await supabase
+          .schema("pitboss")
+          .from("league_event_economy_rules")
+          .select("driver_value_delta")
+          .eq("league_id", ctx.leagueId)
+          .eq("rule_key", `signing_${candidateKey}`)
+          .maybeSingle();
+
+        if (ruleError) {
+          lookupError = ruleError.message;
+          break;
+        }
+        if (data) {
+          rule = data;
+          break;
+        }
+      }
+
+      if (lookupError) {
+        financialNotes.push(`Roster saved, but the signing-rule lookup failed: ${lookupError}.`);
+      } else if (!rule) {
         financialNotes.push(
-          `Roster saved, but no signing rule found for tier "${tierInput}" — market value wasn't set.`
+          `Roster saved, but no signing rule found for tier "${tierInput}" (tried "${tierAliasKeys(tierKey)
+            .map((k) => `signing_${k}`)
+            .join('", "')}") — market value wasn't set. Add the rule to league_event_economy_rules and rerun the market-value update for this driver.`
         );
       } else {
         const { error: marketValueError } = await supabase
@@ -227,7 +282,7 @@ registerCommand("sign-driver", async (ctx) => {
   }
 
   return {
-    content: `Signed <@${targetDiscordId}> to **${franchise.name}** for ${season}. ${financialNotes.join(" ")}`,
+    content: `Signed <@${targetDiscordId}> to **${franchise.name}** for season ${season}. ${financialNotes.join(" ")}`,
     ephemeral: false,
   };
 });
@@ -239,11 +294,28 @@ registerCommand("release-driver", async (ctx) => {
   }
 
   const targetDiscordId = ctx.options.driver as string;
-  const season = ctx.options.season as string;
+  const rawSeason = ctx.options.season as string | undefined;
   const reason = (ctx.options.reason as string) ?? null;
 
-  if (!targetDiscordId || !season) {
-    return { content: "driver and season are both required.", ephemeral: true };
+  if (!targetDiscordId) {
+    return { content: "driver is required.", ephemeral: true };
+  }
+
+  // season is now optional and, when given, is a sanity note only — NOT
+  // a lookup key. Making it a required exact-string match against
+  // whatever sign-driver happened to store is exactly what caused the
+  // 2026-09-03 bug: three release attempts ("3", "1", "audi 26
+  // 3seasons") all failed to match the literal stored value "3 seasons".
+  // A driver can only hold one active roster spot per league at a time
+  // (see the matching comment in sign-driver), so driver+league+
+  // released_at IS NULL is sufficient on its own to find it.
+  let seasonNote: string | null = null;
+  if (rawSeason) {
+    const seasonResult = normalizeSeason(rawSeason);
+    if ("error" in seasonResult) {
+      return { content: seasonResult.error, ephemeral: true };
+    }
+    seasonNote = seasonResult.season;
   }
 
   const supabase = createAdminClient();
@@ -259,24 +331,35 @@ registerCommand("release-driver", async (ctx) => {
     return { content: "That driver isn't on file.", ephemeral: true };
   }
 
-  const { data: activeRoster, error: activeErr } = await supabase
+  const { data: activeRosters, error: activeErr } = await supabase
     .schema("pitboss")
     .from("franchise_rosters")
-    .select("id, franchise_id")
+    .select("id, franchise_id, season")
     .eq("driver_id", driver.id)
     .eq("league_id", ctx.leagueId)
-    .eq("season", season)
-    .is("released_at", null)
-    .maybeSingle();
+    .is("released_at", null);
 
   if (activeErr) {
     console.error("[release-driver] active roster lookup failed:", activeErr);
     return { content: `Something went wrong looking up the roster: ${activeErr.message}`, ephemeral: true };
   }
-  if (!activeRoster) {
-    return { content: `<@${targetDiscordId}> isn't currently signed to a franchise for ${season}.`, ephemeral: true };
+  if (!activeRosters || activeRosters.length === 0) {
+    return { content: `<@${targetDiscordId}> isn't currently signed to a franchise in this league.`, ephemeral: true };
+  }
+  if (activeRosters.length > 1) {
+    // Shouldn't happen given the partial unique index, but if it does,
+    // don't guess which one to release — surface it for manual cleanup.
+    const seasons = activeRosters.map((r) => r.season).join(", ");
+    console.error(
+      `[release-driver] data integrity: driver ${driver.id} has ${activeRosters.length} active roster rows in league ${ctx.leagueId} (seasons: ${seasons}) — unique index should have prevented this.`
+    );
+    return {
+      content: `<@${targetDiscordId}> has more than one active roster row in this league (seasons: ${seasons}). This shouldn't be possible — needs manual DB cleanup before releasing.`,
+      ephemeral: true,
+    };
   }
 
+  const activeRoster = activeRosters[0];
   const releasedAt = new Date().toISOString();
 
   const { error: releaseError } = await supabase
@@ -293,7 +376,8 @@ registerCommand("release-driver", async (ctx) => {
   // Mirror into driver_contracts if this is a cap-model league. Harmless
   // no-op (zero rows matched) for event-economy leagues like HRL, since
   // they never get a driver_contracts row from /sign-driver in the first
-  // place.
+  // place. Keyed off the roster row's actual stored season, not the
+  // caller's input, so it still works if the caller omitted season.
   const { error: contractReleaseError } = await supabase
     .schema("pitboss")
     .from("driver_contracts")
@@ -301,14 +385,19 @@ registerCommand("release-driver", async (ctx) => {
     .eq("driver_id", driver.id)
     .eq("franchise_id", activeRoster.franchise_id)
     .eq("league_id", ctx.leagueId)
-    .eq("season_start", season)
+    .eq("season_start", activeRoster.season)
     .eq("status", "active");
   if (contractReleaseError) {
     console.error("[release-driver] driver_contracts release update failed (non-fatal):", contractReleaseError);
   }
 
+  const mismatchNote =
+    seasonNote && seasonNote !== activeRoster.season
+      ? ` (note: you said season ${seasonNote}, actual signed season was ${activeRoster.season})`
+      : "";
+
   return {
-    content: `Released <@${targetDiscordId}> from ${season}${reason ? ` (${reason})` : ""}.`,
+    content: `Released <@${targetDiscordId}> from season ${activeRoster.season}${reason ? ` (${reason})` : ""}.${mismatchNote}`,
     ephemeral: false,
   };
 });
