@@ -53,6 +53,26 @@ export function roundLabel(round: {
 }
 
 /**
+ * Race-director style "lights" line, computed fresh every time the
+ * embed is built (on initial post and on every button re-render — same
+ * pattern as the <t:...:R> countdown, which Discord updates live on its
+ * own but whose *bucket* — grid forming vs. lights out — only changes
+ * when we re-render). Thresholds roughly mirror an F1 broadcast:
+ * pit lane opens -> grid forms -> formation lap -> lights out.
+ */
+function raceLights(raceTimeIso: string | null): string {
+  if (!raceTimeIso) return "";
+  const msRemaining = new Date(raceTimeIso).getTime() - Date.now();
+  const minsRemaining = msRemaining / 60000;
+
+  if (minsRemaining <= 0) return "🟢🟢🟢🟢🟢  **LIGHTS OUT — GO!**";
+  if (minsRemaining <= 5) return "🔴🔴🔴🔴🔴  **Formation lap — get ready**";
+  if (minsRemaining <= 30) return "🔴🔴🔴⚫⚫  **Grid forming**";
+  if (minsRemaining <= 60) return "🔴🔴⚫⚫⚫  **Pit lane opens soon**";
+  return "🔴⚫⚫⚫⚫  **Session upcoming**";
+}
+
+/**
  * grouped[status] = array of discord user IDs who responded with that
  * status. Missing/empty arrays render as "none".
  */
@@ -65,8 +85,8 @@ export function buildCheckinEmbed(params: {
   const { round, divisionCode, post, grouped } = params;
 
   const trackLine = round.circuit
-    ? `📍 **Track:** ${round.circuit}${round.country ? ` (${round.country})` : ""}`
-    : "📍 **Track:** TBD";
+    ? `📍 **Track:** ${round.flag_emoji ?? ""} ${round.circuit}${round.country ? ` (${round.country})` : ""}`.trim()
+    : `📍 **Track:** ${round.flag_emoji ?? ""} TBD`.trim();
   const pingLine = `📨 **Ping Delivery:** ${post.ping_delivery ?? "Channel only"}`;
   const weatherLine = `☁️ **Weather:** ${post.weather_text ?? "Not set"}`;
 
@@ -76,7 +96,8 @@ export function buildCheckinEmbed(params: {
     const unix = Math.floor(new Date(post.race_time).getTime() / 1000);
     descriptionParts.push(
       "—————",
-      `⏰ **Start:** <t:${unix}:F>  (<t:${unix}:R>)`
+      `⏰ **Start:** <t:${unix}:F>  (<t:${unix}:R>)`,
+      raceLights(post.race_time)
     );
   }
 
