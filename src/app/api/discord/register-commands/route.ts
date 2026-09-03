@@ -251,6 +251,43 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      name: "cap",
+      description: "View salary cap usage for a franchise or division",
+      options: [
+        {
+          type: 1,
+          name: "view",
+          description: "View salary cap usage for a franchise (defaults to your own)",
+          options: [
+            {
+              type: 3,
+              name: "franchise",
+              description: "Franchise name or abbreviation (defaults to your own franchise)",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "board",
+          description: "View salary cap usage across a division (or the whole league)",
+          options: [
+            {
+              type: 3,
+              name: "division",
+              description: "Division/car-class filter (e.g. F1_26) — omit to show everything",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "league",
+          description: "View a league-wide salary cap summary, broken down by division",
+        },
+      ],
+    },
+    {
       name: "kb",
       description: "Look up league rulebook articles",
       options: [
