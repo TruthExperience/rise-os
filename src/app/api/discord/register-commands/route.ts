@@ -269,6 +269,25 @@ export async function GET(req: NextRequest) {
         },
         {
           type: 1,
+          name: "edit",
+          description: "Set a franchise's salary cap (league owner/co-owner only)",
+          options: [
+            {
+              type: 3,
+              name: "franchise",
+              description: "Franchise name or abbreviation",
+              required: true,
+            },
+            {
+              type: 10,
+              name: "amount",
+              description: "New salary cap amount",
+              required: true,
+            },
+          ],
+        },
+        {
+          type: 1,
           name: "board",
           description: "View salary cap usage across a division (or the whole league)",
           options: [
