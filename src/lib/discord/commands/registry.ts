@@ -34,6 +34,16 @@ export interface ImmediateResponse {
   defer?: false;
   content: string;
   ephemeral?: boolean;
+  /**
+   * Discord embed objects (raw API shape). Used by checkin-create to
+   * post the rich check-in card instead of a plain text message.
+   */
+  embeds?: Record<string, unknown>[];
+  /**
+   * Discord message components (action rows of buttons, etc.), raw
+   * API shape. Used alongside embeds for the check-in buttons.
+   */
+  components?: Record<string, unknown>[];
 }
 
 export interface DeferredResponse {
