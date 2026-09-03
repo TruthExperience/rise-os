@@ -317,6 +317,31 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      name: "contract",
+      description: "View driver contract details",
+      options: [
+        {
+          type: 1,
+          name: "view",
+          description: "View a driver's contract details",
+          options: [
+            {
+              type: 6,
+              name: "driver",
+              description: "Driver to look up (defaults to yourself)",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "season",
+              description: "Season (defaults to current)",
+              required: false,
+            },
+          ],
+        },
+      ],
+    },
+    {
       name: "sign-driver",
       description: "Sign a driver to a franchise (employment — contracts/cap, not the EA car-class roster)",
       options: [
