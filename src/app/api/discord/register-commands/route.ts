@@ -23,6 +23,7 @@ export async function GET() {
     "Cadillac",
     "Ferrari",
     "Haas",
+    "Kick Sauber",
     "McLaren",
     "Mercedes",
     "Racing Bulls",
