@@ -371,11 +371,56 @@ registerCommand("tp_view", async (ctx) => {
     return { content: `No Team Principals set for season ${season}.`, ephemeral: true };
   }
 
-  const lines = [`**Team Principals — Season ${season}**`];
-  for (const row of rows as any[]) {
-    const name = row.drivers.display_name ?? row.drivers.discord_username ?? "Unknown";
-    lines.push(`${row.car_class_teams.team_name}: ${name}`);
+  return { content: lines.join("\n"), ephemeral: true };
+});
+
+// Open to any league member (not gated to owner/co-owner like ddv_view's
+// other-driver lookup) — this is a league-wide read, not a single driver's
+// private-ish record.
+registerCommand("ddv_leaderboard", async (ctx) => {
+  const supabase = createAdminClient();
+
+  const { data: requester } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id")
+    .eq("discord_id", ctx.discordUserId)
+    .maybeSingle();
+  if (!requester) {
+    return { content: "No PitBoss driver record found for you.", ephemeral: true };
   }
 
-  return { content: lines.join("\n"), ephemeral: true };
+  const { data: membership } = await supabase
+    .schema("pitboss")
+    .from("driver_leagues")
+    .select("driver_id")
+    .eq("driver_id", requester.id)
+    .eq("league_id", ctx.leagueId)
+    .maybeSingle();
+  if (!membership) {
+    return { content: "You aren't a member of this league.", ephemeral: true };
+  }
+
+  const { data: rows, error } = await supabase
+    .schema("pitboss")
+    .from("driver_ddv")
+    .select("current_ddv, drivers!inner(display_name, discord_username)")
+    .eq("league_id", ctx.leagueId)
+    .order("current_ddv", { ascending: false });
+
+  if (error) {
+    console.error("[ddv_leaderboard] lookup failed:", error);
+    return { content: `Couldn't load DDV leaderboard: ${error.message}`, ephemeral: true };
+  }
+  if (!rows || rows.length === 0) {
+    return { content: "No DDV records found for this league yet.", ephemeral: true };
+  }
+
+  const lines = ["**DDV Leaderboard**"];
+  rows.forEach((row, i) => {
+    const name = (row as any).drivers.display_name ?? (row as any).drivers.discord_username ?? "Unknown";
+    lines.push(`${i + 1}. ${name} — ${fmtDDV(Number(row.current_ddv))}`);
+  });
+
+  return { content: lines.join("\n"), ephemeral: false };
 });
