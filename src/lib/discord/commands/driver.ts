@@ -99,6 +99,71 @@ async function getOrCreateDriver(discordId: string, resolvedUsername: string | u
   return { driver } as const;
 }
 
+// Deducts a signing's team_budget_delta from the franchise's wallet and
+// logs the transaction. Event-economy leagues only — cap-model leagues
+// track spend via driver_contracts.contract_value instead, they never
+// call this. Added 2026-09-03: signing rules previously only set
+// driver_leagues.market_value and never touched the wallet at all, which
+// is why every HRL wallet sat at its untouched starting_wallet no matter
+// how many drivers a franchise had actually signed.
+async function deductSigningFromWallet(params: {
+  franchiseId: string;
+  division: string | null;
+  leagueId: string;
+  season: string;
+  amount: number; // expected negative (a cost)
+  description: string;
+}): Promise<{ error: string } | { newBalance: number }> {
+  const supabase = createAdminClient();
+
+  const { data: wallet, error: walletFetchError } = await supabase
+    .schema("pitboss")
+    .from("franchise_wallets")
+    .select("id, balance")
+    .eq("franchise_id", params.franchiseId)
+    .eq("division", params.division ?? "")
+    .maybeSingle();
+
+  if (walletFetchError) {
+    return { error: walletFetchError.message };
+  }
+  if (!wallet) {
+    return { error: `No wallet found for this franchise/division (${params.division ?? "no division"}).` };
+  }
+
+  const currentBalance = typeof wallet.balance === "string" ? Number(wallet.balance) : wallet.balance;
+  const newBalance = currentBalance + params.amount;
+
+  const { error: txError } = await supabase
+    .schema("pitboss")
+    .from("wallet_transactions")
+    .insert({
+      wallet_id: wallet.id,
+      franchise_id: params.franchiseId,
+      league_id: params.leagueId,
+      season: params.season,
+      transaction_type: "contract_signing",
+      amount: params.amount,
+      balance_after: newBalance,
+      related_type: "driver_leagues",
+      description: params.description,
+    });
+  if (txError) {
+    return { error: txError.message };
+  }
+
+  const { error: balanceUpdateError } = await supabase
+    .schema("pitboss")
+    .from("franchise_wallets")
+    .update({ balance: newBalance })
+    .eq("id", wallet.id);
+  if (balanceUpdateError) {
+    return { error: balanceUpdateError.message };
+  }
+
+  return { newBalance };
+}
+
 registerCommand("sign-driver", async (ctx) => {
   const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
   if (!hasAnyFlag(membership, [...EDITOR_FLAGS])) {
@@ -201,9 +266,11 @@ registerCommand("sign-driver", async (ctx) => {
   // league_financial_config) gets a driver_contracts row; an
   // event-economy league (e.g. HRL, rows in league_event_economy_rules
   // instead) gets driver_leagues.market_value set from the matching
-  // signing_<tier> rule. A league with neither just gets the roster
-  // record above and nothing financial — that's a legitimate state, not
-  // an error, since not every league has set up its economy yet.
+  // signing_<tier> rule, AND — as of 2026-09-03 — a wallet deduction if
+  // that rule also carries a team_budget_delta. A league with neither
+  // just gets the roster record above and nothing financial — that's a
+  // legitimate state, not an error, since not every league has set up
+  // its economy yet.
   const { data: capConfig } = await supabase
     .schema("pitboss")
     .from("league_financial_config")
@@ -240,17 +307,18 @@ registerCommand("sign-driver", async (ctx) => {
 
     if (!tierKey) {
       financialNotes.push(
-        "No tier given, so no starting market value was set — this league prices signings by tier (e.g. D1/D2/Reserve)."
+        "No tier given, so no starting market value was set and nothing was deducted — this league prices signings by tier (e.g. D1/D2/Reserve)."
       );
     } else {
-      let rule: { driver_value_delta: number | string | null } | null = null;
+      let rule: { driver_value_delta: number | string | null; team_budget_delta: number | string | null } | null =
+        null;
       let lookupError: string | null = null;
 
       for (const candidateKey of tierAliasKeys(tierKey)) {
         const { data, error: ruleError } = await supabase
           .schema("pitboss")
           .from("league_event_economy_rules")
-          .select("driver_value_delta")
+          .select("driver_value_delta, team_budget_delta")
           .eq("league_id", ctx.leagueId)
           .eq("rule_key", `signing_${candidateKey}`)
           .maybeSingle();
@@ -271,20 +339,50 @@ registerCommand("sign-driver", async (ctx) => {
         financialNotes.push(
           `Roster saved, but no signing rule found for tier "${tierInput}" (tried "${tierAliasKeys(tierKey)
             .map((k) => `signing_${k}`)
-            .join('", "')}") — market value wasn't set. Add the rule to league_event_economy_rules and rerun the market-value update for this driver.`
+            .join('", "')}") — market value wasn't set and nothing was deducted. Add the rule to league_event_economy_rules and rerun the market-value update for this driver.`
         );
       } else {
-        const { error: marketValueError } = await supabase
-          .schema("pitboss")
-          .from("driver_leagues")
-          .update({ market_value: rule.driver_value_delta })
-          .eq("driver_id", driver.id)
-          .eq("league_id", ctx.leagueId);
-        if (marketValueError) {
-          console.error("[sign-driver] market_value update failed:", marketValueError);
-          financialNotes.push(`Roster saved, but setting market value failed: ${marketValueError.message}.`);
-        } else {
-          financialNotes.push(`Market value set to ${rule.driver_value_delta}.`);
+        if (rule.driver_value_delta !== null && rule.driver_value_delta !== undefined) {
+          const { error: marketValueError } = await supabase
+            .schema("pitboss")
+            .from("driver_leagues")
+            .update({ market_value: rule.driver_value_delta })
+            .eq("driver_id", driver.id)
+            .eq("league_id", ctx.leagueId);
+          if (marketValueError) {
+            console.error("[sign-driver] market_value update failed:", marketValueError);
+            financialNotes.push(`Roster saved, but setting market value failed: ${marketValueError.message}.`);
+          } else {
+            financialNotes.push(`Market value set to ${rule.driver_value_delta}.`);
+          }
+        }
+
+        const budgetDelta =
+          rule.team_budget_delta === null || rule.team_budget_delta === undefined
+            ? null
+            : typeof rule.team_budget_delta === "string"
+            ? Number(rule.team_budget_delta)
+            : rule.team_budget_delta;
+
+        if (budgetDelta !== null && budgetDelta !== 0) {
+          const deductionResult = await deductSigningFromWallet({
+            franchiseId: franchise.id,
+            division: franchise.division,
+            leagueId: ctx.leagueId,
+            season,
+            amount: budgetDelta,
+            description: `Salary deduction for driver signing (${tierInput.toUpperCase()})`,
+          });
+          if ("error" in deductionResult) {
+            console.error("[sign-driver] wallet deduction failed:", deductionResult.error);
+            financialNotes.push(
+              `Market value set, but the wallet deduction of ${budgetDelta} failed: ${deductionResult.error}. Needs manual follow-up.`
+            );
+          } else {
+            financialNotes.push(
+              `${Math.abs(budgetDelta).toLocaleString()} deducted from team budget (new balance: ${deductionResult.newBalance.toLocaleString()}).`
+            );
+          }
         }
       }
     }
@@ -399,6 +497,11 @@ registerCommand("release-driver", async (ctx) => {
   if (contractReleaseError) {
     console.error("[release-driver] driver_contracts release update failed (non-fatal):", contractReleaseError);
   }
+
+  // NOTE: no wallet refund on release for event-economy leagues. Nothing
+  // in league_event_economy_rules currently defines a release/buyout
+  // credit, so a released driver's signing cost stays spent. Revisit if
+  // HRL confirms a refund or dead-cap rule should apply here.
 
   const mismatchNote =
     seasonNote && seasonNote !== activeRoster.season
