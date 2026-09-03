@@ -115,7 +115,7 @@ export async function routeCommand(interaction: any) {
       };
     }
 
-    return respond(result.content, result.ephemeral);
+    return respond(result.content, result.ephemeral, result.embeds, result.components);
   } catch (err) {
     console.error(`[discord] /${commandKey} failed:`, err);
     return respond(
@@ -147,10 +147,20 @@ async function patchOriginalResponse(
   }
 }
 
-function respond(content: string, ephemeral = false) {
+function respond(
+  content: string,
+  ephemeral = false,
+  embeds?: Record<string, unknown>[],
+  components?: Record<string, unknown>[]
+) {
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: { content, flags: ephemeral ? 64 : undefined },
+    data: {
+      content,
+      flags: ephemeral ? 64 : undefined,
+      embeds: embeds && embeds.length > 0 ? embeds : undefined,
+      components: components && components.length > 0 ? components : undefined,
+    },
   };
 }
 
@@ -166,5 +176,6 @@ import "./appeal";
 import "./moderation";
 // Side-effect import: registers the sign-driver/release-driver commands.
 import "./driver";
-// Side-effect import: registers the checkin/checkin-status/checkin-remind/generate-grid commands.
+// Side-effect import: registers the checkin/checkin-status/checkin-remind/
+// checkin-create/generate-grid commands.
 import "./checkin";
