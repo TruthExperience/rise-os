@@ -181,3 +181,5 @@ import "./contract";
 // Side-effect import: registers the checkin/checkin-status/checkin-remind/
 // checkin-create/generate-grid commands.
 import "./checkin";
+// Side-effect import: registers the cap_* commands.
+import "./cap";
