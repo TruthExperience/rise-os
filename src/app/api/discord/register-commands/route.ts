@@ -154,6 +154,13 @@ export async function GET(req: NextRequest) {
             },
             {
               type: 3,
+              name: "incident",
+              description:
+                "Ticket number (e.g. 0007) — required unless run inside the ticket channel",
+              required: false,
+            },
+            {
+              type: 3,
               name: "evidence",
               description: "Link to your own POV clip / evidence — required",
               required: true,
