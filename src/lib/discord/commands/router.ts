@@ -5,6 +5,7 @@ import {
   commandRegistry,
   registerCommand,
   type ResolvedDiscordUser,
+  type ResolvedDiscordAttachment,
 } from "./registry";
 
 registerCommand("ping", async () => ({
@@ -69,6 +70,23 @@ export async function routeCommand(interaction: any) {
     resolvedUsers[id] = { id, username: user.username };
   }
 
+  // Attachment options (type 11, e.g. steward report's evidence_file) come
+  // back from Discord as just the attachment's snowflake ID in `options` —
+  // the actual CDN url/filename/content type live in
+  // interaction.data.resolved.attachments, keyed by that same ID. Resolved
+  // the same way resolvedUsers is above, so handlers can do
+  // ctx.resolvedAttachments[ctx.options.evidence_file as string].
+  const resolvedAttachments: Record<string, ResolvedDiscordAttachment> = {};
+  const rawResolvedAttachments = interaction.data?.resolved?.attachments ?? {};
+  for (const [id, att] of Object.entries(rawResolvedAttachments) as [string, any][]) {
+    resolvedAttachments[id] = {
+      id,
+      url: att.url,
+      filename: att.filename,
+      contentType: att.content_type,
+    };
+  }
+
   try {
     const result = await handler({
       guildId,
@@ -78,6 +96,7 @@ export async function routeCommand(interaction: any) {
       discordUserId,
       options,
       resolvedUsers,
+      resolvedAttachments,
       memberRoles,
       memberPermissions,
     });
