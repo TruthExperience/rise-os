@@ -293,8 +293,18 @@ export async function GET(req: NextRequest) {
           options: [
             {
               type: 3,
+              name: "season",
+              description: "Season — shows only that season's teams",
+              required: false,
+              choices: [
+                { name: "2025", value: "25" },
+                { name: "2026", value: "26" },
+              ],
+            },
+            {
+              type: 3,
               name: "division",
-              description: "Division/car-class filter (e.g. F1_26) — omit to show everything",
+              description: "Division/car-class filter (e.g. F1_26) — omit to show everything. Ignored if season is set.",
               required: false,
             },
           ],
@@ -662,202 +672,4 @@ export async function GET(req: NextRequest) {
           type: 3,
           name: "weather",
           description: "Weather description (e.g. '16°C, Clouds')",
-          required: false,
-        },
-        {
-          type: 3,
-          name: "ping_delivery",
-          description: "How pings are delivered for this race (e.g. 'Channel only', 'Role ping')",
-          required: false,
-        },
-        {
-          type: 3,
-          name: "race_time",
-          description: "Race start time, ISO 8601 (e.g. 2026-09-06T15:00:00Z) — defaults to the round's date at 15:00 UTC",
-          required: false,
-        },
-      ],
-    },
-    {
-      name: "generate-grid",
-      description: "Build the team lineup grid from confirmed check-ins",
-      options: [
-        {
-          type: 3,
-          name: "round",
-          description: "Round number or name (defaults to the next scheduled race)",
-          required: false,
-        },
-        {
-          type: 3,
-          name: "season",
-          description: "Season number (defaults to the round's season)",
-          required: false,
-        },
-        {
-          type: 5,
-          name: "regenerate",
-          description: "Rebuild an existing grid for this round",
-          required: false,
-        },
-      ],
-    },
-    {
-      name: "appeal",
-      description: "File or review an appeal on a resolved incident",
-      options: [
-        {
-          type: 1,
-          name: "file",
-          description: "File an appeal on a resolved or dismissed incident",
-          options: [
-            {
-              type: 3,
-              name: "incident",
-              description: "Incident short ID",
-              required: true,
-            },
-            {
-              type: 3,
-              name: "reason",
-              description: "Why you're appealing this incident",
-              required: true,
-            },
-          ],
-        },
-        {
-          type: 1,
-          name: "status",
-          description: "List open appeals for this league",
-        },
-        {
-          type: 1,
-          name: "review",
-          description: "Steward: rule on an open appeal",
-          options: [
-            {
-              type: 3,
-              name: "incident",
-              description: "Incident short ID",
-              required: true,
-            },
-            {
-              type: 3,
-              name: "decision",
-              description: "Appeal decision",
-              required: true,
-              choices: [
-                { name: "Upheld", value: "upheld" },
-                { name: "Overturned", value: "overturned" },
-                { name: "Dismissed", value: "dismissed" },
-              ],
-            },
-            {
-              type: 3,
-              name: "new_verdict",
-              description: "Revised verdict (if overturned)",
-              required: false,
-            },
-            {
-              type: 3,
-              name: "new_penalty",
-              description: "Revised penalty (if overturned)",
-              required: false,
-            },
-            {
-              type: 4,
-              name: "new_points",
-              description: "Revised penalty points (if overturned)",
-              required: false,
-            },
-            {
-              type: 3,
-              name: "notes",
-              description: "Steward notes on the decision",
-              required: false,
-            },
-          ],
-        },
-      ],
-    },
-    {
-      name: "kick",
-      description: "Kick a member from the server (owner/co-owner only)",
-      default_member_permissions: "2",
-      dm_permission: false,
-      options: [
-        {
-          type: 6,
-          name: "user",
-          description: "Member to kick",
-          required: true,
-        },
-        {
-          type: 3,
-          name: "reason",
-          description: "Reason for the kick",
-          required: false,
-        },
-      ],
-    },
-    {
-      name: "ban",
-      description: "Ban a member from the server (owner/co-owner only)",
-      default_member_permissions: "4",
-      dm_permission: false,
-      options: [
-        {
-          type: 6,
-          name: "user",
-          description: "Member to ban",
-          required: true,
-        },
-        {
-          type: 3,
-          name: "reason",
-          description: "Reason for the ban",
-          required: false,
-        },
-      ],
-    },
-    {
-      name: "lockdown",
-      description: "Lock down the server (owner/co-owner only)",
-      default_member_permissions: "8",
-      dm_permission: false,
-      options: [
-        {
-          type: 3,
-          name: "reason",
-          description: "Reason for the lockdown",
-          required: false,
-        },
-      ],
-    },
-    {
-      name: "endlockdown",
-      description: "Lift an active server lockdown (owner/co-owner only)",
-      default_member_permissions: "8",
-      dm_permission: false,
-    },
-  ];
-
-  const res = await fetch(
-    `https://discord.com/api/v10/applications/${appId}/commands`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bot ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(commands),
-    }
-  );
-
-  const body = await res.json();
-
-  return NextResponse.json(
-    { status: res.status, ok: res.ok, body },
-    { status: res.ok ? 200 : 502 }
-  );
-}
+          required
