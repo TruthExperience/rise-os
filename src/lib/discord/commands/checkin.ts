@@ -46,6 +46,15 @@ import {
 // trusting calendar_rounds.circuit/country/flag_emoji. Used for late venue
 // swaps or rounds where the calendar row hasn't been fixed yet. See
 // buildCheckinEmbed in checkin-embed.ts for the override precedence.
+//
+// PATCH (2026-09-04 cont'd): round_checkin_posts also gained
+// dm_reminder_sent_at / channel_reminder_sent_at, populated by the
+// pg_cron-driven pitboss.dispatch_checkin_reminders() function (3hr DM
+// ping / 1hr channel ping, delivered via
+// src/app/api/pitboss/checkin/reminders/route.ts). checkin-create now
+// resets both stamps to null whenever race_time actually changes on a
+// re-run (e.g. a reschedule), so the automated reminders fire again
+// against the new time instead of staying silently "already sent".
 
 const ADMIN_FLAGS = [
   "is_owner",
@@ -456,6 +465,12 @@ registerCommand("checkin-remind", async (ctx) => {
  * channel — this command is typically run from an admin/mod channel,
  * not the division's own check-in channel, so it uses resolveDivision
  * (explicit code) rather than resolveDivisionByChannel.
+ *
+ * If race_time actually changes on a re-run (a reschedule), the
+ * automated dm_reminder_sent_at / channel_reminder_sent_at stamps are
+ * reset to null so pitboss.dispatch_checkin_reminders() fires the 3hr
+ * DM / 1hr channel reminders again against the new time instead of
+ * treating them as already sent.
  */
 registerCommand("checkin-create", async (ctx) => {
   const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
@@ -503,6 +518,17 @@ registerCommand("checkin-create", async (ctx) => {
 
   const supabase = createAdminClient();
 
+  // Always read the existing row first — needed both to preserve
+  // untouched overrides (below) and to detect a race_time reschedule
+  // (so the reminder-sent stamps can be reset).
+  const { data: existingPost } = await supabase
+    .schema("pitboss")
+    .from("round_checkin_posts")
+    .select("race_time, track_override, country_override, flag_override")
+    .eq("round_id", round.id)
+    .eq("division_id", division.id)
+    .maybeSingle();
+
   let trackOverride = trackOverrideInput ?? null;
   let countryOverride = countryOverrideInput ?? null;
   let flagOverride = flagOverrideInput ?? null;
@@ -510,36 +536,41 @@ registerCommand("checkin-create", async (ctx) => {
   if (trackOverrideInput === undefined && countryOverrideInput === undefined && flagOverrideInput === undefined) {
     // No override options passed this run — preserve whatever was
     // previously stored for this round+division instead of clearing it.
-    const { data: existingPost } = await supabase
-      .schema("pitboss")
-      .from("round_checkin_posts")
-      .select("track_override, country_override, flag_override")
-      .eq("round_id", round.id)
-      .eq("division_id", division.id)
-      .maybeSingle();
     trackOverride = existingPost?.track_override ?? null;
     countryOverride = existingPost?.country_override ?? null;
     flagOverride = existingPost?.flag_override ?? null;
   }
 
+  // race_time changed (a reschedule) → reset both reminder stamps so the
+  // 3hr DM / 1hr channel pings fire again against the new time. Leave
+  // them untouched on an unrelated re-run (e.g. just updating weather)
+  // so we don't send a duplicate reminder for the same race time.
+  const raceTimeChanged =
+    existingPost != null &&
+    (existingPost.race_time ? new Date(existingPost.race_time).getTime() : null) !==
+      (raceTime ? new Date(raceTime).getTime() : null);
+
+  const upsertPayload: Record<string, unknown> = {
+    round_id: round.id,
+    division_id: division.id,
+    discord_channel_id: division.discord_checkin_channel_id,
+    weather_text: weatherText,
+    ping_delivery: pingDelivery,
+    race_time: raceTime,
+    track_override: trackOverride,
+    country_override: countryOverride,
+    flag_override: flagOverride,
+    updated_at: new Date().toISOString(),
+  };
+  if (raceTimeChanged) {
+    upsertPayload.dm_reminder_sent_at = null;
+    upsertPayload.channel_reminder_sent_at = null;
+  }
+
   const { data: post, error: postError } = await supabase
     .schema("pitboss")
     .from("round_checkin_posts")
-    .upsert(
-      {
-        round_id: round.id,
-        division_id: division.id,
-        discord_channel_id: division.discord_checkin_channel_id,
-        weather_text: weatherText,
-        ping_delivery: pingDelivery,
-        race_time: raceTime,
-        track_override: trackOverride,
-        country_override: countryOverride,
-        flag_override: flagOverride,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "round_id,division_id" }
-    )
+    .upsert(upsertPayload, { onConflict: "round_id,division_id" })
     .select("id, weather_text, ping_delivery, race_time, track_override, country_override, flag_override")
     .single();
 
