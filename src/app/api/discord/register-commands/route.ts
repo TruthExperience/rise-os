@@ -353,6 +353,25 @@ export async function GET(req: NextRequest) {
           name: "leaderboard",
           description: "View the league's DDV leaderboard, ranked by current DDV",
         },
+        {
+          type: 1,
+          name: "team",
+          description: "View a team's full DDV roster (defaults to your own team, if you're a TP)",
+          options: [
+            {
+              type: 3,
+              name: "team",
+              description: "Team name (defaults to your own team as Team Principal)",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "season",
+              description: "Season code (defaults to the league's current season)",
+              required: false,
+            },
+          ],
+        },
       ],
     },
     {
