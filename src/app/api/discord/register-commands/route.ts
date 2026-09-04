@@ -111,14 +111,14 @@ export async function GET(req: NextRequest) {
               type: 3,
               name: "evidence",
               description:
-                "Link to POV clip / evidence (optional if attaching a file below — at least one of the two is required)",
+                "POV clip / evidence link (optional if attaching a file below — one of the two is required)",
               required: false,
             },
             {
               type: 11,
               name: "evidence_file",
               description:
-                "Upload a POV clip, screenshot, or telemetry file directly (optional if a link is provided above — at least one of the two is required)",
+                "Upload a POV clip, screenshot, or file (optional if a link is provided above — one is required)",
               required: false,
             },
           ],
