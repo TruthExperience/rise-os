@@ -39,6 +39,13 @@ import {
 // cache freshness. generate-grid now fetches franchise_rosters and
 // franchises as two separate queries and joins them client-side. Do not
 // reintroduce an embedded `franchises(...)` select on franchise_rosters.
+//
+// PATCH (2026-09-04): round_checkin_posts gained track_override /
+// country_override / flag_override (all nullable text) so /checkin-create
+// can post a check-in with a manually-typed track instead of only ever
+// trusting calendar_rounds.circuit/country/flag_emoji. Used for late venue
+// swaps or rounds where the calendar row hasn't been fixed yet. See
+// buildCheckinEmbed in checkin-embed.ts for the override precedence.
 
 const ADMIN_FLAGS = [
   "is_owner",
@@ -436,6 +443,15 @@ registerCommand("checkin-remind", async (ctx) => {
  * back to the round's race_date at 15:00 UTC so the countdown still
  * has something to render against).
  *
+ * track / country / flag (all optional free text) — manual override
+ * for the track line, for when calendar_rounds.circuit/country/
+ * flag_emoji is missing or wrong for this round (e.g. a late venue
+ * swap that hasn't been fixed on the calendar yet). When set, these
+ * win over the round's own circuit/country/flag_emoji in the posted
+ * embed — see buildCheckinEmbed's override precedence. `flag` should
+ * be a flag emoji (e.g. 🇯🇵) if you want the flag CDN image to still
+ * render; a plain country name there will just skip the image.
+ *
  * Division is resolved from the `division` option, not the invoking
  * channel — this command is typically run from an admin/mod channel,
  * not the division's own check-in channel, so it uses resolveDivision
@@ -475,7 +491,36 @@ registerCommand("checkin-create", async (ctx) => {
     (ctx.options.race_time as string | undefined) ??
     (round.race_date ? `${round.race_date}T15:00:00Z` : null);
 
+  // Manual track override inputs — empty/omitted means "use the round's
+  // own calendar_rounds data", not "clear whatever was set before" (a
+  // re-run of checkin-create for the same round/division without these
+  // options keeps the previously entered override via upsert semantics
+  // only if we don't overwrite with null — so we explicitly read what's
+  // already stored when the option wasn't passed this time).
+  const trackOverrideInput = ctx.options.track as string | undefined;
+  const countryOverrideInput = ctx.options.country as string | undefined;
+  const flagOverrideInput = ctx.options.flag as string | undefined;
+
   const supabase = createAdminClient();
+
+  let trackOverride = trackOverrideInput ?? null;
+  let countryOverride = countryOverrideInput ?? null;
+  let flagOverride = flagOverrideInput ?? null;
+
+  if (trackOverrideInput === undefined && countryOverrideInput === undefined && flagOverrideInput === undefined) {
+    // No override options passed this run — preserve whatever was
+    // previously stored for this round+division instead of clearing it.
+    const { data: existingPost } = await supabase
+      .schema("pitboss")
+      .from("round_checkin_posts")
+      .select("track_override, country_override, flag_override")
+      .eq("round_id", round.id)
+      .eq("division_id", division.id)
+      .maybeSingle();
+    trackOverride = existingPost?.track_override ?? null;
+    countryOverride = existingPost?.country_override ?? null;
+    flagOverride = existingPost?.flag_override ?? null;
+  }
 
   const { data: post, error: postError } = await supabase
     .schema("pitboss")
@@ -488,11 +533,14 @@ registerCommand("checkin-create", async (ctx) => {
         weather_text: weatherText,
         ping_delivery: pingDelivery,
         race_time: raceTime,
+        track_override: trackOverride,
+        country_override: countryOverride,
+        flag_override: flagOverride,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "round_id,division_id" }
     )
-    .select("id, weather_text, ping_delivery, race_time")
+    .select("id, weather_text, ping_delivery, race_time, track_override, country_override, flag_override")
     .single();
 
   if (postError || !post) {
