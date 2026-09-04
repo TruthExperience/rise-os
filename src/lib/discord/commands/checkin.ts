@@ -55,6 +55,13 @@ import {
 // resets both stamps to null whenever race_time actually changes on a
 // re-run (e.g. a reschedule), so the automated reminders fire again
 // against the new time instead of staying silently "already sent".
+//
+// PATCH (2026-09-04 cont'd 2): ctx.leagueId is optional (CommandContext),
+// so every handler below resolves it into a narrowed `leagueId` local up
+// front and bails with a friendly error if it's missing, instead of
+// passing the optional value straight into functions that expect a
+// required string. Same pattern used in cap.ts — see notes there for why
+// the earlier non-null-assertion / optional-chaining attempts got reverted.
 
 const ADMIN_FLAGS = [
   "is_owner",
@@ -233,19 +240,24 @@ async function fetchGroupedCheckins(roundId: string, divisionId: string) {
 }
 
 registerCommand("checkin", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const status = ctx.options.status as CheckinStatus;
   if (!status) {
     return { content: "status is required.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
   const division = divisionResult.division;
 
   const roundResult = await resolveRound(
-    ctx.leagueId,
+    leagueId,
     ctx.options.round as string | undefined,
     ctx.options.season as string | undefined,
     division.id
@@ -269,7 +281,7 @@ registerCommand("checkin", async (ctx) => {
         round_id: round.id,
         division_id: division.id,
         driver_id: driverResult.driver.id,
-        league_id: ctx.leagueId,
+        league_id: leagueId,
         status,
         checked_in_at: new Date().toISOString(),
       },
@@ -285,19 +297,24 @@ registerCommand("checkin", async (ctx) => {
 });
 
 registerCommand("checkin-status", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
     return { content: "You don't have permission to view check-in status.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
   const division = divisionResult.division;
 
   const roundResult = await resolveRound(
-    ctx.leagueId,
+    leagueId,
     ctx.options.round as string | undefined,
     ctx.options.season as string | undefined,
     division.id
@@ -347,12 +364,17 @@ registerCommand("checkin-status", async (ctx) => {
 });
 
 registerCommand("checkin-remind", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
     return { content: "You don't have permission to send check-in reminders.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
@@ -363,7 +385,7 @@ registerCommand("checkin-remind", async (ctx) => {
     ephemeral: false,
     background: async () => {
       const roundResult = await resolveRound(
-        ctx.leagueId,
+        leagueId,
         ctx.options.round as string | undefined,
         ctx.options.season as string | undefined,
         division.id
@@ -380,7 +402,7 @@ registerCommand("checkin-remind", async (ctx) => {
         .schema("pitboss")
         .from("franchise_rosters")
         .select("driver_id, drivers(discord_id)")
-        .eq("league_id", ctx.leagueId)
+        .eq("league_id", leagueId)
         .eq("season", String(round.season_number))
         .is("released_at", null);
 
@@ -473,7 +495,12 @@ registerCommand("checkin-remind", async (ctx) => {
  * treating them as already sent.
  */
 registerCommand("checkin-create", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
     return { content: "You don't have permission to create a check-in.", ephemeral: true };
   }
@@ -483,14 +510,14 @@ registerCommand("checkin-create", async (ctx) => {
     return { content: "division is required (e.g. \"D1\").", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivision(ctx.leagueId, divisionInput);
+  const divisionResult = await resolveDivision(leagueId, divisionInput);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
   const division = divisionResult.division;
 
   const roundResult = await resolveRound(
-    ctx.leagueId,
+    leagueId,
     ctx.options.round as string | undefined,
     ctx.options.season as string | undefined,
     division.id
@@ -631,12 +658,17 @@ registerCommand("checkin-create", async (ctx) => {
 });
 
 registerCommand("generate-grid", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
     return { content: "You don't have permission to generate the grid.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(ctx.leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
@@ -645,7 +677,7 @@ registerCommand("generate-grid", async (ctx) => {
   const regenerate = Boolean(ctx.options.regenerate);
 
   const roundResult = await resolveRound(
-    ctx.leagueId,
+    leagueId,
     ctx.options.round as string | undefined,
     ctx.options.season as string | undefined,
     division.id
@@ -692,7 +724,7 @@ registerCommand("generate-grid", async (ctx) => {
     .schema("pitboss")
     .from("franchise_rosters")
     .select("driver_id, franchise_id, tier")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .eq("season", String(round.season_number))
     .is("released_at", null)
     .in("driver_id", driverIds);
@@ -729,7 +761,7 @@ registerCommand("generate-grid", async (ctx) => {
   // inserted with a null franchise_id. Surface that gap to the caller.
   const rows = (rosters ?? []).map((r) => ({
     round_id: round.id,
-    league_id: ctx.leagueId,
+    league_id: leagueId,
     driver_id: r.driver_id,
     franchise_id: r.franchise_id,
     tier: r.tier,
