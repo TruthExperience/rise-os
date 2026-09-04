@@ -3,6 +3,22 @@ export interface ResolvedDiscordUser {
   username: string;
 }
 
+/**
+ * Metadata for a file attached to a slash command option of type
+ * ATTACHMENT (11) — e.g. steward report's evidence_file. Discord
+ * sends only the attachment's snowflake ID as the option value;
+ * the actual CDN url/filename/content type live in
+ * interaction.data.resolved.attachments, keyed by that ID. The
+ * router resolves these into this shape the same way it already
+ * does for resolvedUsers.
+ */
+export interface ResolvedDiscordAttachment {
+  id: string;
+  url: string;
+  filename: string;
+  contentType?: string;
+}
+
 export interface CommandContext {
   guildId: string;
   channelId: string;
@@ -11,6 +27,14 @@ export interface CommandContext {
   discordUserId: string;
   options: Record<string, unknown>;
   resolvedUsers: Record<string, ResolvedDiscordUser>;
+  /**
+   * Attachments resolved from any ATTACHMENT-type options on this
+   * command (e.g. evidence_file). Keyed by attachment ID, which is
+   * the raw value Discord puts in `options` for that option — look
+   * up ctx.resolvedAttachments[ctx.options.evidence_file as string]
+   * to get the actual url/filename.
+   */
+  resolvedAttachments: Record<string, ResolvedDiscordAttachment>;
   /** Role IDs the invoking member holds in this guild. */
   memberRoles: string[];
   /**
