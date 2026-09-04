@@ -95,11 +95,14 @@ type CapSummary = {
 };
 
 // Cap usage is computed from active driver_contracts.contract_value
-// rather than trusting franchise_wallets.balance, since that field isn't
-// reliably decremented outside the normal signing flow (see steward
-// chat note — every wallet in HRL currently reads full starting_wallet
-// regardless of active contracts). balanceDrift flags when the two
-// disagree by more than a cent, so a steward can catch it either way.
+// PLUS any non-signing wallet ledger adjustments (race bonuses, DNF/attendance
+// penalties, etc. from league_event_economy_rules). Contract signings and the
+// season start grant are already reflected in contract_value/startingWallet,
+// so they're excluded here to avoid double-counting. We still don't trust
+// franchise_wallets.balance as the primary source (see steward chat note on
+// signing-flow writes being unreliable) — instead we recompute independently
+// and use balanceDrift to flag genuine anomalies (manual edits, bad writes),
+// which no longer fires on every team that's simply played a race.
 async function buildCapSummary(
   supabase: ReturnType<typeof createAdminClient>,
   leagueId: string,
@@ -114,10 +117,25 @@ async function buildCapSummary(
     .eq("franchise_id", franchiseId)
     .eq("status", "active");
 
-  const computedSpend = (contracts ?? []).reduce(
+  const contractSpend = (contracts ?? []).reduce(
     (sum, c) => sum + (Number(c.contract_value) || 0),
     0
   );
+
+  const { data: ledgerAdjustments } = await supabase
+    .schema("pitboss")
+    .from("wallet_transactions")
+    .select("amount")
+    .eq("league_id", leagueId)
+    .eq("franchise_id", franchiseId)
+    .not("transaction_type", "in", '("season_start_grant","contract_signing")');
+
+  // Positive amounts (bonuses) reduce spend; negative amounts (penalties) increase it.
+  const netAdjustment = (ledgerAdjustments ?? []).reduce(
+    (sum, t) => sum + (Number(t.amount) || 0),
+    0
+  );
+  const computedSpend = contractSpend - netAdjustment;
 
   const { data: wallet } = await supabase
     .schema("pitboss")
