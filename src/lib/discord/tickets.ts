@@ -1,4 +1,3 @@
-// tickets.ts
 const VIEW_CHANNEL = 1 << 10; // 1024
 const SEND_MESSAGES = 1 << 11; // 2048
 const READ_MESSAGE_HISTORY = 1 << 16; // 65536
@@ -14,7 +13,13 @@ interface CreateIncidentTicketArgs {
   description: string;
   lap?: number | null;
   round?: number | null;
-  evidenceUrl?: string | null;
+  /**
+   * All evidence submitted at report time — a pasted link and an
+   * uploaded attachment can both be present simultaneously (steward
+   * report requires at least one, but doesn't force a choice between
+   * them). Empty array/null/undefined means no evidence at all.
+   */
+  evidenceUrls?: string[] | null;
 }
 
 /**
@@ -95,6 +100,14 @@ export async function createIncidentTicket(
 
   const channel = await channelRes.json();
 
+  const evidenceUrls = args.evidenceUrls ?? [];
+  const evidenceLine =
+    evidenceUrls.length === 1
+      ? `\nEvidence: ${evidenceUrls[0]}`
+      : evidenceUrls.length > 1
+        ? `\nEvidence:\n${evidenceUrls.map((u) => `- ${u}`).join("\n")}`
+        : null;
+
   const lines = [
     `**Incident ${args.ticketLabel}** — ${args.incidentType}`,
     `Reported by <@${args.reporterDiscordId}>${
@@ -103,7 +116,7 @@ export async function createIncidentTicket(
     args.round ? `Round: ${args.round}` : null,
     args.lap ? `Lap: ${args.lap}` : null,
     `\n${args.description}`,
-    args.evidenceUrl ? `\nEvidence: ${args.evidenceUrl}` : null,
+    evidenceLine,
     `\n<@&${args.stewardRoleId}> — please review.`,
   ].filter(Boolean);
 
