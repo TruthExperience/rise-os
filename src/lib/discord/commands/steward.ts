@@ -109,10 +109,18 @@ registerCommand("steward_report", async (ctx) => {
     ? ctx.resolvedAttachments[evidenceAttachmentId]
     : undefined;
 
-  // Both a pasted link and an uploaded file can be submitted together —
-  // collect whichever were actually provided rather than picking one.
-  // This is the fix for reports where a driver had nowhere to host a
-  // clip and no way to attach it before evidence_file existed.
+  // `evidence` (link) is required on the Discord command schema itself,
+  // so evidenceLink should always be present here — this check is
+  // defensive in case ctx.options doesn't match the schema at runtime.
+  // `evidence_file` stays optional/additive: a photo/clip attachment
+  // can be submitted alongside the link but is never required on its
+  // own.
+  if (!evidenceLink) {
+    return {
+      content: "`evidence` is required — paste a POV link for stewards to review.",
+      ephemeral: true,
+    };
+  }
   const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
     (u): u is string => Boolean(u)
   );
@@ -128,13 +136,6 @@ registerCommand("steward_report", async (ctx) => {
   }
   if (lap === undefined || lap === null) {
     return { content: "`lap` is required.", ephemeral: true };
-  }
-  if (evidenceUrls.length === 0) {
-    return {
-      content:
-        "Evidence is required — either paste a POV link in `evidence`, attach a clip/screenshot with `evidence_file`, or both.",
-      ephemeral: true,
-    };
   }
 
   const reporterId = await getOrCreateDriverId(ctx.discordUserId);
@@ -711,6 +712,17 @@ registerCommand("steward_respond", async (ctx) => {
   const evidenceAttachment = evidenceAttachmentId
     ? ctx.resolvedAttachments[evidenceAttachmentId]
     : undefined;
+
+  // `evidence` (link) is required on the Discord command schema itself,
+  // matching /steward report — this check is defensive in case
+  // ctx.options doesn't match the schema at runtime. `evidence_file`
+  // stays optional/additive.
+  if (!evidenceLink) {
+    return {
+      content: "`evidence` is required — paste a POV link with your defense.",
+      ephemeral: true,
+    };
+  }
   const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
     (u): u is string => Boolean(u)
   );
