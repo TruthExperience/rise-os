@@ -686,6 +686,24 @@ export async function GET(req: NextRequest) {
           description: "Race start time, ISO 8601 (e.g. 2026-09-06T15:00:00Z) — defaults to the round's date at 15:00 UTC",
           required: false,
         },
+        {
+          type: 3,
+          name: "track",
+          description: "Manual track/circuit override — use if the calendar's track is missing or wrong for this round",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "country",
+          description: "Manual country override (pairs with track)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "flag",
+          description: "Manual flag emoji override (e.g. 🇯🇵) — needed for the flag image to render with a manual track",
+          required: false,
+        },
       ],
     },
     {
