@@ -283,7 +283,8 @@ registerCommand("appeal_file", async (ctx) => {
   const rawInput = (ctx.options.incident as string).trim();
   const reason = ctx.options.reason as string;
 
-  const incident = await findIncidentByShortId(ctx.leagueId, rawInput);
+  const incident = await findIncidentByShortId(ctx.leagueId!, rawInput);
+
   if (!incident) {
     return {
       content: `No incident found matching \`${rawInput}\` in this league.`,
