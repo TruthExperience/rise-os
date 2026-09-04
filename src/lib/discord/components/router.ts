@@ -1,4 +1,6 @@
+// components/router.ts
 import { InteractionResponseType } from "discord-interactions";
+import { waitUntil } from "@vercel/functions";
 import { createAdminClient } from "@/lib/supabase/server";
 import { resolveLeagueFromGuild } from "../league-resolver";
 import { getOrCreateDriver } from "../commands/checkin";
@@ -8,13 +10,17 @@ import {
   CHECKIN_STATUSES,
   type CheckinStatus,
 } from "../commands/checkin-embed";
+import { handleAppealPromptComponent } from "../commands/appeal";
+
+const DISCORD_API_BASE = "https://discord.com/api/v10";
 
 /**
  * Single entry point for every MESSAGE_COMPONENT interaction (button
- * clicks, select menus, etc). Currently only handles the check-in
- * buttons (custom_id "checkin_btn:<postId>:<status>") — anything else
- * falls through to a generic "not wired up" reply so unknown
- * components fail loudly instead of silently.
+ * clicks, select menus, etc). Dispatches by custom_id prefix:
+ *   - "checkin_btn:<postId>:<status>" -> handleCheckinButton
+ *   - "appeal_prompt:<yes|no>:<incidentId>" -> handleAppealPrompt
+ * Anything else falls through to a generic "not wired up" reply so
+ * unknown components fail loudly instead of silently.
  */
 export async function routeComponent(interaction: any) {
   const customId: string = interaction.data?.custom_id ?? "";
@@ -23,10 +29,92 @@ export async function routeComponent(interaction: any) {
     return handleCheckinButton(interaction, customId);
   }
 
+  if (customId.startsWith("appeal_prompt:")) {
+    return handleAppealPrompt(interaction, customId);
+  }
+
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: { content: "This button isn't wired up yet.", flags: 64 },
   };
+}
+
+/**
+ * Handles the Yes/No appeal buttons sent by tickets.ts's
+ * sendAppealPromptDM. Deferred (type 6) rather than answered inline —
+ * handleAppealPromptComponent does Supabase lookups plus, on "yes", a
+ * full createAppealTicket() Discord channel-creation round trip, which
+ * is the same class of slow work steward_analyse defers on the
+ * commands side. Same waitUntil + PATCH-@original pattern as
+ * patchOriginalResponse in commands/router.ts — components and
+ * commands share the same webhooks/{app_id}/{token}/messages/@original
+ * follow-up endpoint, so no new helper shape was needed, just reuse
+ * of the pattern.
+ */
+async function handleAppealPrompt(interaction: any, customId: string) {
+  const discordUserId: string =
+    interaction.member?.user?.id ?? interaction.user?.id;
+  const applicationId: string = interaction.application_id;
+  const interactionToken: string = interaction.token;
+
+  if (!discordUserId) {
+    return {
+      type: InteractionResponseType.UPDATE_MESSAGE,
+      data: { content: "Couldn't identify you for that action.", components: [] },
+    };
+  }
+
+  const backgroundWork = (async () => {
+    let final: { content: string };
+    try {
+      final = await handleAppealPromptComponent(customId, discordUserId);
+    } catch (err) {
+      console.error("[discord] appeal_prompt background failed:", err);
+      final = {
+        content:
+          "Something went wrong filing that appeal. Try `/appeal file` directly, or ping a steward.",
+      };
+    }
+    await patchOriginalComponentMessage(applicationId, interactionToken, final.content);
+  })();
+
+  waitUntil(backgroundWork);
+
+  // DEFERRED_UPDATE_MESSAGE (type 6): Discord shows the original DM
+  // as-is (buttons momentarily still visible) until the PATCH below
+  // lands. patchOriginalComponentMessage explicitly clears components
+  // in that PATCH so the buttons still disappear once the real
+  // content arrives — same end state as the synchronous UPDATE_MESSAGE
+  // path, just not atomic with the ACK.
+  return {
+    type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE,
+  };
+}
+
+async function patchOriginalComponentMessage(
+  applicationId: string,
+  interactionToken: string,
+  content: string
+) {
+  try {
+    const res = await fetch(
+      `${DISCORD_API_BASE}/webhooks/${applicationId}/${interactionToken}/messages/@original`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, components: [] }),
+      }
+    );
+    if (!res.ok) {
+      console.error(
+        "[discord] appeal_prompt followup PATCH failed:",
+        res.status,
+        await res.text()
+      );
+    }
+  } catch (err) {
+    console.error("[discord] appeal_prompt followup PATCH threw:", err);
+  }
 }
 
 async function handleCheckinButton(interaction: any, customId: string) {
@@ -90,9 +178,6 @@ async function handleCheckinButton(interaction: any, customId: string) {
   }
   const driverId = driverResult.driver.id;
 
-  // Deselect: clicking the status you already have on file clears your
-  // response instead of re-saving it. Anything else (no existing
-  // response, or a different status) upserts as before.
   const { data: existing, error: existingError } = await supabase
     .schema("pitboss")
     .from("round_checkins")
@@ -170,9 +255,6 @@ async function handleCheckinButton(interaction: any, customId: string) {
   });
   const components = buildCheckinComponents(post.id);
 
-  // UPDATE_MESSAGE (type 7) edits the original message in place as the
-  // interaction response itself — no separate PATCH call needed, and
-  // it's the fastest path within Discord's 3s ACK window.
   return {
     type: InteractionResponseType.UPDATE_MESSAGE,
     data: { embeds: [embed], components },
