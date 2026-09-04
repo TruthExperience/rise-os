@@ -11,6 +11,7 @@ import {
   sendDirectMessage,
   addUserToTicketChannel,
   removeUserFromTicketChannel,
+  sendAppealPromptDM,
 } from "../tickets";
 import { hasDiscordStewardAccess } from "../permissions";
 
@@ -78,6 +79,14 @@ async function getOrCreateDriverId(
   return created.id;
 }
 
+// accused, lap, round, and evidence used to be optional — now
+// mandatory on /steward report so stewards always have a
+// fully-formed report to work from instead of chasing missing context
+// after the fact. Validated defensively below in addition to marking
+// them required on the slash command schema itself (outside these
+// files — wherever /steward report's options are registered with
+// Discord), since ctx.options isn't guaranteed to match the schema at
+// runtime.
 registerCommand("steward_report", async (ctx) => {
   const incidentType = ctx.options.type as string;
   const description = ctx.options.description as string;
@@ -85,6 +94,25 @@ registerCommand("steward_report", async (ctx) => {
   const lap = ctx.options.lap as number | undefined;
   const round = ctx.options.round as number | undefined;
   const evidenceUrl = ctx.options.evidence as string | undefined;
+
+  if (!accusedDiscordId) {
+    return {
+      content: "`accused` is required — name the driver you're filing against.",
+      ephemeral: true,
+    };
+  }
+  if (round === undefined || round === null) {
+    return { content: "`round` is required.", ephemeral: true };
+  }
+  if (lap === undefined || lap === null) {
+    return { content: "`lap` is required.", ephemeral: true };
+  }
+  if (!evidenceUrl) {
+    return {
+      content: "`evidence` is required — stewards need a POV link to review this.",
+      ephemeral: true,
+    };
+  }
 
   const reporterId = await getOrCreateDriverId(ctx.discordUserId);
   if (!reporterId) {
@@ -94,15 +122,11 @@ registerCommand("steward_report", async (ctx) => {
     };
   }
 
-  let accusedDriverId: string | null = null;
-  let accusedUsername: string | null = null;
-  if (accusedDiscordId) {
-    accusedUsername = ctx.resolvedUsers[accusedDiscordId]?.username ?? null;
-    accusedDriverId = await getOrCreateDriverId(
-      accusedDiscordId,
-      accusedUsername ?? undefined
-    );
-  }
+  const accusedUsername = ctx.resolvedUsers[accusedDiscordId]?.username ?? null;
+  const accusedDriverId = await getOrCreateDriverId(
+    accusedDiscordId,
+    accusedUsername ?? undefined
+  );
 
   const supabase = createAdminClient();
 
@@ -131,9 +155,9 @@ registerCommand("steward_report", async (ctx) => {
       accused_discord_username: accusedUsername,
       incident_type: incidentType,
       description,
-      lap: lap ?? null,
-      round: round ?? null,
-      evidence_urls: evidenceUrl ? [evidenceUrl] : [],
+      lap,
+      round,
+      evidence_urls: [evidenceUrl],
       status: "open",
       ticket_number: ticketNumber,
     })
@@ -171,7 +195,7 @@ registerCommand("steward_report", async (ctx) => {
       categoryId: leagueConfig.discord_ticket_category_id,
       stewardRoleId: leagueConfig.discord_steward_role_id,
       reporterDiscordId: ctx.discordUserId,
-      accusedDiscordId: accusedDiscordId ?? null,
+      accusedDiscordId,
       ticketLabel: ticketLabel,
       incidentType,
       description,
@@ -192,17 +216,15 @@ registerCommand("steward_report", async (ctx) => {
     }
   }
 
-  if (accusedDiscordId) {
-    const dmLines = [
-      `You've been named in an incident report — **${ticketLabel}** (${incidentType}) — filed against you.`,
-      `\n${description}`,
-      evidenceUrl ? `\nEvidence submitted against you: ${evidenceUrl}` : null,
-      channelId
-        ? `\nRespond with your side in <#${channelId}> using \`/steward respond\` — you can include your own POV link.`
-        : `\nA steward will follow up with a ticket channel shortly. Once it's open, use \`/steward respond\` there to give your side, including your own POV link if you have one.`,
-    ].filter(Boolean);
-    await sendDirectMessage(accusedDiscordId, dmLines.join("\n"));
-  }
+  const dmLines = [
+    `You've been named in an incident report — **${ticketLabel}** (${incidentType}) — filed against you.`,
+    `\n${description}`,
+    `\nEvidence submitted against you: ${evidenceUrl}`,
+    channelId
+      ? `\nRespond with your side in <#${channelId}> using \`/steward respond\` — you can include your own POV link.`
+      : `\nA steward will follow up with a ticket channel shortly. Once it's open, use \`/steward respond\` there to give your side, including your own POV link if you have one.`,
+  ].filter(Boolean);
+  await sendDirectMessage(accusedDiscordId, dmLines.join("\n"));
 
   return { content: ticketNote, ephemeral: true };
 });
@@ -585,6 +607,14 @@ registerCommand("steward_adduser", async (ctx) => {
   return { content: `Added ${username} to the ticket.`, ephemeral: true };
 });
 
+// Removing the ticket opener (reporter) is intentionally allowed —
+// including from an already-closed ticket, for post-resolution
+// cleanup — but is gated behind `force: true` since it hides the
+// ticket from the person who filed it. If they're being removed from
+// an incident that already has a verdict (resolved/dismissed), they
+// get DMed a Yes/No prompt asking if they want to appeal — see
+// sendAppealPromptDM in tickets.ts and handleAppealPromptComponent in
+// appeal.ts for how the DM buttons are handled.
 registerCommand("steward_removeuser", async (ctx) => {
   const denied = await requireSteward(ctx);
   if (denied) return { content: denied, ephemeral: true };
@@ -602,12 +632,17 @@ registerCommand("steward_removeuser", async (ctx) => {
     return { content: "No user specified.", ephemeral: true };
   }
 
+  const force = Boolean(ctx.options.force);
+
   const reporterDiscordId = (incident as any).drivers?.discord_id as
     | string
     | undefined;
-  if (targetUserId === reporterDiscordId) {
+  const isOpener = targetUserId === reporterDiscordId;
+
+  if (isOpener && !force) {
     return {
-      content: "Can't remove the reporter from their own ticket — close or delete it instead.",
+      content:
+        "That's the ticket opener (reporter) — removing them hides the ticket from the person who filed it. Re-run with `force: true` if that's really what you want, or close/delete the ticket instead.",
       ephemeral: true,
     };
   }
@@ -618,12 +653,28 @@ registerCommand("steward_removeuser", async (ctx) => {
   }
 
   const username = ctx.resolvedUsers[targetUserId]?.username ?? targetUserId;
+  const openerNote = isOpener ? " (ticket opener)" : "";
   await postTicketMessage(
     ctx.channelId,
-    `➖ ${username} was removed from this ticket by a steward.`
+    `➖ ${username}${openerNote} was removed from this ticket by a steward.`
   );
 
-  return { content: `Removed ${username} from the ticket.`, ephemeral: true };
+  let appealPromptNote = "";
+  if (isOpener && (incident.status === "resolved" || incident.status === "dismissed")) {
+    const sent = await sendAppealPromptDM(
+      targetUserId,
+      incident.id,
+      getTicketLabel(incident)
+    );
+    appealPromptNote = sent
+      ? " Sent them a DM asking if they'd like to appeal the verdict."
+      : " Tried to DM them about appealing but couldn't (they may have DMs disabled).";
+  }
+
+  return {
+    content: `Removed ${username}${openerNote} from the ticket.${appealPromptNote}`,
+    ephemeral: true,
+  };
 });
 
 registerCommand("steward_respond", async (ctx) => {
