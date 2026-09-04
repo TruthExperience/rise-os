@@ -20,10 +20,10 @@ export interface ResolvedDiscordAttachment {
 }
 
 export interface CommandContext {
-  guildId: string;
-  channelId: string;
-  leagueId: string;
-  leagueSlug: string;
+  guildId: string | undefined;
+  channelId: string | undefined;
+  leagueId: string | undefined;
+  leagueSlug: string | undefined;
   discordUserId: string;
   options: Record<string, unknown>;
   resolvedUsers: Record<string, ResolvedDiscordUser>;
@@ -78,6 +78,23 @@ export interface DeferredResponse {
 
 export const commandRegistry = new Map<string, CommandHandler>();
 
-export function registerCommand(name: string, handler: CommandHandler) {
+// Commands in this set are allowed to run without a resolved league
+// (e.g. steward_respond, which is written to work from a DM with no
+// guild_id and therefore no league to resolve). Every other command
+// keeps the hard "not linked" requirement in the router.
+const leagueOptionalCommands = new Set<string>();
+
+export function registerCommand(
+  name: string,
+  handler: CommandHandler,
+  options?: { leagueOptional?: boolean }
+) {
   commandRegistry.set(name, handler);
+  if (options?.leagueOptional) {
+    leagueOptionalCommands.add(name);
+  }
+}
+
+export function isLeagueOptional(name: string): boolean {
+  return leagueOptionalCommands.has(name);
 }
