@@ -358,6 +358,53 @@ async function findIncidentByChannel(leagueId: string, channelId: string) {
   return data;
 }
 
+type RespondTargetIncident = {
+  id: string;
+  status: string;
+  ticket_closed_at: string | null;
+  ticket_channel_id: string | null;
+  accused_driver_id: string | null;
+};
+
+// Resolves the incident /steward respond is for when it's run outside
+// the ticket channel entirely — a different channel, or a DM in
+// response to the "you've been named in an incident" notice — where
+// there's no ticket_channel_id to match against. Scoped to incidents
+// where the caller is the accused, keyed by the per-league ticket
+// number they were given. Returns "ambiguous" in the rare case the
+// same driver has an identically-numbered open ticket in more than
+// one league, since ticket numbers are only unique within a league.
+async function findIncidentForAccusedByTicketNumber(
+  discordUserId: string,
+  ticketNumber: number
+): Promise<RespondTargetIncident | "ambiguous" | null> {
+  const supabase = createAdminClient();
+
+  const { data: driver } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id")
+    .eq("discord_id", discordUserId)
+    .maybeSingle();
+
+  if (!driver) return null;
+
+  const { data: rows, error } = await supabase
+    .schema("pitboss")
+    .from("incidents")
+    .select("id, status, ticket_closed_at, ticket_channel_id, accused_driver_id")
+    .eq("accused_driver_id", driver.id)
+    .eq("ticket_number", ticketNumber);
+
+  if (error) {
+    console.error("[steward_respond] ticket-number lookup failed:", error);
+    return null;
+  }
+  if (!rows || rows.length === 0) return null;
+  if (rows.length > 1) return "ambiguous";
+  return rows[0];
+}
+
 const EVIDENCE_SIGNED_URL_EXPIRY_SECONDS = 60 * 60 * 3;
 
 type EvidenceItem = {
@@ -712,6 +759,7 @@ registerCommand("steward_respond", async (ctx) => {
   const evidenceAttachment = evidenceAttachmentId
     ? ctx.resolvedAttachments[evidenceAttachmentId]
     : undefined;
+  const incidentTicketRaw = ctx.options.incident as string | undefined;
 
   // `evidence` (link) is required on the Discord command schema itself,
   // matching /steward report — this check is defensive in case
@@ -727,12 +775,61 @@ registerCommand("steward_respond", async (ctx) => {
     (u): u is string => Boolean(u)
   );
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  // Two ways to identify the incident: running inside the ticket
+  // channel itself (original behavior — fast, no extra input needed),
+  // or specifying the ticket number directly, which lets a driver
+  // respond from anywhere — any channel, or a DM to the "you've been
+  // named" notice — without needing to open the ticket channel first.
+  let incident: RespondTargetIncident | null = null;
+
+  if (ctx.leagueId && ctx.channelId) {
+    const byChannel = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+    if (byChannel) {
+      incident = {
+        id: byChannel.id,
+        status: byChannel.status,
+        ticket_closed_at: byChannel.ticket_closed_at,
+        // byChannel matched on ticket_channel_id === ctx.channelId, so
+        // the channel we're already in IS the ticket channel here.
+        ticket_channel_id: ctx.channelId,
+        accused_driver_id: byChannel.accused_driver_id,
+      };
+    }
+  }
+
   if (!incident) {
-    return {
-      content: "This channel isn't linked to an incident ticket.",
-      ephemeral: true,
-    };
+    if (!incidentTicketRaw) {
+      return {
+        content:
+          "Couldn't tell which incident this is for. Run `/steward respond` inside the ticket channel, or include `incident` with your ticket number (e.g. `0007`) to respond from anywhere, including DMs.",
+        ephemeral: true,
+      };
+    }
+    const ticketNumber = parseInt(incidentTicketRaw.replace(/^0+(?=\d)/, ""), 10);
+    if (Number.isNaN(ticketNumber)) {
+      return {
+        content: "`incident` should be your ticket number, e.g. `0007`.",
+        ephemeral: true,
+      };
+    }
+    const found = await findIncidentForAccusedByTicketNumber(
+      ctx.discordUserId,
+      ticketNumber
+    );
+    if (found === "ambiguous") {
+      return {
+        content:
+          "Found more than one incident with that ticket number against you across different leagues — run `/steward respond` inside the specific ticket channel instead.",
+        ephemeral: true,
+      };
+    }
+    if (!found) {
+      return {
+        content: "Couldn't find an open incident with that ticket number filed against you.",
+        ephemeral: true,
+      };
+    }
+    incident = found;
   }
 
   const supabase = createAdminClient();
@@ -767,7 +864,7 @@ registerCommand("steward_respond", async (ctx) => {
     .update({
       accused_response: responseText,
       accused_response_at: new Date().toISOString(),
-      accused_evidence_urls: evidenceUrls.length > 0 ? evidenceUrls : null,
+      accused_evidence_urls: evidenceUrls,
     })
     .eq("id", incident.id);
 
@@ -779,20 +876,35 @@ registerCommand("steward_respond", async (ctx) => {
     };
   }
 
-  await postTicketMessage(
-    ctx.channelId,
-    [
-      `**Defense submitted by <@${ctx.discordUserId}>:**`,
-      responseText,
-      ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url).map((l) =>
-        l.replace(/^- /, "POV — ")
-      ),
-    ]
-      .filter(Boolean)
-      .join("\n")
-  );
+  const defenseMessage = [
+    `**Defense submitted by <@${ctx.discordUserId}>:**`,
+    responseText,
+    ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url).map((l) =>
+      l.replace(/^- /, "POV — ")
+    ),
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  return { content: "Your response has been recorded.", ephemeral: true };
+  // Always post to the incident's actual ticket channel (not
+  // ctx.channelId) since this may have been submitted from a
+  // different channel or a DM. Let the driver know where it landed
+  // if that's not where they typed the command.
+  let confirmationNote = "";
+  if (incident.ticket_channel_id) {
+    await postTicketMessage(incident.ticket_channel_id, defenseMessage);
+    if (incident.ticket_channel_id !== ctx.channelId) {
+      confirmationNote = ` It's been posted in <#${incident.ticket_channel_id}>.`;
+    }
+  } else {
+    confirmationNote =
+      " No ticket channel is linked to this incident yet, so it wasn't posted anywhere — a steward can still see it on the incident record.";
+  }
+
+  return {
+    content: `Your response has been recorded.${confirmationNote}`,
+    ephemeral: true,
+  };
 });
 
 registerCommand("steward_analyse", async (ctx) => {
