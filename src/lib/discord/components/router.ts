@@ -49,7 +49,9 @@ async function handleCheckinButton(interaction: any, customId: string) {
   const { data: post, error: postError } = await supabase
     .schema("pitboss")
     .from("round_checkin_posts")
-    .select("id, round_id, division_id, weather_text, ping_delivery, race_time")
+    .select(
+      "id, round_id, division_id, weather_text, ping_delivery, race_time, track_override, country_override, flag_override"
+    )
     .eq("id", postId)
     .maybeSingle();
 
