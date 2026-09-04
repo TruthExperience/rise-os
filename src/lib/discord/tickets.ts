@@ -631,3 +631,107 @@ export async function sendDirectMessage(
 
   return true;
 }
+
+/**
+ * DMs a removed ticket opener asking whether they want to appeal the
+ * verdict on the incident they were just removed from, with Yes/No
+ * buttons. Fired from /steward removeuser in steward.ts when
+ * force-removing a ticket opener from an already-resolved/dismissed
+ * incident.
+ *
+ * Deliberately buttons, not a free-text reply: parsing "yes" typed
+ * into a DM would need the bot to hold a persistent Gateway
+ * connection with the MESSAGE_CONTENT privileged intent listening to
+ * DM channels. Nothing in this webhook/interaction architecture does
+ * that today — pitboss-guardian's Gateway connection is guild-scoped
+ * anti-raid/anti-nuke, not DM message listening. Buttons come back as
+ * ordinary MESSAGE_COMPONENT interactions through the same webhook
+ * every slash command already uses.
+ *
+ * custom_id shape: "appeal_prompt:yes:<incidentId>" or
+ * "appeal_prompt:no:<incidentId>" — handled by
+ * handleAppealPromptComponent in appeal.ts. The top-level interaction
+ * handler needs to route MESSAGE_COMPONENT interactions with a
+ * custom_id starting with "appeal_prompt:" there; see that function's
+ * doc comment for the exact contract.
+ */
+export async function sendAppealPromptDM(
+  discordUserId: string,
+  incidentId: string,
+  ticketLabel: string
+): Promise<boolean> {
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
+  if (!token) {
+    console.error("[tickets] PITBOSS_DISCORD_BOT_TOKEN not set");
+    return false;
+  }
+
+  const dmChannelRes = await fetch("https://discord.com/api/v10/users/@me/channels", {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ recipient_id: discordUserId }),
+  });
+
+  if (!dmChannelRes.ok) {
+    console.error(
+      "[tickets] appeal-prompt DM channel creation failed:",
+      dmChannelRes.status,
+      await dmChannelRes.text()
+    );
+    return false;
+  }
+
+  const dmChannel = await dmChannelRes.json();
+
+  const ACTION_ROW = 1;
+  const BUTTON = 2;
+  const PRIMARY_STYLE = 1;
+  const SECONDARY_STYLE = 2;
+
+  const msgRes = await fetch(
+    `https://discord.com/api/v10/channels/${dmChannel.id}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        content: `You were removed from the ticket for incident **${ticketLabel}**. Do you want to appeal the verdict?`,
+        components: [
+          {
+            type: ACTION_ROW,
+            components: [
+              {
+                type: BUTTON,
+                style: PRIMARY_STYLE,
+                label: "Yes, file an appeal",
+                custom_id: `appeal_prompt:yes:${incidentId}`,
+              },
+              {
+                type: BUTTON,
+                style: SECONDARY_STYLE,
+                label: "No",
+                custom_id: `appeal_prompt:no:${incidentId}`,
+              },
+            ],
+          },
+        ],
+      }),
+    }
+  );
+
+  if (!msgRes.ok) {
+    console.error(
+      "[tickets] appeal-prompt DM send failed (user may have DMs disabled):",
+      msgRes.status,
+      await msgRes.text()
+    );
+    return false;
+  }
+
+  return true;
+}
