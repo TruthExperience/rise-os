@@ -180,21 +180,26 @@ function formatCapSummary(s: CapSummary): string {
       : `No wallet record found for this franchise — cap unknown. Spent (from contracts): ${fmtMoney(s.computedSpend)}`,
     `Active contracts: ${s.driverCount}`,
     s.capFreezeActive ? "🧊 Cap freeze is currently active for this franchise." : null,
-    s.seasonsOverSoftCap > 0 ? `⚠️ Over soft cap for ${s.seasonsOverSoftCap} season(s).` : null,
+    s.seasonsOverSoftCap > 0 ? `⚠ Over soft cap for ${s.seasonsOverSoftCap} season(s).` : null,
     s.balanceDrift
-      ? `⚠️ Stored wallet balance (${fmtMoney(s.storedBalance)}) doesn't match cap-minus-contracts (${fmtMoney(s.computedRemaining)}) — wallet may be stale.`
+      ? `⚠ Stored wallet balance (${fmtMoney(s.storedBalance)}) doesn't match cap-minus-contracts (${fmtMoney(s.computedRemaining)}) — wallet may be stale.`
       : null,
   ].filter(Boolean);
   return lines.join("\n");
 }
 
 registerCommand("cap_view", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   const query = ctx.options.franchise as string | undefined;
 
   const resolved = query
-    ? await resolveFranchise(supabase, ctx.leagueId, query)
-    : await resolveOwnFranchise(supabase, ctx.leagueId, ctx.discordUserId);
+    ? await resolveFranchise(supabase, leagueId, query)
+    : await resolveOwnFranchise(supabase, leagueId, ctx.discordUserId);
 
   if (resolved.error || !resolved.franchise) {
     return { content: resolved.error ?? "Couldn't resolve a franchise.", ephemeral: true };
@@ -202,7 +207,7 @@ registerCommand("cap_view", async (ctx) => {
 
   const summary = await buildCapSummary(
     supabase,
-    ctx.leagueId,
+    leagueId,
     resolved.franchise.id,
     resolved.franchise.name
   );
@@ -213,16 +218,16 @@ registerCommand("cap_view", async (ctx) => {
 // Gated on driver_leagues.is_owner / is_co_owner rather than
 // leagues.commissioner_id, to match the "owner/co-owner only" language
 // already used in kick/ban/lockdown's command descriptions.
-async function requireLeagueOwner(ctx: {
-  leagueId: string;
-  discordUserId: string;
-}): Promise<string | null> {
+async function requireLeagueOwner(
+  leagueId: string,
+  discordUserId: string
+): Promise<string | null> {
   const supabase = createAdminClient();
   const { data: driver } = await supabase
     .schema("pitboss")
     .from("drivers")
     .select("id")
-    .eq("discord_id", ctx.discordUserId)
+    .eq("discord_id", discordUserId)
     .maybeSingle();
 
   if (!driver) return "Only the league owner or co-owner can do that.";
@@ -232,7 +237,7 @@ async function requireLeagueOwner(ctx: {
     .from("driver_leagues")
     .select("is_owner, is_co_owner")
     .eq("driver_id", driver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .maybeSingle();
 
   if (!role?.is_owner && !role?.is_co_owner) {
@@ -242,7 +247,12 @@ async function requireLeagueOwner(ctx: {
 }
 
 registerCommand("cap_edit", async (ctx) => {
-  const denied = await requireLeagueOwner(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const denied = await requireLeagueOwner(leagueId, ctx.discordUserId);
   if (denied) return { content: denied, ephemeral: true };
 
   const query = ctx.options.franchise as string | undefined;
@@ -256,7 +266,7 @@ registerCommand("cap_edit", async (ctx) => {
   }
 
   const supabase = createAdminClient();
-  const resolved = await resolveFranchise(supabase, ctx.leagueId, query);
+  const resolved = await resolveFranchise(supabase, leagueId, query);
   if (resolved.error || !resolved.franchise) {
     return { content: resolved.error ?? "Couldn't resolve a franchise.", ephemeral: true };
   }
@@ -265,7 +275,7 @@ registerCommand("cap_edit", async (ctx) => {
     .schema("pitboss")
     .from("franchise_wallets")
     .select("id, starting_wallet")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .eq("franchise_id", resolved.franchise.id)
     .maybeSingle();
 
@@ -296,13 +306,18 @@ registerCommand("cap_edit", async (ctx) => {
 });
 
 registerCommand("cap_league", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
 
   const { data: wallets, error } = await supabase
     .schema("pitboss")
     .from("franchise_wallets")
     .select("franchise_id, division")
-    .eq("league_id", ctx.leagueId);
+    .eq("league_id", leagueId);
 
   if (error) {
     console.error("[cap_league] wallet query failed:", error);
@@ -325,7 +340,7 @@ registerCommand("cap_league", async (ctx) => {
 
   const summaries = await Promise.all(
     wallets.map((w) =>
-      buildCapSummary(supabase, ctx.leagueId, w.franchise_id, nameById.get(w.franchise_id) ?? w.franchise_id)
+      buildCapSummary(supabase, leagueId, w.franchise_id, nameById.get(w.franchise_id) ?? w.franchise_id)
     )
   );
 
@@ -358,10 +373,10 @@ registerCommand("cap_league", async (ctx) => {
   const lines = [
     `**League Salary Cap Summary**`,
     `Total: ${fmtMoney(leagueTotalSpend)} / ${fmtMoney(leagueTotalCap)} (${fmtMoney(leagueTotalRemaining)} remaining across ${summaries.length} franchises)`,
-    overCapCount > 0 ? `⚠️ ${overCapCount} franchise(s) currently over cap.` : null,
+    overCapCount > 0 ? `⚠ ${overCapCount} franchise(s) currently over cap.` : null,
     freezeCount > 0 ? `🧊 ${freezeCount} franchise(s) with an active cap freeze.` : null,
     driftCount > 0
-      ? `⚠️ ${driftCount} franchise(s) where stored wallet balance doesn't match cap-minus-contracts — run \`/cap board\` to see which.`
+      ? `⚠ ${driftCount} franchise(s) where stored wallet balance doesn't match cap-minus-contracts — run \`/cap board\` to see which.`
       : null,
     "",
     ...divisionLines,
@@ -371,6 +386,11 @@ registerCommand("cap_league", async (ctx) => {
 });
 
 registerCommand("cap_board", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   const divisionFilter = ctx.options.division as string | undefined;
   const seasonFilter = ctx.options.season as string | undefined; // "25" | "26"
@@ -379,7 +399,7 @@ registerCommand("cap_board", async (ctx) => {
     .schema("pitboss")
     .from("franchise_wallets")
     .select("franchise_id, division")
-    .eq("league_id", ctx.leagueId);
+    .eq("league_id", leagueId);
 
   if (seasonFilter) {
     // Exact match against the season choice, e.g. "26" -> "F1_26".
@@ -419,7 +439,7 @@ registerCommand("cap_board", async (ctx) => {
 
   const summaries = await Promise.all(
     wallets.map((w) =>
-      buildCapSummary(supabase, ctx.leagueId, w.franchise_id, nameById.get(w.franchise_id) ?? w.franchise_id)
+      buildCapSummary(supabase, leagueId, w.franchise_id, nameById.get(w.franchise_id) ?? w.franchise_id)
     )
   );
 
@@ -428,7 +448,7 @@ registerCommand("cap_board", async (ctx) => {
   summaries.sort((a, b) => (a.computedRemaining ?? Infinity) - (b.computedRemaining ?? Infinity));
 
   const lines = summaries.map((s) => {
-    const flag = s.balanceDrift ? " ⚠️" : "";
+    const flag = s.balanceDrift ? " ⚠" : "";
     const freeze = s.capFreezeActive ? " 🧊" : "";
     return `**${s.franchiseName}** — ${fmtMoney(s.computedSpend)} / ${fmtMoney(s.startingWallet)} (${fmtMoney(s.computedRemaining)} left, ${s.driverCount} contracts)${freeze}${flag}`;
   });
