@@ -189,6 +189,70 @@ async function isTeamPrincipalOfDriver(
   return !!targetOnTeam;
 }
 
+// Whether the caller is TP of a *specific* team (used by ddv_team when a
+// team name is explicitly given, vs isTeamPrincipalOfDriver which checks
+// TP status relative to a target driver).
+async function isCallerTPOfTeam(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  callerDiscordId: string,
+  teamId: string,
+  season: string
+): Promise<boolean> {
+  const { data: caller } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id")
+    .eq("discord_id", callerDiscordId)
+    .maybeSingle();
+  if (!caller) return false;
+
+  const { data: tpRow } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("driver_id")
+    .eq("league_id", leagueId)
+    .eq("season", season)
+    .eq("car_class_team_id", teamId)
+    .eq("driver_id", caller.id)
+    .eq("is_team_principal", true)
+    .maybeSingle();
+
+  return !!tpRow;
+}
+
+// Every team the caller is TP of this season — used by ddv_team when no
+// `team` option is given, so it can default to "my team(s)".
+async function resolveOwnTPTeams(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  callerDiscordId: string,
+  season: string
+): Promise<TeamMatch[]> {
+  const { data: caller } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id")
+    .eq("discord_id", callerDiscordId)
+    .maybeSingle();
+  if (!caller) return [];
+
+  const { data: rows } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("car_class_team_id, car_class_teams!inner(id, team_name)")
+    .eq("league_id", leagueId)
+    .eq("season", season)
+    .eq("driver_id", caller.id)
+    .eq("is_team_principal", true);
+
+  if (!rows) return [];
+  return rows.map((r) => ({
+    id: (r as any).car_class_teams.id,
+    teamName: (r as any).car_class_teams.team_name,
+  }));
+}
+
 function fmtDDV(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return `$${n.toLocaleString("en-US")} $TRL`;
@@ -377,6 +441,109 @@ registerCommand("tp_view", async (ctx) => {
     const driverName = (row as any).drivers.display_name ?? (row as any).drivers.discord_username ?? "Unknown";
     lines.push(`${teamName} — ${driverName}`);
   });
+
+  return { content: lines.join("\n"), ephemeral: true };
+});
+
+// A TP's roster-wide DDV view. Defaults to whichever team(s) the caller is
+// TP of this season; an explicit `team` option lets a league owner/co-owner
+// (or that team's own TP) look up any team. Mirrors tp_view's team-name
+// resolution and requireLeagueOwner/isCallerTPOfTeam's gating pattern.
+registerCommand("ddv_team", async (ctx) => {
+  const supabase = createAdminClient();
+  const teamNameOption = ctx.options.team as string | undefined;
+  const season = (ctx.options.season as string | undefined) ?? (await resolveCurrentSeason(supabase, ctx.leagueId));
+
+  if (!season) {
+    return { content: "No team rosters found for this league yet.", ephemeral: true };
+  }
+
+  let targetTeam: TeamMatch | undefined;
+
+  if (teamNameOption) {
+    const resolved = await resolveTeamByName(supabase, ctx.leagueId, teamNameOption);
+    if (resolved.error || !resolved.team) {
+      return { content: resolved.error ?? "Couldn't resolve a team.", ephemeral: true };
+    }
+    targetTeam = resolved.team;
+
+    const ownerDenied = await requireLeagueOwner(ctx);
+    if (ownerDenied) {
+      const isTP = await isCallerTPOfTeam(supabase, ctx.leagueId, ctx.discordUserId, targetTeam.id, season);
+      if (!isTP) {
+        return {
+          content: "Only the league owner, co-owner, or this team's Team Principal can view team DDV.",
+          ephemeral: true,
+        };
+      }
+    }
+  } else {
+    const ownTeams = await resolveOwnTPTeams(supabase, ctx.leagueId, ctx.discordUserId, season);
+    if (ownTeams.length === 0) {
+      return {
+        content: "You aren't set as Team Principal for any team this season. Specify a `team` to view a different one.",
+        ephemeral: true,
+      };
+    }
+    if (ownTeams.length > 1) {
+      return {
+        content: `You're TP of multiple teams this season: ${ownTeams
+          .map((t) => t.teamName)
+          .join(", ")}. Specify which one with the \`team\` option.`,
+        ephemeral: true,
+      };
+    }
+    targetTeam = ownTeams[0];
+  }
+
+  const { data: roster, error: rosterError } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("driver_id, drivers!inner(display_name, discord_username)")
+    .eq("league_id", ctx.leagueId)
+    .eq("car_class_team_id", targetTeam.id)
+    .eq("season", season);
+
+  if (rosterError) {
+    console.error("[ddv_team] roster lookup failed:", rosterError);
+    return { content: `Couldn't load the roster: ${rosterError.message}`, ephemeral: true };
+  }
+  if (!roster || roster.length === 0) {
+    return {
+      content: `**${targetTeam.teamName}** has no drivers signed for season ${season}.`,
+      ephemeral: true,
+    };
+  }
+
+  const driverIds = roster.map((r) => r.driver_id);
+
+  const { data: ddvRows, error: ddvError } = await supabase
+    .schema("pitboss")
+    .from("driver_ddv")
+    .select("driver_id, current_ddv, tier_at_calc")
+    .eq("league_id", ctx.leagueId)
+    .in("driver_id", driverIds);
+
+  if (ddvError) {
+    console.error("[ddv_team] ddv lookup failed:", ddvError);
+    return { content: `Couldn't load DDV: ${ddvError.message}`, ephemeral: true };
+  }
+
+  const ddvByDriver = new Map((ddvRows ?? []).map((r) => [r.driver_id, r]));
+
+  const lines = [`**${targetTeam.teamName}** — Team DDV (${season})`];
+  let total = 0;
+  roster.forEach((r) => {
+    const name = (r as any).drivers.display_name ?? (r as any).drivers.discord_username ?? "Unknown";
+    const ddv = ddvByDriver.get(r.driver_id);
+    if (ddv) {
+      total += Number(ddv.current_ddv);
+      lines.push(`${name} — ${fmtDDV(Number(ddv.current_ddv))} (Tier: ${ddv.tier_at_calc ?? "—"})`);
+    } else {
+      lines.push(`${name} — no DDV record yet`);
+    }
+  });
+  lines.push(`**Team Total:** ${fmtDDV(total)}`);
 
   return { content: lines.join("\n"), ephemeral: true };
 });
