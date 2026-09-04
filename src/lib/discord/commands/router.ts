@@ -4,6 +4,7 @@ import { resolveLeagueFromGuild } from "../league-resolver";
 import {
   commandRegistry,
   registerCommand,
+  isLeagueOptional,
   type ResolvedDiscordUser,
   type ResolvedDiscordAttachment,
 } from "./registry";
@@ -24,18 +25,18 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
  */
 export async function routeCommand(interaction: any) {
   const topLevelName: string = interaction.data?.name;
-  const guildId: string = interaction.guild_id;
-  const channelId: string = interaction.channel_id;
+  const guildId: string | undefined = interaction.guild_id;
+  const channelId: string | undefined = interaction.channel_id;
   const discordUserId: string =
     interaction.member?.user?.id ?? interaction.user?.id;
   const applicationId: string = interaction.application_id;
   const interactionToken: string = interaction.token;
 
   // Discord includes these directly on the interaction payload for any
-  // command invoked in a guild (which is all commands here, since league
-  // resolution requires guild_id). roles is an array of role ID strings;
+  // command invoked in a guild. roles is an array of role ID strings;
   // permissions is a stringified bitfield already computed by Discord
   // (base role perms + channel overwrites), so no separate fetch needed.
+  // Both are absent/empty in a DM, where there's no member/guild context.
   const memberRoles: string[] = interaction.member?.roles ?? [];
   const memberPermissions: string = interaction.member?.permissions ?? "0";
 
@@ -51,8 +52,12 @@ export async function routeCommand(interaction: any) {
     return respond(`Unknown command: /${topLevelName}`, true);
   }
 
-  const league = await resolveLeagueFromGuild(guildId);
-  if (!league) {
+  // A guildId is required to resolve a league at all — DMs have none.
+  // Commands that can't function without a league still hard-fail here;
+  // commands registered with { leagueOptional: true } (e.g. steward_respond)
+  // are allowed through with league === null.
+  const league = guildId ? await resolveLeagueFromGuild(guildId) : null;
+  if (!league && !isLeagueOptional(commandKey)) {
     return respond(
       "This Discord server isn't linked to a PitBoss league yet. Ask an admin to set `discord_server_id` on the league record.",
       true
@@ -91,8 +96,8 @@ export async function routeCommand(interaction: any) {
     const result = await handler({
       guildId,
       channelId,
-      leagueId: league.id,
-      leagueSlug: league.slug,
+      leagueId: league?.id,
+      leagueSlug: league?.slug,
       discordUserId,
       options,
       resolvedUsers,
