@@ -110,8 +110,16 @@ export async function GET(req: NextRequest) {
             {
               type: 3,
               name: "evidence",
-              description: "Link to POV clip / evidence",
-              required: true,
+              description:
+                "Link to POV clip / evidence (optional if attaching a file below — at least one of the two is required)",
+              required: false,
+            },
+            {
+              type: 11,
+              name: "evidence_file",
+              description:
+                "Upload a POV clip, screenshot, or telemetry file directly (optional if a link is provided above — at least one of the two is required)",
+              required: false,
             },
           ],
         },
@@ -149,7 +157,13 @@ export async function GET(req: NextRequest) {
             {
               type: 3,
               name: "evidence",
-              description: "Link to your own POV clip / evidence",
+              description: "Link to your own POV clip / evidence (optional; you can also attach a file below)",
+              required: false,
+            },
+            {
+              type: 11,
+              name: "evidence_file",
+              description: "Upload your own POV clip or screenshot directly (optional; you can also paste a link above)",
               required: false,
             },
           ],
