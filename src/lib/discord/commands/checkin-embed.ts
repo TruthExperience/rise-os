@@ -52,6 +52,14 @@ export interface CheckinPostInfo {
   weather_text: string | null;
   ping_delivery: string | null;
   race_time: string | null; // ISO timestamp
+  // Manual overrides entered on /checkin-create. When set, these take
+  // priority over the matching field on CheckinRoundInfo — used when
+  // calendar_rounds is missing/wrong track data for a round (e.g. a
+  // late venue swap) and someone needs to type the correct track in
+  // by hand rather than fixing the calendar row first.
+  track_override?: string | null;
+  country_override?: string | null;
+  flag_override?: string | null;
 }
 
 export function roundLabel(round: {
@@ -138,9 +146,16 @@ export function buildCheckinEmbed(params: {
 }): Record<string, unknown> {
   const { round, divisionCode, post, grouped } = params;
 
-  const trackLine = round.circuit
-    ? `📍 **Track:** ${round.flag_emoji ?? ""} ${round.circuit}${round.country ? ` (${round.country})` : ""}`.trim()
-    : `📍 **Track:** ${round.flag_emoji ?? ""} TBD`.trim();
+  // Manual overrides (entered on /checkin-create) win over whatever is
+  // on the resolved calendar_rounds row. Falls back to round data, then
+  // to a bare "TBD" if neither has a circuit set.
+  const effectiveCircuit = post.track_override ?? round.circuit;
+  const effectiveCountry = post.country_override ?? round.country;
+  const effectiveFlag = post.flag_override ?? round.flag_emoji;
+
+  const trackLine = effectiveCircuit
+    ? `📍 **Track:** ${effectiveFlag ?? ""} ${effectiveCircuit}${effectiveCountry ? ` (${effectiveCountry})` : ""}`.trim()
+    : `📍 **Track:** ${effectiveFlag ?? ""} TBD`.trim();
   const pingLine = `📨 **Ping Delivery:** ${post.ping_delivery ?? "Channel only"}`;
   const weatherLine = `☁️ **Weather:** ${post.weather_text ?? "Not set"}`;
 
@@ -175,10 +190,10 @@ export function buildCheckinEmbed(params: {
     };
   });
 
-  const flagUrl = flagImageUrl(round.flag_emoji);
+  const flagUrl = flagImageUrl(effectiveFlag);
 
   return {
-    title: `${round.flag_emoji ?? "🏁"} ${roundLabel(round)} — Division ${divisionCode}`,
+    title: `${effectiveFlag ?? "🏁"} ${roundLabel(round)} — Division ${divisionCode}`,
     description: descriptionParts.join("\n"),
     fields: [legendField, ...statusFields],
     image: flagUrl ? { url: flagUrl } : undefined,
