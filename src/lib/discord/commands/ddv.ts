@@ -253,9 +253,23 @@ async function resolveOwnTPTeams(
   }));
 }
 
-function fmtDDV(n: number | null | undefined): string {
+// Leagues are inconsistently slugged: some are already abbreviations
+// (trl, wsc, aarl, awc), others are full hyphenated names
+// (halo-racing-league). Short slugs are used as-is; hyphenated ones
+// get initialized (halo-racing-league -> HRL) to match the short-form
+// convention the rest of the codebase already uses in comments/docs.
+function leagueCurrencyLabel(slug: string): string {
+  if (!slug.includes("-")) return slug.toUpperCase();
+  return slug
+    .split("-")
+    .map((word) => word[0])
+    .join("")
+    .toUpperCase();
+}
+
+function fmtDDV(n: number | null | undefined, leagueSlug: string): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return `$${n.toLocaleString("en-US")} $TRL`;
+  return `$${n.toLocaleString("en-US")} ${leagueCurrencyLabel(leagueSlug)}`;
 }
 
 registerCommand("ddv_view", async (ctx) => {
@@ -304,7 +318,7 @@ registerCommand("ddv_view", async (ctx) => {
 
   const lines = [
     `**${resolved.driver.displayName}** — Dynamic Driver Value`,
-    `Current: ${fmtDDV(Number(ddv.current_ddv))} | Career Peak: ${fmtDDV(Number(ddv.career_peak_ddv))}`,
+    `Current: ${fmtDDV(Number(ddv.current_ddv), ctx.leagueSlug)} | Career Peak: ${fmtDDV(Number(ddv.career_peak_ddv), ctx.leagueSlug)}`,
     `Tier at last calc: ${ddv.tier_at_calc ?? "—"}`,
   ];
 
@@ -372,7 +386,7 @@ registerCommand("ddv_edit", async (ctx) => {
   const clampedNote = newDDV !== amount ? ` (clamped to the $1M–$150M DDV range)` : "";
 
   return {
-    content: `Updated **${resolved.driver.displayName}**'s DDV: ${fmtDDV(previousDDV)} → ${fmtDDV(newDDV)}${clampedNote}.\nReason: ${reason}`,
+    content: `Updated **${resolved.driver.displayName}**'s DDV: ${fmtDDV(previousDDV, ctx.leagueSlug)} → ${fmtDDV(newDDV, ctx.leagueSlug)}${clampedNote}.\nReason: ${reason}`,
     ephemeral: false,
   };
 });
@@ -538,12 +552,12 @@ registerCommand("ddv_team", async (ctx) => {
     const ddv = ddvByDriver.get(r.driver_id);
     if (ddv) {
       total += Number(ddv.current_ddv);
-      lines.push(`${name} — ${fmtDDV(Number(ddv.current_ddv))} (Tier: ${ddv.tier_at_calc ?? "—"})`);
+      lines.push(`${name} — ${fmtDDV(Number(ddv.current_ddv), ctx.leagueSlug)} (Tier: ${ddv.tier_at_calc ?? "—"})`);
     } else {
       lines.push(`${name} — no DDV record yet`);
     }
   });
-  lines.push(`**Team Total:** ${fmtDDV(total)}`);
+  lines.push(`**Team Total:** ${fmtDDV(total, ctx.leagueSlug)}`);
 
   return { content: lines.join("\n"), ephemeral: true };
 });
@@ -593,7 +607,7 @@ registerCommand("ddv_leaderboard", async (ctx) => {
   const lines = ["**DDV Leaderboard**"];
   rows.forEach((row, i) => {
     const name = (row as any).drivers.display_name ?? (row as any).drivers.discord_username ?? "Unknown";
-    lines.push(`${i + 1}. ${name} — ${fmtDDV(Number(row.current_ddv))}`);
+    lines.push(`${i + 1}. ${name} — ${fmtDDV(Number(row.current_ddv), ctx.leagueSlug)}`);
   });
 
   return { content: lines.join("\n"), ephemeral: false };
