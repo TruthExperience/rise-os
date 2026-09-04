@@ -47,6 +47,16 @@ export function getTicketLabel(incident: {
   return incident.id.slice(0, 8);
 }
 
+// Renders a pasted evidence link and/or an uploaded attachment as
+// labeled bullet lines, so a steward (or the accused, in a DM) never
+// has to guess which URL is which. Either/both args may be omitted.
+function formatEvidenceLines(link?: string, attachmentUrl?: string): string[] {
+  const lines: string[] = [];
+  if (link) lines.push(`- Link: ${link}`);
+  if (attachmentUrl) lines.push(`- Uploaded file: ${attachmentUrl}`);
+  return lines;
+}
+
 async function getOrCreateDriverId(
   discordId: string,
   username?: string
@@ -93,7 +103,19 @@ registerCommand("steward_report", async (ctx) => {
   const accusedDiscordId = ctx.options.accused as string | undefined;
   const lap = ctx.options.lap as number | undefined;
   const round = ctx.options.round as number | undefined;
-  const evidenceUrl = ctx.options.evidence as string | undefined;
+  const evidenceLink = ctx.options.evidence as string | undefined;
+  const evidenceAttachmentId = ctx.options.evidence_file as string | undefined;
+  const evidenceAttachment = evidenceAttachmentId
+    ? ctx.resolvedAttachments[evidenceAttachmentId]
+    : undefined;
+
+  // Both a pasted link and an uploaded file can be submitted together —
+  // collect whichever were actually provided rather than picking one.
+  // This is the fix for reports where a driver had nowhere to host a
+  // clip and no way to attach it before evidence_file existed.
+  const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
+    (u): u is string => Boolean(u)
+  );
 
   if (!accusedDiscordId) {
     return {
@@ -107,9 +129,10 @@ registerCommand("steward_report", async (ctx) => {
   if (lap === undefined || lap === null) {
     return { content: "`lap` is required.", ephemeral: true };
   }
-  if (!evidenceUrl) {
+  if (evidenceUrls.length === 0) {
     return {
-      content: "`evidence` is required — stewards need a POV link to review this.",
+      content:
+        "Evidence is required — either paste a POV link in `evidence`, attach a clip/screenshot with `evidence_file`, or both.",
       ephemeral: true,
     };
   }
@@ -157,7 +180,7 @@ registerCommand("steward_report", async (ctx) => {
       description,
       lap,
       round,
-      evidence_urls: [evidenceUrl],
+      evidence_urls: evidenceUrls,
       status: "open",
       ticket_number: ticketNumber,
     })
@@ -201,7 +224,9 @@ registerCommand("steward_report", async (ctx) => {
       description,
       lap,
       round,
-      evidenceUrl,
+      // tickets.ts's createIncidentTicket now takes evidenceUrls (array)
+      // directly — see that file for the up-to-date signature.
+      evidenceUrls,
     });
 
     if (channelId) {
@@ -219,10 +244,12 @@ registerCommand("steward_report", async (ctx) => {
   const dmLines = [
     `You've been named in an incident report — **${ticketLabel}** (${incidentType}) — filed against you.`,
     `\n${description}`,
-    `\nEvidence submitted against you: ${evidenceUrl}`,
+    ...(evidenceUrls.length > 0
+      ? [`\nEvidence submitted against you:`, ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url)]
+      : []),
     channelId
-      ? `\nRespond with your side in <#${channelId}> using \`/steward respond\` — you can include your own POV link.`
-      : `\nA steward will follow up with a ticket channel shortly. Once it's open, use \`/steward respond\` there to give your side, including your own POV link if you have one.`,
+      ? `\nRespond with your side in <#${channelId}> using \`/steward respond\` — you can include your own POV link or file.`
+      : `\nA steward will follow up with a ticket channel shortly. Once it's open, use \`/steward respond\` there to give your side, including your own POV if you have one.`,
   ].filter(Boolean);
   await sendDirectMessage(accusedDiscordId, dmLines.join("\n"));
 
@@ -679,7 +706,14 @@ registerCommand("steward_removeuser", async (ctx) => {
 
 registerCommand("steward_respond", async (ctx) => {
   const responseText = ctx.options.response as string;
-  const evidenceUrl = ctx.options.evidence as string | undefined;
+  const evidenceLink = ctx.options.evidence as string | undefined;
+  const evidenceAttachmentId = ctx.options.evidence_file as string | undefined;
+  const evidenceAttachment = evidenceAttachmentId
+    ? ctx.resolvedAttachments[evidenceAttachmentId]
+    : undefined;
+  const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
+    (u): u is string => Boolean(u)
+  );
 
   const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
   if (!incident) {
@@ -721,7 +755,7 @@ registerCommand("steward_respond", async (ctx) => {
     .update({
       accused_response: responseText,
       accused_response_at: new Date().toISOString(),
-      accused_evidence_urls: evidenceUrl ? [evidenceUrl] : null,
+      accused_evidence_urls: evidenceUrls.length > 0 ? evidenceUrls : null,
     })
     .eq("id", incident.id);
 
@@ -738,7 +772,9 @@ registerCommand("steward_respond", async (ctx) => {
     [
       `**Defense submitted by <@${ctx.discordUserId}>:**`,
       responseText,
-      evidenceUrl ? `POV: ${evidenceUrl}` : null,
+      ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url).map((l) =>
+        l.replace(/^- /, "POV — ")
+      ),
     ]
       .filter(Boolean)
       .join("\n")
