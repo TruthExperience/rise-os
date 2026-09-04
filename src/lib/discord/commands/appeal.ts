@@ -134,6 +134,151 @@ async function gatherIncidentEvidence(
   return evidence;
 }
 
+/**
+ * Shared core of "file an appeal": creates the incident_appeals row,
+ * flips the incident to appealed, opens the appeal ticket channel if
+ * the league has one configured, and posts to the appeals/incident
+ * pointer channel. Used by both /appeal file (appellant explicitly
+ * runs the command, with a written reason) and
+ * handleAppealPromptComponent below (appellant clicked "Yes" on the
+ * post-removal DM prompt, no written reason yet — see the placeholder
+ * reason used there).
+ *
+ * Note: the "does this incident already have an open appeal" check
+ * happens here, after the caller has already resolved/created the
+ * appellant's driver row — a small behavior change from the original
+ * /appeal file ordering (which checked first), traded for not
+ * duplicating that check across two call sites. Creating a driver row
+ * that turns out to be unnecessary is harmless.
+ */
+async function createAppealRecord(params: {
+  incidentId: string;
+  leagueId: string;
+  ticketLabel: string;
+  appellantDiscordId: string;
+  appellantDriverId: string;
+  reason: string;
+  originalVerdict: string | null;
+  originalPenalty: string | null;
+  originalPenaltyPoints: number | null;
+  evidenceUrls: unknown;
+  accusedEvidenceUrls: unknown;
+  guildId: string;
+}): Promise<{ content: string } | { error: string }> {
+  const supabase = createAdminClient();
+
+  const { data: existingAppeal } = await supabase
+    .schema("pitboss")
+    .from("incident_appeals")
+    .select("id")
+    .eq("incident_id", params.incidentId)
+    .eq("status", "open")
+    .maybeSingle();
+
+  if (existingAppeal) {
+    return { error: `Incident **${params.ticketLabel}** already has an open appeal pending review.` };
+  }
+
+  const { data: appeal, error } = await supabase
+    .schema("pitboss")
+    .from("incident_appeals")
+    .insert({
+      incident_id: params.incidentId,
+      league_id: params.leagueId,
+      appealed_by: params.appellantDriverId,
+      reason: params.reason,
+      original_verdict: params.originalVerdict,
+      original_penalty: params.originalPenalty,
+      original_penalty_points: params.originalPenaltyPoints,
+    })
+    .select("id")
+    .single();
+
+  if (error || !appeal) {
+    console.error("[appeal] createAppealRecord insert failed:", error);
+    return { error: `Something went wrong filing the appeal: ${error?.message ?? "unknown error"}` };
+  }
+
+  const { error: statusError } = await supabase
+    .schema("pitboss")
+    .from("incidents")
+    .update({ status: "appealed" })
+    .eq("id", params.incidentId);
+
+  if (statusError) {
+    console.error("[appeal] incident status update failed:", statusError);
+  }
+
+  const { data: leagueConfig } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select(
+      "discord_ticket_category_id, discord_steward_role_id, discord_incident_channel_id, discord_appeals_channel_id"
+    )
+    .eq("id", params.leagueId)
+    .maybeSingle();
+
+  let ticketChannelId: string | null = null;
+
+  if (leagueConfig?.discord_ticket_category_id && leagueConfig?.discord_steward_role_id) {
+    const evidence = await gatherIncidentEvidence(
+      params.incidentId,
+      params.evidenceUrls,
+      params.accusedEvidenceUrls
+    );
+
+    ticketChannelId = await createAppealTicket({
+      guildId: params.guildId,
+      categoryId: leagueConfig.discord_ticket_category_id,
+      stewardRoleId: leagueConfig.discord_steward_role_id,
+      appellantDiscordId: params.appellantDiscordId,
+      ticketLabel: params.ticketLabel,
+      appealReason: params.reason,
+      originalVerdict: params.originalVerdict,
+      originalPenalty: params.originalPenalty,
+      originalPenaltyPoints: params.originalPenaltyPoints,
+      evidence,
+    });
+
+    if (ticketChannelId) {
+      const { error: channelSaveError } = await supabase
+        .schema("pitboss")
+        .from("incident_appeals")
+        .update({ ticket_channel_id: ticketChannelId })
+        .eq("id", appeal.id);
+      if (channelSaveError) {
+        console.error("[appeal] ticket_channel_id save failed:", channelSaveError);
+      }
+    }
+  }
+
+  // Ping the steward role somewhere durable and discoverable, not just
+  // the new per-appeal ticket. Prefer the dedicated appeals channel if
+  // this league has one configured; fall back to the general incident
+  // channel for leagues that haven't set one up yet.
+  const appealsPointerChannel =
+    leagueConfig?.discord_appeals_channel_id ?? leagueConfig?.discord_incident_channel_id;
+
+  if (appealsPointerChannel) {
+    const pingRole = leagueConfig?.discord_steward_role_id
+      ? `<@&${leagueConfig.discord_steward_role_id}> — `
+      : "";
+    const pointer = ticketChannelId
+      ? `see <#${ticketChannelId}> for the appeal ticket.`
+      : `Use \`/appeal review\` to rule on it.`;
+    await postTicketMessage(
+      appealsPointerChannel,
+      `${pingRole}**Appeal filed** on incident **${params.ticketLabel}** by <@${params.appellantDiscordId}>.\n${params.reason}\n${pointer}`
+    );
+  }
+
+  return {
+    content: ticketChannelId
+      ? `Appeal filed on incident **${params.ticketLabel}** — see <#${ticketChannelId}> for the ticket.`
+      : `Appeal filed on incident **${params.ticketLabel}**, but I couldn't open a ticket channel for it. A steward will still see it via \`/appeal status\`.`,
+  };
+}
+
 registerCommand("appeal_file", async (ctx) => {
   const rawInput = (ctx.options.incident as string).trim();
   const reason = ctx.options.reason as string;
@@ -183,22 +328,6 @@ registerCommand("appeal_file", async (ctx) => {
     };
   }
 
-  // One open appeal per incident at a time.
-  const { data: existingAppeal } = await supabase
-    .schema("pitboss")
-    .from("incident_appeals")
-    .select("id")
-    .eq("incident_id", incident.id)
-    .eq("status", "open")
-    .maybeSingle();
-
-  if (existingAppeal) {
-    return {
-      content: `Incident **${ticketLabel}** already has an open appeal pending review.`,
-      ephemeral: true,
-    };
-  }
-
   const appellantDriverId = await getOrCreateDriverId(ctx.discordUserId);
   if (!appellantDriverId) {
     return {
@@ -207,109 +336,26 @@ registerCommand("appeal_file", async (ctx) => {
     };
   }
 
-  const { data: appeal, error } = await supabase
-    .schema("pitboss")
-    .from("incident_appeals")
-    .insert({
-      incident_id: incident.id,
-      league_id: ctx.leagueId,
-      appealed_by: appellantDriverId,
-      reason,
-      original_verdict: incident.verdict,
-      original_penalty: incident.penalty,
-      original_penalty_points: incident.penalty_points,
-    })
-    .select("id")
-    .single();
+  const result = await createAppealRecord({
+    incidentId: incident.id,
+    leagueId: ctx.leagueId,
+    ticketLabel,
+    appellantDiscordId: ctx.discordUserId,
+    appellantDriverId,
+    reason,
+    originalVerdict: incident.verdict,
+    originalPenalty: incident.penalty,
+    originalPenaltyPoints: incident.penalty_points,
+    evidenceUrls: incident.evidence_urls,
+    accusedEvidenceUrls: incident.accused_evidence_urls,
+    guildId: ctx.guildId,
+  });
 
-  if (error || !appeal) {
-    console.error("[appeal_file] insert failed:", error);
-    return {
-      content: `Something went wrong filing the appeal: ${error?.message ?? "unknown error"}`,
-      ephemeral: true,
-    };
+  if ("error" in result) {
+    return { content: result.error, ephemeral: true };
   }
 
-  const { error: statusError } = await supabase
-    .schema("pitboss")
-    .from("incidents")
-    .update({ status: "appealed" })
-    .eq("id", incident.id);
-
-  if (statusError) {
-    console.error("[appeal_file] incident status update failed:", statusError);
-  }
-
-  const { data: leagueConfig } = await supabase
-    .schema("rise_os")
-    .from("leagues")
-    .select(
-      "discord_ticket_category_id, discord_steward_role_id, discord_incident_channel_id, discord_appeals_channel_id"
-    )
-    .eq("id", ctx.leagueId)
-    .maybeSingle();
-
-  let ticketChannelId: string | null = null;
-
-  if (leagueConfig?.discord_ticket_category_id && leagueConfig?.discord_steward_role_id) {
-    const evidence = await gatherIncidentEvidence(
-      incident.id,
-      incident.evidence_urls,
-      incident.accused_evidence_urls
-    );
-
-    ticketChannelId = await createAppealTicket({
-      guildId: ctx.guildId,
-      categoryId: leagueConfig.discord_ticket_category_id,
-      stewardRoleId: leagueConfig.discord_steward_role_id,
-      appellantDiscordId: ctx.discordUserId,
-      ticketLabel,
-      appealReason: reason,
-      originalVerdict: incident.verdict,
-      originalPenalty: incident.penalty,
-      originalPenaltyPoints: incident.penalty_points,
-      evidence,
-    });
-
-    if (ticketChannelId) {
-      const { error: channelSaveError } = await supabase
-        .schema("pitboss")
-        .from("incident_appeals")
-        .update({ ticket_channel_id: ticketChannelId })
-        .eq("id", appeal.id);
-      if (channelSaveError) {
-        console.error("[appeal_file] ticket_channel_id save failed:", channelSaveError);
-      }
-    }
-  }
-
-  // Ping the steward role somewhere durable and discoverable, not just
-  // the new per-appeal ticket. Prefer the dedicated appeals channel if
-  // this league has one configured; fall back to the general incident
-  // channel for leagues that haven't set one up yet (e.g. TRL, WSC,
-  // AWC as of this writing).
-  const appealsPointerChannel =
-    leagueConfig?.discord_appeals_channel_id ?? leagueConfig?.discord_incident_channel_id;
-
-  if (appealsPointerChannel) {
-    const pingRole = leagueConfig?.discord_steward_role_id
-      ? `<@&${leagueConfig.discord_steward_role_id}> — `
-      : "";
-    const pointer = ticketChannelId
-      ? `see <#${ticketChannelId}> for the appeal ticket.`
-      : `Use \`/appeal review\` to rule on it.`;
-    await postTicketMessage(
-      appealsPointerChannel,
-      `${pingRole}**Appeal filed** on incident **${ticketLabel}** by <@${ctx.discordUserId}>.\n${reason}\n${pointer}`
-    );
-  }
-
-  return {
-    content: ticketChannelId
-      ? `Appeal filed on incident **${ticketLabel}** — see <#${ticketChannelId}> for the ticket.`
-      : `Appeal filed on incident **${ticketLabel}**, but I couldn't open a ticket channel for it. A steward will still see it via \`/appeal status\`.`,
-    ephemeral: true,
-  };
+  return { content: result.content, ephemeral: true };
 });
 
 registerCommand("appeal_status", async (ctx) => {
@@ -516,3 +562,134 @@ registerCommand("appeal_review", async (ctx) => {
     ephemeral: true,
   };
 });
+
+/**
+ * Handles the Yes/No buttons sent by tickets.ts's sendAppealPromptDM
+ * (fired from /steward removeuser when force-removing a ticket
+ * opener from an already-resolved/dismissed incident).
+ *
+ * NOT wired up via registerCommand — this is a MESSAGE_COMPONENT
+ * interaction, not a slash command. Wherever the top-level Discord
+ * interaction handler currently does something like:
+ *
+ *   if (interaction.type === APPLICATION_COMMAND) {
+ *     return runRegisteredCommand(interaction, ...);
+ *   }
+ *
+ * it needs an additional branch:
+ *
+ *   if (
+ *     interaction.type === MESSAGE_COMPONENT &&
+ *     interaction.data.custom_id.startsWith("appeal_prompt:")
+ *   ) {
+ *     const discordUserId =
+ *       interaction.member?.user?.id ?? interaction.user?.id;
+ *     const reply = await handleAppealPromptComponent(
+ *       interaction.data.custom_id,
+ *       discordUserId
+ *     );
+ *     // Respond with interaction response type 7 (UPDATE_MESSAGE) so
+ *     // the buttons on the original DM don't stay clickable:
+ *     //   { type: 7, data: { content: reply.content, components: [] } }
+ *   }
+ *
+ * custom_id shape: "appeal_prompt:yes:<incidentId>" or
+ * "appeal_prompt:no:<incidentId>". The clicking user's identity comes
+ * from the interaction payload itself (not the custom_id), then gets
+ * cross-checked against the incident's reported_by driver below, so a
+ * button in someone else's DM can't be replayed against this incident.
+ */
+export async function handleAppealPromptComponent(
+  customId: string,
+  discordUserId: string
+): Promise<{ content: string }> {
+  const [, answer, incidentId] = customId.split(":");
+
+  if (answer === "no") {
+    return {
+      content:
+        "No appeal filed. If you change your mind, you can still use `/appeal file` before the appeal window closes.",
+    };
+  }
+
+  if (answer !== "yes" || !incidentId) {
+    return { content: "Something went wrong reading that response." };
+  }
+
+  const supabase = createAdminClient();
+
+  const { data: incident, error } = await supabase
+    .schema("pitboss")
+    .from("incidents")
+    .select(
+      "id, league_id, status, verdict, penalty, penalty_points, evidence_urls, accused_evidence_urls, ticket_number, reported_by"
+    )
+    .eq("id", incidentId)
+    .maybeSingle();
+
+  if (error || !incident) {
+    console.error("[appeal] handleAppealPromptComponent incident fetch failed:", error);
+    return { content: "Couldn't find that incident anymore — it may have been deleted." };
+  }
+
+  const ticketLabel = getTicketLabel(incident);
+
+  // Only the original reporter this prompt was sent to can act on it.
+  const { data: reporterDriver } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("discord_id")
+    .eq("id", incident.reported_by)
+    .maybeSingle();
+
+  if (reporterDriver?.discord_id !== discordUserId) {
+    return { content: "This appeal prompt wasn't for you." };
+  }
+
+  if (incident.status !== "resolved" && incident.status !== "dismissed") {
+    return {
+      content: `Incident **${ticketLabel}** is currently *${incident.status}* — only resolved or dismissed incidents can be appealed.`,
+    };
+  }
+
+  const appellantDriverId = await getOrCreateDriverId(discordUserId);
+  if (!appellantDriverId) {
+    return { content: "Couldn't set up your driver record — try again in a moment." };
+  }
+
+  const { data: leagueConfig } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("discord_server_id")
+    .eq("id", incident.league_id)
+    .maybeSingle();
+
+  if (!leagueConfig?.discord_server_id) {
+    console.error(`[appeal] no discord_server_id configured for league ${incident.league_id}`);
+    return {
+      content: `Couldn't open an appeal ticket automatically — ask a steward to run \`/appeal file\` on your behalf for incident **${ticketLabel}**.`,
+    };
+  }
+
+  const result = await createAppealRecord({
+    incidentId: incident.id,
+    leagueId: incident.league_id,
+    ticketLabel,
+    appellantDiscordId: discordUserId,
+    appellantDriverId,
+    reason:
+      "Appeal requested via post-removal DM prompt — no written reason provided yet. Add detail with a follow-up message in the appeal ticket.",
+    originalVerdict: incident.verdict,
+    originalPenalty: incident.penalty,
+    originalPenaltyPoints: incident.penalty_points,
+    evidenceUrls: incident.evidence_urls,
+    accusedEvidenceUrls: incident.accused_evidence_urls,
+    guildId: leagueConfig.discord_server_id,
+  });
+
+  if ("error" in result) {
+    return { content: result.error };
+  }
+
+  return { content: result.content };
+}
