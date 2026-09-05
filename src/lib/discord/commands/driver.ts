@@ -165,7 +165,12 @@ async function deductSigningFromWallet(params: {
 }
 
 registerCommand("sign-driver", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...EDITOR_FLAGS])) {
     return { content: "You don't have permission to sign drivers.", ephemeral: true };
   }
@@ -187,7 +192,7 @@ registerCommand("sign-driver", async (ctx) => {
 
   const supabase = createAdminClient();
 
-  const franchiseResult = await resolveFranchise(ctx.leagueId, franchiseInput);
+  const franchiseResult = await resolveFranchise(leagueId, franchiseInput);
   if ("error" in franchiseResult) {
     return { content: `${franchiseResult.error}`, ephemeral: true };
   }
@@ -211,7 +216,7 @@ registerCommand("sign-driver", async (ctx) => {
     .from("franchise_rosters")
     .select("id, franchise_id, season")
     .eq("driver_id", driver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .is("released_at", null)
     .maybeSingle();
 
@@ -233,7 +238,7 @@ registerCommand("sign-driver", async (ctx) => {
     .schema("pitboss")
     .from("driver_leagues")
     .upsert(
-      { driver_id: driver.id, league_id: ctx.leagueId, is_driver: true },
+      { driver_id: driver.id, league_id: leagueId, is_driver: true },
       { onConflict: "driver_id,league_id" }
     );
   if (membershipUpsertError) {
@@ -250,7 +255,7 @@ registerCommand("sign-driver", async (ctx) => {
     .insert({
       driver_id: driver.id,
       franchise_id: franchise.id,
-      league_id: ctx.leagueId,
+      league_id: leagueId,
       division: franchise.division,
       season,
       tier: tierInput || null,
@@ -275,7 +280,7 @@ registerCommand("sign-driver", async (ctx) => {
     .schema("pitboss")
     .from("league_financial_config")
     .select("division")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .limit(1);
 
   const financialNotes: string[] = [];
@@ -288,7 +293,7 @@ registerCommand("sign-driver", async (ctx) => {
       .insert({
         driver_id: driver.id,
         franchise_id: franchise.id,
-        league_id: ctx.leagueId,
+        league_id: leagueId,
         contract_class: contractClass,
         division: franchise.division,
         season_start: season,
@@ -319,7 +324,7 @@ registerCommand("sign-driver", async (ctx) => {
           .schema("pitboss")
           .from("league_event_economy_rules")
           .select("driver_value_delta, team_budget_delta")
-          .eq("league_id", ctx.leagueId)
+          .eq("league_id", leagueId)
           .eq("rule_key", `signing_${candidateKey}`)
           .maybeSingle();
 
@@ -348,7 +353,7 @@ registerCommand("sign-driver", async (ctx) => {
             .from("driver_leagues")
             .update({ market_value: rule.driver_value_delta })
             .eq("driver_id", driver.id)
-            .eq("league_id", ctx.leagueId);
+            .eq("league_id", leagueId);
           if (marketValueError) {
             console.error("[sign-driver] market_value update failed:", marketValueError);
             financialNotes.push(`Roster saved, but setting market value failed: ${marketValueError.message}.`);
@@ -368,7 +373,7 @@ registerCommand("sign-driver", async (ctx) => {
           const deductionResult = await deductSigningFromWallet({
             franchiseId: franchise.id,
             division: franchise.division,
-            leagueId: ctx.leagueId,
+            leagueId,
             season,
             amount: budgetDelta,
             description: `Salary deduction for driver signing (${tierInput.toUpperCase()})`,
@@ -395,7 +400,12 @@ registerCommand("sign-driver", async (ctx) => {
 });
 
 registerCommand("release-driver", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...EDITOR_FLAGS])) {
     return { content: "You don't have permission to release drivers.", ephemeral: true };
   }
@@ -443,7 +453,7 @@ registerCommand("release-driver", async (ctx) => {
     .from("franchise_rosters")
     .select("id, franchise_id, season")
     .eq("driver_id", driver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .is("released_at", null);
 
   if (activeErr) {
@@ -458,7 +468,7 @@ registerCommand("release-driver", async (ctx) => {
     // don't guess which one to release — surface it for manual cleanup.
     const seasons = activeRosters.map((r) => r.season).join(", ");
     console.error(
-      `[release-driver] data integrity: driver ${driver.id} has ${activeRosters.length} active roster rows in league ${ctx.leagueId} (seasons: ${seasons}) — unique index should have prevented this.`
+      `[release-driver] data integrity: driver ${driver.id} has ${activeRosters.length} active roster rows in league ${leagueId} (seasons: ${seasons}) — unique index should have prevented this.`
     );
     return {
       content: `<@${targetDiscordId}> has more than one active roster row in this league (seasons: ${seasons}). This shouldn't be possible — needs manual DB cleanup before releasing.`,
@@ -491,7 +501,7 @@ registerCommand("release-driver", async (ctx) => {
     .update({ status: "released", released_at: releasedAt, released_reason: reason })
     .eq("driver_id", driver.id)
     .eq("franchise_id", activeRoster.franchise_id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .eq("season_start", activeRoster.season)
     .eq("status", "active");
   if (contractReleaseError) {
