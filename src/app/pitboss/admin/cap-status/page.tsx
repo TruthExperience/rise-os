@@ -201,7 +201,7 @@ export default async function CapStatusPage({
                   {formatMoney(group.cap.hard_apron)}
                 </p>
               ) : (
-                <p className="text-sm text-[#8A8D93]">No cap configured for this division</p>
+                <p className="text-sm text-[#8A8D93]">Uncapped</p>
               )}
             </div>
 
@@ -269,7 +269,9 @@ export default async function CapStatusPage({
                           />
                         </div>
                         <p className="mt-1.5 text-[11px] text-[#8A8D93]">
-                          {formatMoney(spend)} spent of {cap ? formatMoney(cap.soft_cap) : "—"} soft cap
+                          {cap
+                            ? `${formatMoney(spend)} spent of ${formatMoney(cap.soft_cap)} soft cap`
+                            : `${formatMoney(spend)} spent · uncapped`}
                         </p>
                       </div>
                     ) : (
