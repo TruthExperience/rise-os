@@ -98,6 +98,15 @@ async function getOrCreateDriverId(
 // Discord), since ctx.options isn't guaranteed to match the schema at
 // runtime.
 registerCommand("steward_report", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
   const incidentType = ctx.options.type as string;
   const description = ctx.options.description as string;
   const accusedDiscordId = ctx.options.accused as string | undefined;
@@ -159,7 +168,7 @@ registerCommand("steward_report", async (ctx) => {
   // number already set rather than backfilled after the fact.
   const { data: ticketNumber, error: ticketNumberError } = await supabase
     .schema("rise_os")
-    .rpc("increment_ticket_number", { p_league_id: ctx.leagueId });
+    .rpc("increment_ticket_number", { p_league_id: leagueId });
 
   if (ticketNumberError || ticketNumber === null || ticketNumber === undefined) {
     console.error("[steward_report] ticket number claim failed:", ticketNumberError);
@@ -173,7 +182,7 @@ registerCommand("steward_report", async (ctx) => {
     .schema("pitboss")
     .from("incidents")
     .insert({
-      league_id: ctx.leagueId,
+      league_id: leagueId,
       reported_by: reporterId,
       accused_driver_id: accusedDriverId,
       accused_discord_username: accusedUsername,
@@ -202,7 +211,7 @@ registerCommand("steward_report", async (ctx) => {
     .schema("rise_os")
     .from("leagues")
     .select("discord_ticket_category_id, discord_steward_role_id")
-    .eq("id", ctx.leagueId)
+    .eq("id", leagueId)
     .maybeSingle();
 
   let channelId: string | null = null;
@@ -215,7 +224,7 @@ registerCommand("steward_report", async (ctx) => {
     ticketNote = `Incident **${ticketLabel}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status with \`/steward status\`.`;
   } else {
     channelId = await createIncidentTicket({
-      guildId: ctx.guildId,
+      guildId,
       categoryId: leagueConfig.discord_ticket_category_id,
       stewardRoleId: leagueConfig.discord_steward_role_id,
       reporterDiscordId: ctx.discordUserId,
@@ -258,12 +267,17 @@ registerCommand("steward_report", async (ctx) => {
 });
 
 registerCommand("steward_status", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   const { data, error } = await supabase
     .schema("pitboss")
     .from("incidents")
     .select("id, incident_type, status, created_at, accused_discord_username, ticket_number")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .in("status", ["open", "under_review", "appealed"])
     .order("created_at", { ascending: false })
     .limit(5);
@@ -495,16 +509,34 @@ async function archiveTranscriptToChannel(
     console.error(
       `[steward] failed to archive transcript for incident ${incidentId} to configured channel`
     );
-    return " ⚠️ Couldn't archive the transcript to the configured channel — check the bot's permissions there.";
+    return " ⚠ Couldn't archive the transcript to the configured channel — check the bot's permissions there.";
   }
   return null;
 }
 
 registerCommand("steward_close", async (ctx) => {
-  const denied = await requireSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -519,7 +551,7 @@ registerCommand("steward_close", async (ctx) => {
     defer: true,
     ephemeral: true,
     background: async () => {
-      const transcript = await buildTicketTranscript(ctx.channelId);
+      const transcript = await buildTicketTranscript(channelId);
 
       const supabase = createAdminClient();
       const { error } = await supabase
@@ -556,17 +588,17 @@ registerCommand("steward_close", async (ctx) => {
       }
 
       if (discordIds.length > 0) {
-        await lockTicketChannel(ctx.channelId, discordIds);
+        await lockTicketChannel(channelId, discordIds);
       }
       await postTicketMessage(
-        ctx.channelId,
+        channelId,
         "🔒 This ticket has been closed by a steward. A transcript has been saved. Use `/steward delete` to remove this channel once you're done reviewing it."
       );
 
       const archiveWarning = await archiveTranscriptToChannel(
         supabase,
-        ctx.leagueId,
-        ctx.channelId,
+        leagueId,
+        channelId,
         incident.id,
         incident.ticket_number,
         transcript
@@ -580,10 +612,28 @@ registerCommand("steward_close", async (ctx) => {
 });
 
 registerCommand("steward_transcript", async (ctx) => {
-  const denied = await requireSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -592,7 +642,7 @@ registerCommand("steward_transcript", async (ctx) => {
   }
 
   const transcript =
-    incident.ticket_transcript ?? (await buildTicketTranscript(ctx.channelId));
+    incident.ticket_transcript ?? (await buildTicketTranscript(channelId));
 
   if (!transcript) {
     return { content: "Couldn't build a transcript for this ticket.", ephemeral: true };
@@ -601,8 +651,8 @@ registerCommand("steward_transcript", async (ctx) => {
   const supabase = createAdminClient();
   const archiveWarning = await archiveTranscriptToChannel(
     supabase,
-    ctx.leagueId,
-    ctx.channelId,
+    leagueId,
+    channelId,
     incident.id,
     incident.ticket_number,
     transcript
@@ -620,10 +670,28 @@ registerCommand("steward_transcript", async (ctx) => {
 });
 
 registerCommand("steward_delete", async (ctx) => {
-  const denied = await requireSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -637,19 +705,37 @@ registerCommand("steward_delete", async (ctx) => {
     };
   }
 
-  const ok = await deleteTicketChannel(ctx.channelId);
+  const ok = await deleteTicketChannel(channelId);
   if (!ok) {
     return { content: "Couldn't delete the channel — check my permissions.", ephemeral: true };
   }
 
-  return { content: "🗑️ Ticket deleted.", ephemeral: true };
+  return { content: "🗑 Ticket deleted.", ephemeral: true };
 });
 
 registerCommand("steward_adduser", async (ctx) => {
-  const denied = await requireSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -668,14 +754,14 @@ registerCommand("steward_adduser", async (ctx) => {
     return { content: "No user specified.", ephemeral: true };
   }
 
-  const ok = await addUserToTicketChannel(ctx.channelId, targetUserId);
+  const ok = await addUserToTicketChannel(channelId, targetUserId);
   if (!ok) {
     return { content: "Couldn't add that user — check my permissions.", ephemeral: true };
   }
 
   const username = ctx.resolvedUsers[targetUserId]?.username ?? targetUserId;
   await postTicketMessage(
-    ctx.channelId,
+    channelId,
     `➕ <@${targetUserId}> (${username}) was added to this ticket by a steward.`
   );
 
@@ -691,10 +777,28 @@ registerCommand("steward_adduser", async (ctx) => {
 // sendAppealPromptDM in tickets.ts and handleAppealPromptComponent in
 // appeal.ts for how the DM buttons are handled.
 registerCommand("steward_removeuser", async (ctx) => {
-  const denied = await requireSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -722,7 +826,7 @@ registerCommand("steward_removeuser", async (ctx) => {
     };
   }
 
-  const ok = await removeUserFromTicketChannel(ctx.channelId, targetUserId);
+  const ok = await removeUserFromTicketChannel(channelId, targetUserId);
   if (!ok) {
     return { content: "Couldn't remove that user — check my permissions.", ephemeral: true };
   }
@@ -730,7 +834,7 @@ registerCommand("steward_removeuser", async (ctx) => {
   const username = ctx.resolvedUsers[targetUserId]?.username ?? targetUserId;
   const openerNote = isOpener ? " (ticket opener)" : "";
   await postTicketMessage(
-    ctx.channelId,
+    channelId,
     `➖ ${username}${openerNote} was removed from this ticket by a steward.`
   );
 
@@ -752,166 +856,195 @@ registerCommand("steward_removeuser", async (ctx) => {
   };
 });
 
-registerCommand("steward_respond", async (ctx) => {
-  const responseText = ctx.options.response as string;
-  const evidenceLink = ctx.options.evidence as string | undefined;
-  const evidenceAttachmentId = ctx.options.evidence_file as string | undefined;
-  const evidenceAttachment = evidenceAttachmentId
-    ? ctx.resolvedAttachments[evidenceAttachmentId]
-    : undefined;
-  const incidentTicketRaw = ctx.options.incident as string | undefined;
+// Registered with { leagueOptional: true } — this is meant to work
+// from a DM in response to the "you've been named in an incident"
+// notice, which has no guild_id and therefore no league to resolve
+// (see the router's isLeagueOptional check). Without this flag the
+// router rejects the interaction with "server isn't linked to a
+// league" before this handler's own ctx.leagueId/ctx.channelId
+// fallback logic below ever runs.
+registerCommand(
+  "steward_respond",
+  async (ctx) => {
+    const responseText = ctx.options.response as string;
+    const evidenceLink = ctx.options.evidence as string | undefined;
+    const evidenceAttachmentId = ctx.options.evidence_file as string | undefined;
+    const evidenceAttachment = evidenceAttachmentId
+      ? ctx.resolvedAttachments[evidenceAttachmentId]
+      : undefined;
+    const incidentTicketRaw = ctx.options.incident as string | undefined;
 
-  // `evidence` (link) is required on the Discord command schema itself,
-  // matching /steward report — this check is defensive in case
-  // ctx.options doesn't match the schema at runtime. `evidence_file`
-  // stays optional/additive.
-  if (!evidenceLink) {
-    return {
-      content: "`evidence` is required — paste a POV link with your defense.",
-      ephemeral: true,
-    };
-  }
-  const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
-    (u): u is string => Boolean(u)
-  );
-
-  // Two ways to identify the incident: running inside the ticket
-  // channel itself (original behavior — fast, no extra input needed),
-  // or specifying the ticket number directly, which lets a driver
-  // respond from anywhere — any channel, or a DM to the "you've been
-  // named" notice — without needing to open the ticket channel first.
-  let incident: RespondTargetIncident | null = null;
-
-  if (ctx.leagueId && ctx.channelId) {
-    const byChannel = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
-    if (byChannel) {
-      incident = {
-        id: byChannel.id,
-        status: byChannel.status,
-        ticket_closed_at: byChannel.ticket_closed_at,
-        // byChannel matched on ticket_channel_id === ctx.channelId, so
-        // the channel we're already in IS the ticket channel here.
-        ticket_channel_id: ctx.channelId,
-        accused_driver_id: byChannel.accused_driver_id,
-      };
-    }
-  }
-
-  if (!incident) {
-    if (!incidentTicketRaw) {
+    // `evidence` (link) is required on the Discord command schema itself,
+    // matching /steward report — this check is defensive in case
+    // ctx.options doesn't match the schema at runtime. `evidence_file`
+    // stays optional/additive.
+    if (!evidenceLink) {
       return {
-        content:
-          "Couldn't tell which incident this is for. Run `/steward respond` inside the ticket channel, or include `incident` with your ticket number (e.g. `0007`) to respond from anywhere, including DMs.",
+        content: "`evidence` is required — paste a POV link with your defense.",
         ephemeral: true,
       };
     }
-    const ticketNumber = parseInt(incidentTicketRaw.replace(/^0+(?=\d)/, ""), 10);
-    if (Number.isNaN(ticketNumber)) {
-      return {
-        content: "`incident` should be your ticket number, e.g. `0007`.",
-        ephemeral: true,
-      };
-    }
-    const found = await findIncidentForAccusedByTicketNumber(
-      ctx.discordUserId,
-      ticketNumber
+    const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
+      (u): u is string => Boolean(u)
     );
-    if (found === "ambiguous") {
-      return {
-        content:
-          "Found more than one incident with that ticket number against you across different leagues — run `/steward respond` inside the specific ticket channel instead.",
-        ephemeral: true,
-      };
-    }
-    if (!found) {
-      return {
-        content: "Couldn't find an open incident with that ticket number filed against you.",
-        ephemeral: true,
-      };
-    }
-    incident = found;
-  }
 
-  const supabase = createAdminClient();
-  let accusedDiscordId: string | undefined;
-  if (incident.accused_driver_id) {
-    const { data: accusedDriver } = await supabase
+    // Two ways to identify the incident: running inside the ticket
+    // channel itself (original behavior — fast, no extra input needed),
+    // or specifying the ticket number directly, which lets a driver
+    // respond from anywhere — any channel, or a DM to the "you've been
+    // named" notice — without needing to open the ticket channel first.
+    let incident: RespondTargetIncident | null = null;
+
+    if (ctx.leagueId && ctx.channelId) {
+      const byChannel = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+      if (byChannel) {
+        incident = {
+          id: byChannel.id,
+          status: byChannel.status,
+          ticket_closed_at: byChannel.ticket_closed_at,
+          // byChannel matched on ticket_channel_id === ctx.channelId, so
+          // the channel we're already in IS the ticket channel here.
+          ticket_channel_id: ctx.channelId,
+          accused_driver_id: byChannel.accused_driver_id,
+        };
+      }
+    }
+
+    if (!incident) {
+      if (!incidentTicketRaw) {
+        return {
+          content:
+            "Couldn't tell which incident this is for. Run `/steward respond` inside the ticket channel, or include `incident` with your ticket number (e.g. `0007`) to respond from anywhere, including DMs.",
+          ephemeral: true,
+        };
+      }
+      const ticketNumber = parseInt(incidentTicketRaw.replace(/^0+(?=\d)/, ""), 10);
+      if (Number.isNaN(ticketNumber)) {
+        return {
+          content: "`incident` should be your ticket number, e.g. `0007`.",
+          ephemeral: true,
+        };
+      }
+      const found = await findIncidentForAccusedByTicketNumber(
+        ctx.discordUserId,
+        ticketNumber
+      );
+      if (found === "ambiguous") {
+        return {
+          content:
+            "Found more than one incident with that ticket number against you across different leagues — run `/steward respond` inside the specific ticket channel instead.",
+          ephemeral: true,
+        };
+      }
+      if (!found) {
+        return {
+          content: "Couldn't find an open incident with that ticket number filed against you.",
+          ephemeral: true,
+        };
+      }
+      incident = found;
+    }
+
+    const supabase = createAdminClient();
+    let accusedDiscordId: string | undefined;
+    if (incident.accused_driver_id) {
+      const { data: accusedDriver } = await supabase
+        .schema("pitboss")
+        .from("drivers")
+        .select("discord_id")
+        .eq("id", incident.accused_driver_id)
+        .maybeSingle();
+      accusedDiscordId = accusedDriver?.discord_id;
+    }
+
+    if (!accusedDiscordId || accusedDiscordId !== ctx.discordUserId) {
+      return {
+        content: "Only the driver named in this incident can submit a defense.",
+        ephemeral: true,
+      };
+    }
+
+    if (incident.ticket_closed_at) {
+      return {
+        content: "This ticket is already closed — ask a steward to reopen it if you still need to respond.",
+        ephemeral: true,
+      };
+    }
+
+    const { error } = await supabase
       .schema("pitboss")
-      .from("drivers")
-      .select("discord_id")
-      .eq("id", incident.accused_driver_id)
-      .maybeSingle();
-    accusedDiscordId = accusedDriver?.discord_id;
-  }
+      .from("incidents")
+      .update({
+        accused_response: responseText,
+        accused_response_at: new Date().toISOString(),
+        accused_evidence_urls: evidenceUrls,
+      })
+      .eq("id", incident.id);
 
-  if (!accusedDiscordId || accusedDiscordId !== ctx.discordUserId) {
-    return {
-      content: "Only the driver named in this incident can submit a defense.",
-      ephemeral: true,
-    };
-  }
-
-  if (incident.ticket_closed_at) {
-    return {
-      content: "This ticket is already closed — ask a steward to reopen it if you still need to respond.",
-      ephemeral: true,
-    };
-  }
-
-  const { error } = await supabase
-    .schema("pitboss")
-    .from("incidents")
-    .update({
-      accused_response: responseText,
-      accused_response_at: new Date().toISOString(),
-      accused_evidence_urls: evidenceUrls,
-    })
-    .eq("id", incident.id);
-
-  if (error) {
-    console.error("[steward_respond] update failed:", error);
-    return {
-      content: `Couldn't save your response: ${error.message}`,
-      ephemeral: true,
-    };
-  }
-
-  const defenseMessage = [
-    `**Defense submitted by <@${ctx.discordUserId}>:**`,
-    responseText,
-    ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url).map((l) =>
-      l.replace(/^- /, "POV — ")
-    ),
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  // Always post to the incident's actual ticket channel (not
-  // ctx.channelId) since this may have been submitted from a
-  // different channel or a DM. Let the driver know where it landed
-  // if that's not where they typed the command.
-  let confirmationNote = "";
-  if (incident.ticket_channel_id) {
-    await postTicketMessage(incident.ticket_channel_id, defenseMessage);
-    if (incident.ticket_channel_id !== ctx.channelId) {
-      confirmationNote = ` It's been posted in <#${incident.ticket_channel_id}>.`;
+    if (error) {
+      console.error("[steward_respond] update failed:", error);
+      return {
+        content: `Couldn't save your response: ${error.message}`,
+        ephemeral: true,
+      };
     }
-  } else {
-    confirmationNote =
-      " No ticket channel is linked to this incident yet, so it wasn't posted anywhere — a steward can still see it on the incident record.";
-  }
 
-  return {
-    content: `Your response has been recorded.${confirmationNote}`,
-    ephemeral: true,
-  };
-});
+    const defenseMessage = [
+      `**Defense submitted by <@${ctx.discordUserId}>:**`,
+      responseText,
+      ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url).map((l) =>
+        l.replace(/^- /, "POV — ")
+      ),
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    // Always post to the incident's actual ticket channel (not
+    // ctx.channelId) since this may have been submitted from a
+    // different channel or a DM. Let the driver know where it landed
+    // if that's not where they typed the command.
+    let confirmationNote = "";
+    if (incident.ticket_channel_id) {
+      await postTicketMessage(incident.ticket_channel_id, defenseMessage);
+      if (incident.ticket_channel_id !== ctx.channelId) {
+        confirmationNote = ` It's been posted in <#${incident.ticket_channel_id}>.`;
+      }
+    } else {
+      confirmationNote =
+        " No ticket channel is linked to this incident yet, so it wasn't posted anywhere — a steward can still see it on the incident record.";
+    }
+
+    return {
+      content: `Your response has been recorded.${confirmationNote}`,
+      ephemeral: true,
+    };
+  },
+  { leagueOptional: true }
+);
 
 registerCommand("steward_analyse", async (ctx) => {
-  const denied = await requireSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -947,7 +1080,7 @@ registerCommand("steward_analyse", async (ctx) => {
         );
 
       const transcript =
-        fullIncident.ticket_transcript ?? (await buildTicketTranscript(ctx.channelId));
+        fullIncident.ticket_transcript ?? (await buildTicketTranscript(channelId));
 
       const appBaseUrl = resolveAppBaseUrl();
       if (!appBaseUrl) {
@@ -1065,10 +1198,28 @@ registerCommand("steward_analyse", async (ctx) => {
 });
 
 registerCommand("steward_verdict", async (ctx) => {
-  const denied = await requireSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -1128,7 +1279,7 @@ registerCommand("steward_verdict", async (ctx) => {
   }
 
   await postTicketMessage(
-    ctx.channelId,
+    channelId,
     [
       `**Verdict:** ${verdict}`,
       penalty ? `**Penalty:** ${penalty}${penaltyPoints ? ` (${penaltyPoints} pts)` : ""}` : null,
@@ -1143,10 +1294,19 @@ registerCommand("steward_verdict", async (ctx) => {
 });
 
 registerCommand("steward_assign", async (ctx) => {
-  const denied = await requireHeadSteward(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+
+  const denied = await requireHeadSteward({ leagueId, discordUserId: ctx.discordUserId });
   if (denied) return { content: denied, ephemeral: true };
 
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -1187,7 +1347,7 @@ registerCommand("steward_assign", async (ctx) => {
     .from("driver_leagues")
     .select("is_steward")
     .eq("driver_id", targetDriver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .maybeSingle();
 
   if (!targetRole?.is_steward) {
@@ -1216,7 +1376,7 @@ registerCommand("steward_assign", async (ctx) => {
 
   const username = ctx.resolvedUsers[targetUserId]?.username ?? targetUserId;
   await postTicketMessage(
-    ctx.channelId,
+    channelId,
     `📋 This ticket has been assigned to <@${targetUserId}> (${username}) by <@${ctx.discordUserId}>.`
   );
 
@@ -1224,7 +1384,16 @@ registerCommand("steward_assign", async (ctx) => {
 });
 
 registerCommand("steward_requesthelp", async (ctx) => {
-  const incident = await findIncidentByChannel(ctx.leagueId, ctx.channelId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+
+  const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
       content: "This channel isn't linked to an incident ticket.",
@@ -1267,7 +1436,7 @@ registerCommand("steward_requesthelp", async (ctx) => {
     .schema("rise_os")
     .from("leagues")
     .select("discord_steward_role_id")
-    .eq("id", ctx.leagueId)
+    .eq("id", leagueId)
     .maybeSingle();
 
   const rolePrefix = leagueConfig?.discord_steward_role_id
@@ -1275,7 +1444,7 @@ registerCommand("steward_requesthelp", async (ctx) => {
     : "";
 
   await postTicketMessage(
-    ctx.channelId,
+    channelId,
     [
       `🆘 ${rolePrefix}<@${ctx.discordUserId}> requested assistance on this ticket.`,
       note ? `> ${note}` : null,
