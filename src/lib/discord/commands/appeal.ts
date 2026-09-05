@@ -280,10 +280,19 @@ async function createAppealRecord(params: {
 }
 
 registerCommand("appeal_file", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
   const rawInput = (ctx.options.incident as string).trim();
   const reason = ctx.options.reason as string;
 
-  const incident = await findIncidentByShortId(ctx.leagueId!, rawInput);
+  const incident = await findIncidentByShortId(leagueId, rawInput);
 
   if (!incident) {
     return {
@@ -339,7 +348,7 @@ registerCommand("appeal_file", async (ctx) => {
 
   const result = await createAppealRecord({
     incidentId: incident.id,
-    leagueId: ctx.leagueId!,
+    leagueId,
     ticketLabel,
     appellantDiscordId: ctx.discordUserId,
     appellantDriverId,
@@ -349,7 +358,7 @@ registerCommand("appeal_file", async (ctx) => {
     originalPenaltyPoints: incident.penalty_points,
     evidenceUrls: incident.evidence_urls,
     accusedEvidenceUrls: incident.accused_evidence_urls,
-    guildId: ctx.guildId!,
+    guildId,
   });
 
   if ("error" in result) {
@@ -360,12 +369,17 @@ registerCommand("appeal_file", async (ctx) => {
 });
 
 registerCommand("appeal_status", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   const { data, error } = await supabase
     .schema("pitboss")
     .from("incident_appeals")
     .select("incident_id, reason, created_at, incidents:incident_id(id, ticket_number)")
-    .eq("league_id", ctx.leagueId!)
+    .eq("league_id", leagueId)
     .eq("status", "open")
     .order("created_at", { ascending: false })
     .limit(5);
@@ -392,9 +406,14 @@ registerCommand("appeal_status", async (ctx) => {
 });
 
 registerCommand("appeal_review", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const denied = await requireSteward({
     discordUserId: ctx.discordUserId,
-    leagueId: ctx.leagueId!,
+    leagueId,
   });
   if (denied) return { content: denied, ephemeral: true };
 
@@ -405,7 +424,7 @@ registerCommand("appeal_review", async (ctx) => {
   const newPoints = ctx.options.new_points as number | undefined;
   const notes = ctx.options.notes as string | undefined;
 
-  const incident = await findIncidentByShortId(ctx.leagueId!, rawInput);
+  const incident = await findIncidentByShortId(leagueId, rawInput);
   if (!incident) {
     return {
       content: `No incident found matching \`${rawInput}\` in this league.`,
@@ -499,7 +518,7 @@ registerCommand("appeal_review", async (ctx) => {
         .from("penalty_ledger")
         .insert({
           driver_id: incident.accused_driver_id,
-          league_id: ctx.leagueId!,
+          league_id: leagueId,
           incident_id: incident.id,
           points: newPoints,
           reason: `Appeal overturned — ${newVerdict ?? "revised verdict"} — ${newPenalty ?? "revised penalty"}`,
@@ -551,7 +570,7 @@ registerCommand("appeal_review", async (ctx) => {
     .schema("rise_os")
     .from("leagues")
     .select("discord_appeals_channel_id")
-    .eq("id", ctx.leagueId!)
+    .eq("id", leagueId)
     .maybeSingle();
 
   if (leagueConfig?.discord_appeals_channel_id) {
