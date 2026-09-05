@@ -23,10 +23,16 @@ export const dynamic = "force-dynamic";
 const DEFAULT_LEAGUE_ID = "3a005e8d-c35f-4a57-aa27-c59c0c3812e2"; // TRL
 const SEASON = "1";
 
+// Used only if a league row somehow has a null/empty currency_code
+// (shouldn't happen post-migration, since the column is NOT NULL with
+// a default, but kept as a defensive fallback).
+const FALLBACK_CURRENCY_CODE = "TRL";
+
 type League = {
   id: string;
   name: string;
   slug: string;
+  currency_code: string;
 };
 
 type Franchise = {
@@ -77,14 +83,17 @@ function divisionSortKey(division: string) {
   return match ? -Number(match[1]) : -9999;
 }
 
-function formatMoney(n: number) {
+// Currency prefix now comes from the selected league's own
+// currency_code (rise_os.leagues.currency_code) instead of being
+// hardcoded to TRL, so every league shows its own wallet currency.
+function formatMoney(n: number, currencyCode: string) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
   })
     .format(n)
-    .replace("$", "$TRL ");
+    .replace("$", `$${currencyCode} `);
 }
 
 async function getLeagues(): Promise<League[]> {
@@ -93,7 +102,7 @@ async function getLeagues(): Promise<League[]> {
   const { data, error } = await supabase
     .schema("rise_os")
     .from("leagues")
-    .select("id, name, slug")
+    .select("id, name, slug, currency_code")
     .eq("sport", "sim_racing")
     .in("pitboss_status", ["active", "trial"])
     .eq("is_public", true)
@@ -160,6 +169,8 @@ export default async function CapStatusPage({
     );
   }
 
+  const currencyCode = selected.currency_code || FALLBACK_CURRENCY_CODE;
+
   const { franchises, wallets, caps } = await getData(selected.id);
 
   const walletByFranchise = new Map(wallets.map((w) => [w.franchise_id, w]));
@@ -185,8 +196,8 @@ export default async function CapStatusPage({
         </div>
         <h1 className="mt-1 text-3xl font-semibold sm:text-4xl">Franchise Cap Status</h1>
         <p className="mt-2 max-w-xl text-sm text-[#8A8D93]">
-          Live wallet balances against each division&rsquo;s Soft Cap and Hard
-          Apron, per CRRB Financial Regulations v2.2.
+          Live wallet balances against each division&rsquo;s Soft Cap and
+          Hard Apron, per CRRB Financial Regulations v2.2.
         </p>
       </header>
 
@@ -197,8 +208,8 @@ export default async function CapStatusPage({
               <h2 className="text-lg font-medium">{group.label}</h2>
               {group.cap ? (
                 <p className="text-sm text-[#8A8D93]">
-                  Soft cap {formatMoney(group.cap.soft_cap)} &middot; Hard apron{" "}
-                  {formatMoney(group.cap.hard_apron)}
+                  Soft cap {formatMoney(group.cap.soft_cap, currencyCode)} &middot; Hard apron{" "}
+                  {formatMoney(group.cap.hard_apron, currencyCode)}
                 </p>
               ) : (
                 <p className="text-sm text-[#8A8D93]">Uncapped</p>
@@ -256,7 +267,7 @@ export default async function CapStatusPage({
                         <div className="flex items-baseline justify-between text-sm">
                           <span className="text-[#8A8D93]">Wallet</span>
                           <span className="tabular-nums font-medium">
-                            {formatMoney(wallet.balance)}
+                            {formatMoney(wallet.balance, currencyCode)}
                           </span>
                         </div>
                         <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#232428]">
@@ -270,8 +281,8 @@ export default async function CapStatusPage({
                         </div>
                         <p className="mt-1.5 text-[11px] text-[#8A8D93]">
                           {cap
-                            ? `${formatMoney(spend)} spent of ${formatMoney(cap.soft_cap)} soft cap`
-                            : `${formatMoney(spend)} spent · uncapped`}
+                            ? `${formatMoney(spend, currencyCode)} spent of ${formatMoney(cap.soft_cap, currencyCode)} soft cap`
+                            : `${formatMoney(spend, currencyCode)} spent · uncapped`}
                         </p>
                       </div>
                     ) : (
