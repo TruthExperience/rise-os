@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
-import { getAuthedDriver } from '@/lib/supabase/supabase-auth'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+'
 
 const STEWARD_ROLE_CODES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
 
