@@ -253,7 +253,19 @@ export function nearestSetup(params: {
 
   let nearestResult: number[] | null = null;
   let nearestDiff = ERROR_CONST;
-  let lowestRuleBreak = 15;
+  // FIX: this used to start at a fixed 15. That value doubles as both the
+  // pruning threshold and the "no result at all" ceiling — once accumulated
+  // feedback across enough iterations pushed the *true* minimum achievable
+  // rule-break count above 15 (very possible after ~10+ iterations with
+  // several bias points each), `ruleBreaks <= lowestRuleBreak` was never
+  // true for any candidate in the entire grid, so `nearestResult` (and thus
+  // `best_setup` in the API response) stayed null forever — with no error,
+  // just silently nothing to show. The search always has at least one
+  // candidate (the grid is never empty), so starting from an unbounded
+  // sentinel guarantees the very first candidate populates a result, and
+  // normal branch-and-bound pruning still kicks in immediately afterward as
+  // this gets refined downward.
+  let lowestRuleBreak = Number.POSITIVE_INFINITY;
   let possibleSetups = 0;
   let candidateList: NearestSetupCandidate[] = [];
 
