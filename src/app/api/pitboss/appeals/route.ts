@@ -1,23 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
-import { getRequestingDriver } from '@/lib/pitboss/stewardAccess'
+import { getAuthedDriver } from '@/lib/supabase/supabase-auth'
 
 const STEWARD_ROLE_CODES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
 
+// NOTE: previously gated on getServerSession(authOptions) (next-auth) and
+// resolved the driver via getRequestingDriver(supabase, session) — a
+// helper that takes the next-auth session shape. Same broken-auth pattern
+// as /api/pitboss/drivers/me/leagues and /api/season/calendar: next-auth's
+// session is no longer being populated the way this app's auth now works,
+// so both the outer session check AND getRequestingDriver's internal
+// lookup would fail on every request. Swapped to getAuthedDriver()
+// (Supabase Auth), which returns the resolved driver row directly.
+//
+// ASSUMPTION: this assumes getRequestingDriver's only job was resolving
+// "which driver is this session" (the same thing getAuthedDriver does).
+// If stewardAccess.ts's getRequestingDriver does anything beyond that
+// (e.g. merging some legacy account, special-casing impersonation, admin
+// override), that behavior is lost here and stewardAccess.ts needs a look
+// too — flagging this rather than guessing further.
+
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions)
-  if (!session?.user) {
+  const requestingDriver = await getAuthedDriver()
+  if (!requestingDriver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   const supabase = createAdminClient()
-  const requestingDriver = await getRequestingDriver(supabase, session)
-
-  if (!requestingDriver) {
-    return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
-  }
 
   const { searchParams } = new URL(req.url)
   const statusFilter = searchParams.get('status') // 'open' | 'upheld' | 'overturned' | 'dismissed' | null
