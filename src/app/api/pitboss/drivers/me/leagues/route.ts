@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
-import { getAuthedDriver } from "@/lib/supabase/supabase-auth";
+import { getAuthedDriver } from "@/lib/supabase/supabase-auth";import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 
 // NOTE: this route previously authenticated via next-auth
 // (getServerSession(authOptions) + session.user.discordId), which is a
