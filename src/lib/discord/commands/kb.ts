@@ -14,13 +14,18 @@ interface RuleSearchRow {
 // No permission check here on purpose — rulebook lookup is open to
 // anyone in the league, same posture as roster_view.
 registerCommand("kb_search", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const query = ctx.options.query as string;
 
   const supabase = createAdminClient();
   const { data, error } = await supabase
     .schema("pitboss")
     .rpc("search_rule_articles", {
-      p_league_id: ctx.leagueId,
+      p_league_id: leagueId,
       p_query: query,
       p_limit: 3,
     });
