@@ -173,10 +173,24 @@ export async function POST(req: NextRequest) {
     });
 
     if (loggedPoints.length > 0) {
+      // FIX: this used to pass `loggedPoints` (an array of
+      // {bias, value, feedback} objects) straight through as `feedback`.
+      // The frontend's history panel does
+      // `Object.entries(it.feedback ?? {}).map(([bias, fb]) => ...)`,
+      // which on an array yields index keys ("0", "1", ...) with `fb` being
+      // the *entire* {bias, value, feedback} object — hence
+      // `String(fb)` rendering as "[object Object]" in the UI. Reshaping
+      // into a bias-keyed object here (e.g. {oversteer: 'good', braking:
+      // 'bad'}) matches what the frontend's HistoryIteration type and
+      // render code actually expect.
+      const feedbackByBias = Object.fromEntries(
+        loggedPoints.map((p) => [p.bias, p.feedback]),
+      ) as Partial<Record<FmBiasKey, FmFeedbackValue>>;
+
       await logFmFeedback({
         sessionId: session.id,
         iterationNumber: iterationCount,
-        feedback: loggedPoints,
+        feedback: feedbackByBias,
         appliedDeltas: {
           lowestRuleBreak: result.lowestRuleBreak,
           possibleSetups: result.possibleSetups,
