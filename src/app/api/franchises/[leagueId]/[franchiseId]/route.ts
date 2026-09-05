@@ -26,7 +26,7 @@ export async function GET(_req: Request, { params }: { params: { leagueId: strin
 
   const { data, error } = await supabaseAdmin
     .from("franchises")
-    .select("*")
+    .select("*, league:leagues(sport)")
     .eq("id", params.franchiseId)
     .eq("league_id", params.leagueId)
     .maybeSingle();
