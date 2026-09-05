@@ -37,6 +37,11 @@ registerCommand("exam", async (ctx) => {
 });
 
 registerCommand("cert", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
 
   const { data: driver } = await supabase
@@ -58,7 +63,7 @@ registerCommand("cert", async (ctx) => {
     .from("licences")
     .select("role_code, status, issued_at")
     .eq("driver_id", driver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .eq("status", "active")
     .order("issued_at", { ascending: false });
 
