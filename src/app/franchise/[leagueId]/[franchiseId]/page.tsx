@@ -28,6 +28,7 @@ export default function FranchiseDetailPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [redirecting, setRedirecting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -37,10 +38,23 @@ export default function FranchiseDetailPage() {
   useEffect(() => {
     if (franchiseId) {
       fetchFranchise();
-      fetchRoster();
     }
     fetchCfbTeams();
   }, [franchiseId]);
+
+  // Racing-league franchises get a different page shape (driver contracts,
+  // not CFB rosters) — bounce there as soon as we know the sport, before
+  // firing the CFB-specific roster fetch or rendering anything CFB-shaped.
+  useEffect(() => {
+    if (franchise?.league?.sport === "sim_racing") {
+      setRedirecting(true);
+      router.replace(`/pitboss/franchise/${leagueId}/${franchiseId}`);
+      return;
+    }
+    if (franchise && franchiseId) {
+      fetchRoster();
+    }
+  }, [franchise, franchiseId, leagueId, router]);
 
   async function fetchFranchise() {
     setLoading(true);
@@ -102,7 +116,7 @@ export default function FranchiseDetailPage() {
     }
   }
 
-  if (status === "loading" || loading) {
+  if (status === "loading" || loading || redirecting) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-rise-black">
         <div className="h-10 w-10 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
