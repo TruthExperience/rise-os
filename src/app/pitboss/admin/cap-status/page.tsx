@@ -149,6 +149,88 @@ async function getData(leagueId: string) {
   };
 }
 
+// Team Principal lookup, keyed by franchise id.
+//
+// The GM badge previously read only rise_os.franchises.gm_id — never
+// populated for HRL, so every card showed "No GM" regardless of who was
+// actually running the team.
+//
+// The real TP source is pitboss.team_rosters.is_team_principal (confirmed
+// against src/app/pitboss/discord/commands/ddv.ts, which explicitly warns
+// off two other candidates: rise_os.franchises.gm_id, and
+// pitboss.driver_leagues.is_team_principal — that's a broader per-league
+// role flag, not the team-specific one; a driver can hold it without
+// being any specific team's TP this season).
+//
+// team_rosters itself has no franchise_id — it points at
+// pitboss.car_class_teams, a bare-name table ("Red Bull Racing", no year
+// suffix, no link to rise_os.franchises) used by the setup recommendation
+// engine. So franchise attribution still comes from that driver's active
+// pitboss.driver_contracts row for this league/season, same source
+// contract_class (D1/D2) uses.
+//
+// One-time data fix applied 2026-09-05: HRL's team_rosters rows were
+// mislabeled season = 'S2' (23 of 24 rows) instead of '1', which is the
+// league's actual current season — that mismatch was silently hiding
+// every TP from any season-filtered lookup. Confirm new leagues/seasons
+// keep team_rosters.season in sync with driver_contracts/franchise_wallets'
+// '1'/'2'/'3' scheme going forward.
+async function getTeamPrincipals(leagueId: string, season: string): Promise<Map<string, string[]>> {
+  const supabase = createAdminClient();
+
+  const { data: tpRows, error: tpErr } = await supabase
+    .schema("pitboss")
+    .from("team_rosters")
+    .select("driver_id")
+    .eq("league_id", leagueId)
+    .eq("season", season)
+    .eq("is_team_principal", true);
+
+  if (tpErr) throw tpErr;
+  if (!tpRows || tpRows.length === 0) return new Map();
+
+  const driverIds = tpRows.map((r) => r.driver_id);
+
+  // Active contract this season is what ties a TP to a specific franchise
+  // — same source contract_class (D1/D2) reads from. A driver could in
+  // theory hold more than one active contract row; this takes whichever
+  // one the query returns first for that driver, matching how the rest of
+  // this page already treats "active" as a single-row assumption.
+  const { data: contracts, error: contractErr } = await supabase
+    .schema("pitboss")
+    .from("driver_contracts")
+    .select("driver_id, franchise_id")
+    .eq("league_id", leagueId)
+    .eq("status", "active")
+    .in("driver_id", driverIds);
+
+  if (contractErr) throw contractErr;
+
+  const { data: drivers, error: driverErr } = await supabase
+    .schema("pitboss")
+    .from("drivers")
+    .select("id, discord_username, display_name")
+    .in("id", driverIds);
+
+  if (driverErr) throw driverErr;
+
+  const nameByDriverId = new Map(
+    (drivers ?? []).map((d) => [d.id, d.display_name || d.discord_username])
+  );
+
+  const byFranchise = new Map<string, string[]>();
+  for (const c of contracts ?? []) {
+    if (!c.franchise_id) continue; // TP with no active contract this season — no franchise to attach to
+    const name = nameByDriverId.get(c.driver_id);
+    if (!name) continue;
+    const existing = byFranchise.get(c.franchise_id) ?? [];
+    existing.push(name);
+    byFranchise.set(c.franchise_id, existing);
+  }
+
+  return byFranchise;
+}
+
 export default async function CapStatusPage({
   searchParams,
 }: {
@@ -172,6 +254,7 @@ export default async function CapStatusPage({
   const currencyCode = selected.currency_code || FALLBACK_CURRENCY_CODE;
 
   const { franchises, wallets, caps } = await getData(selected.id);
+  const teamPrincipals = await getTeamPrincipals(selected.id, SEASON);
 
   const walletByFranchise = new Map(wallets.map((w) => [w.franchise_id, w]));
   const capByDivision = new Map(caps.map((c) => [c.division, c]));
@@ -227,6 +310,7 @@ export default async function CapStatusPage({
                   ? Math.min(100, (spend / cap.soft_cap) * 100)
                   : 0;
                 const accent = team.primary_color ?? "#3A3C42";
+                const tpNames = teamPrincipals.get(team.id);
 
                 return (
                   <article
@@ -255,10 +339,17 @@ export default async function CapStatusPage({
                           {team.name}
                         </h3>
                       </div>
-                      {!team.gm_id && (
-                        <span className="shrink-0 rounded-sm bg-[#3A2A1F] px-2 py-0.5 text-[11px] text-[#E8A25C]">
-                          No GM
+
+                      {tpNames && tpNames.length > 0 ? (
+                        <span className="shrink-0 rounded-sm bg-[#1F2E22] px-2 py-0.5 text-[11px] text-[#7CC28A]">
+                          {tpNames.join(", ")}
                         </span>
+                      ) : (
+                        !team.gm_id && (
+                          <span className="shrink-0 rounded-sm bg-[#3A2A1F] px-2 py-0.5 text-[11px] text-[#E8A25C]">
+                            No GM
+                          </span>
+                        )
                       )}
                     </div>
 
