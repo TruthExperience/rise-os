@@ -52,14 +52,23 @@ async function discordModerationCall(
 }
 
 registerCommand("kick", async (ctx) => {
-  const denied = await requireOwner(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireOwner({ discordUserId: ctx.discordUserId, leagueId });
   if (denied) return { content: denied, ephemeral: true };
 
   const targetId = ctx.options.user as string;
   const reason = ctx.options.reason as string | undefined;
   const targetUsername = ctx.resolvedUsers[targetId]?.username ?? targetId;
 
-  const result = await discordModerationCall(ctx.guildId, targetId, "kick", reason);
+  const result = await discordModerationCall(guildId, targetId, "kick", reason);
   if (!result.ok) {
     return { content: `Couldn't kick <@${targetId}>: ${result.error}`, ephemeral: true };
   }
@@ -78,14 +87,23 @@ registerCommand("kick", async (ctx) => {
 });
 
 registerCommand("ban", async (ctx) => {
-  const denied = await requireOwner(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireOwner({ discordUserId: ctx.discordUserId, leagueId });
   if (denied) return { content: denied, ephemeral: true };
 
   const targetId = ctx.options.user as string;
   const reason = ctx.options.reason as string | undefined;
   const targetUsername = ctx.resolvedUsers[targetId]?.username ?? targetId;
 
-  const result = await discordModerationCall(ctx.guildId, targetId, "ban", reason);
+  const result = await discordModerationCall(guildId, targetId, "ban", reason);
   if (!result.ok) {
     return { content: `Couldn't ban <@${targetId}>: ${result.error}`, ephemeral: true };
   }
@@ -133,7 +151,12 @@ async function guardianCall(
 }
 
 registerCommand("lockdown", async (ctx) => {
-  const denied = await requireOwner(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const denied = await requireOwner({ discordUserId: ctx.discordUserId, leagueId });
   if (denied) return { content: denied, ephemeral: true };
 
   const reason = ctx.options.reason as string | undefined;
@@ -164,7 +187,12 @@ registerCommand("lockdown", async (ctx) => {
 });
 
 registerCommand("endlockdown", async (ctx) => {
-  const denied = await requireOwner(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const denied = await requireOwner({ discordUserId: ctx.discordUserId, leagueId });
   if (denied) return { content: denied, ephemeral: true };
 
   return {
