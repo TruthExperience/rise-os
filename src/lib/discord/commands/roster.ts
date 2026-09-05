@@ -42,6 +42,11 @@ const EDITOR_FLAGS = [
 // should have been reading all along — team_rosters/car_class_teams
 // stay untouched for their actual purpose (setup generation).
 registerCommand("roster_view", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   const tier = ctx.options.tier as string | undefined;
 
@@ -49,7 +54,7 @@ registerCommand("roster_view", async (ctx) => {
     .schema("pitboss")
     .from("franchise_rosters")
     .select("driver_id, franchise_id, tier, season")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .is("released_at", null);
 
   if (tier) rosterQuery = rosterQuery.eq("tier", tier);
@@ -82,7 +87,7 @@ registerCommand("roster_view", async (ctx) => {
         .schema("pitboss")
         .from("driver_leagues")
         .select("driver_id, is_team_principal")
-        .eq("league_id", ctx.leagueId)
+        .eq("league_id", leagueId)
         .in("driver_id", driverIds),
     ]);
 
@@ -128,7 +133,12 @@ registerCommand("roster_view", async (ctx) => {
 // /release-driver entirely.
 
 registerCommand("roster_assign", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...EDITOR_FLAGS])) {
     return {
       content: "You don't have permission to edit the roster.",
@@ -186,7 +196,7 @@ registerCommand("roster_assign", async (ctx) => {
     .upsert(
       {
         driver_id: driver.id,
-        league_id: ctx.leagueId,
+        league_id: leagueId,
         is_driver: true,
         is_team_principal: isTP,
       },
@@ -207,7 +217,7 @@ registerCommand("roster_assign", async (ctx) => {
     .upsert(
       {
         driver_id: driver.id,
-        league_id: ctx.leagueId,
+        league_id: leagueId,
         car_class_team_id: teamId,
         tier,
         season,
@@ -233,7 +243,12 @@ registerCommand("roster_assign", async (ctx) => {
 });
 
 registerCommand("roster_remove", async (ctx) => {
-  const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...EDITOR_FLAGS])) {
     return {
       content: "You don't have permission to edit the roster.",
@@ -261,7 +276,7 @@ registerCommand("roster_remove", async (ctx) => {
     .from("team_rosters")
     .delete()
     .eq("driver_id", driver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .eq("season", season);
 
   if (error) {
