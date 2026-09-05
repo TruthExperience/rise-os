@@ -273,6 +273,11 @@ function fmtDDV(n: number | null | undefined, leagueSlug: string): string {
 }
 
 registerCommand("ddv_view", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   // Defaults to yourself, matching contract_view's convention.
   const targetDiscordId = (ctx.options.driver as string | undefined) ?? ctx.discordUserId;
@@ -280,19 +285,19 @@ registerCommand("ddv_view", async (ctx) => {
   // Looking up your own DDV is always allowed. Looking up someone else's
   // requires owner/co-owner, OR being the TP of that driver's own team.
   if (targetDiscordId !== ctx.discordUserId) {
-    const ownerDenied = await requireLeagueOwner(ctx);
+    const ownerDenied = await requireLeagueOwner({ leagueId, discordUserId: ctx.discordUserId });
     if (ownerDenied) {
-      const targetLookup = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
+      const targetLookup = await resolveDriverByDiscordId(supabase, leagueId, targetDiscordId);
       const isTP =
         targetLookup.driver &&
-        (await isTeamPrincipalOfDriver(supabase, ctx.leagueId, ctx.discordUserId, targetLookup.driver.id));
+        (await isTeamPrincipalOfDriver(supabase, leagueId, ctx.discordUserId, targetLookup.driver.id));
       if (!isTP) {
         return { content: "Only the league owner, co-owner, or that driver's Team Principal can do that.", ephemeral: true };
       }
     }
   }
 
-  const resolved = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
+  const resolved = await resolveDriverByDiscordId(supabase, leagueId, targetDiscordId);
   if (resolved.error || !resolved.driver) {
     return { content: resolved.error ?? "Couldn't resolve a driver.", ephemeral: true };
   }
@@ -302,7 +307,7 @@ registerCommand("ddv_view", async (ctx) => {
     .from("driver_ddv")
     .select("current_ddv, career_peak_ddv, tier_at_calc, last_calculated_at")
     .eq("driver_id", resolved.driver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .maybeSingle();
 
   if (error) {
@@ -326,7 +331,12 @@ registerCommand("ddv_view", async (ctx) => {
 });
 
 registerCommand("ddv_edit", async (ctx) => {
-  const denied = await requireLeagueOwner(ctx);
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const denied = await requireLeagueOwner({ leagueId, discordUserId: ctx.discordUserId });
   if (denied) return { content: denied, ephemeral: true };
 
   const targetDiscordId = ctx.options.driver as string | undefined;
@@ -344,7 +354,7 @@ registerCommand("ddv_edit", async (ctx) => {
   }
 
   const supabase = createAdminClient();
-  const resolved = await resolveDriverByDiscordId(supabase, ctx.leagueId, targetDiscordId);
+  const resolved = await resolveDriverByDiscordId(supabase, leagueId, targetDiscordId);
   if (resolved.error || !resolved.driver) {
     return { content: resolved.error ?? "Couldn't resolve a driver.", ephemeral: true };
   }
@@ -354,7 +364,7 @@ registerCommand("ddv_edit", async (ctx) => {
     .from("driver_ddv")
     .select("current_ddv")
     .eq("driver_id", resolved.driver.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .maybeSingle();
 
   if (!existing) {
@@ -370,7 +380,7 @@ registerCommand("ddv_edit", async (ctx) => {
     .schema("pitboss")
     .rpc("admin_adjust_ddv", {
       p_driver_id: resolved.driver.id,
-      p_league_id: ctx.leagueId,
+      p_league_id: leagueId,
       p_new_ddv: amount,
       p_reason: reason,
       p_actor_discord_id: ctx.discordUserId,
@@ -392,9 +402,14 @@ registerCommand("ddv_edit", async (ctx) => {
 });
 
 registerCommand("tp_view", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   const teamName = ctx.options.team as string | undefined;
-  const season = (ctx.options.season as string | undefined) ?? (await resolveCurrentSeason(supabase, ctx.leagueId));
+  const season = (ctx.options.season as string | undefined) ?? (await resolveCurrentSeason(supabase, leagueId));
 
   if (!season) {
     return { content: "No team rosters found for this league yet.", ephemeral: true };
@@ -402,7 +417,7 @@ registerCommand("tp_view", async (ctx) => {
 
   // Single team: resolve team, list its TP(s) for the season.
   if (teamName) {
-    const resolved = await resolveTeamByName(supabase, ctx.leagueId, teamName);
+    const resolved = await resolveTeamByName(supabase, leagueId, teamName);
     if (resolved.error || !resolved.team) {
       return { content: resolved.error ?? "Couldn't resolve a team.", ephemeral: true };
     }
@@ -411,7 +426,7 @@ registerCommand("tp_view", async (ctx) => {
       .schema("pitboss")
       .from("team_rosters")
       .select("driver_id, drivers!inner(display_name, discord_username)")
-      .eq("league_id", ctx.leagueId)
+      .eq("league_id", leagueId)
       .eq("car_class_team_id", resolved.team.id)
       .eq("season", season)
       .eq("is_team_principal", true);
@@ -436,7 +451,7 @@ registerCommand("tp_view", async (ctx) => {
     .schema("pitboss")
     .from("team_rosters")
     .select("car_class_teams!inner(team_name), drivers!inner(display_name, discord_username)")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .eq("season", season)
     .eq("is_team_principal", true)
     .order("team_name", { referencedTable: "car_class_teams" });
@@ -464,9 +479,14 @@ registerCommand("tp_view", async (ctx) => {
 // (or that team's own TP) look up any team. Mirrors tp_view's team-name
 // resolution and requireLeagueOwner/isCallerTPOfTeam's gating pattern.
 registerCommand("ddv_team", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   const teamNameOption = ctx.options.team as string | undefined;
-  const season = (ctx.options.season as string | undefined) ?? (await resolveCurrentSeason(supabase, ctx.leagueId));
+  const season = (ctx.options.season as string | undefined) ?? (await resolveCurrentSeason(supabase, leagueId));
 
   if (!season) {
     return { content: "No team rosters found for this league yet.", ephemeral: true };
@@ -475,15 +495,15 @@ registerCommand("ddv_team", async (ctx) => {
   let targetTeam: TeamMatch | undefined;
 
   if (teamNameOption) {
-    const resolved = await resolveTeamByName(supabase, ctx.leagueId, teamNameOption);
+    const resolved = await resolveTeamByName(supabase, leagueId, teamNameOption);
     if (resolved.error || !resolved.team) {
       return { content: resolved.error ?? "Couldn't resolve a team.", ephemeral: true };
     }
     targetTeam = resolved.team;
 
-    const ownerDenied = await requireLeagueOwner(ctx);
+    const ownerDenied = await requireLeagueOwner({ leagueId, discordUserId: ctx.discordUserId });
     if (ownerDenied) {
-      const isTP = await isCallerTPOfTeam(supabase, ctx.leagueId, ctx.discordUserId, targetTeam.id, season);
+      const isTP = await isCallerTPOfTeam(supabase, leagueId, ctx.discordUserId, targetTeam.id, season);
       if (!isTP) {
         return {
           content: "Only the league owner, co-owner, or this team's Team Principal can view team DDV.",
@@ -492,7 +512,7 @@ registerCommand("ddv_team", async (ctx) => {
       }
     }
   } else {
-    const ownTeams = await resolveOwnTPTeams(supabase, ctx.leagueId, ctx.discordUserId, season);
+    const ownTeams = await resolveOwnTPTeams(supabase, leagueId, ctx.discordUserId, season);
     if (ownTeams.length === 0) {
       return {
         content: "You aren't set as Team Principal for any team this season. Specify a `team` to view a different one.",
@@ -514,7 +534,7 @@ registerCommand("ddv_team", async (ctx) => {
     .schema("pitboss")
     .from("team_rosters")
     .select("driver_id, drivers!inner(display_name, discord_username)")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .eq("car_class_team_id", targetTeam.id)
     .eq("season", season);
 
@@ -535,7 +555,7 @@ registerCommand("ddv_team", async (ctx) => {
     .schema("pitboss")
     .from("driver_ddv")
     .select("driver_id, current_ddv, tier_at_calc")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .in("driver_id", driverIds);
 
   if (ddvError) {
@@ -566,6 +586,11 @@ registerCommand("ddv_team", async (ctx) => {
 // other-driver lookup) — this is a league-wide read, not a single driver's
 // private-ish record.
 registerCommand("ddv_leaderboard", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
 
   const { data: requester } = await supabase
@@ -583,7 +608,7 @@ registerCommand("ddv_leaderboard", async (ctx) => {
     .from("driver_leagues")
     .select("driver_id")
     .eq("driver_id", requester.id)
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .maybeSingle();
   if (!membership) {
     return { content: "You aren't a member of this league.", ephemeral: true };
@@ -593,7 +618,7 @@ registerCommand("ddv_leaderboard", async (ctx) => {
     .schema("pitboss")
     .from("driver_ddv")
     .select("current_ddv, drivers!inner(display_name, discord_username)")
-    .eq("league_id", ctx.leagueId)
+    .eq("league_id", leagueId)
     .order("current_ddv", { ascending: false });
 
   if (error) {
