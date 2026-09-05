@@ -278,6 +278,15 @@ registerCommand("ddv_view", async (ctx) => {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
+  // ctx.leagueSlug is optional on CommandContext (same refactor that made
+  // leagueId/channelId optional elsewhere in this codebase) — narrow it
+  // into a local before it's passed to fmtDDV, which requires a plain
+  // string.
+  const leagueSlug = ctx.leagueSlug;
+  if (!leagueSlug) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const supabase = createAdminClient();
   // Defaults to yourself, matching contract_view's convention.
   const targetDiscordId = (ctx.options.driver as string | undefined) ?? ctx.discordUserId;
@@ -323,7 +332,7 @@ registerCommand("ddv_view", async (ctx) => {
 
   const lines = [
     `**${resolved.driver.displayName}** — Dynamic Driver Value`,
-    `Current: ${fmtDDV(Number(ddv.current_ddv), ctx.leagueSlug)} | Career Peak: ${fmtDDV(Number(ddv.career_peak_ddv), ctx.leagueSlug)}`,
+    `Current: ${fmtDDV(Number(ddv.current_ddv), leagueSlug)} | Career Peak: ${fmtDDV(Number(ddv.career_peak_ddv), leagueSlug)}`,
     `Tier at last calc: ${ddv.tier_at_calc ?? "—"}`,
   ];
 
@@ -333,6 +342,11 @@ registerCommand("ddv_view", async (ctx) => {
 registerCommand("ddv_edit", async (ctx) => {
   const leagueId = ctx.leagueId;
   if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const leagueSlug = ctx.leagueSlug;
+  if (!leagueSlug) {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
@@ -396,7 +410,7 @@ registerCommand("ddv_edit", async (ctx) => {
   const clampedNote = newDDV !== amount ? ` (clamped to the $1M–$150M DDV range)` : "";
 
   return {
-    content: `Updated **${resolved.driver.displayName}**'s DDV: ${fmtDDV(previousDDV, ctx.leagueSlug)} → ${fmtDDV(newDDV, ctx.leagueSlug)}${clampedNote}.\nReason: ${reason}`,
+    content: `Updated **${resolved.driver.displayName}**'s DDV: ${fmtDDV(previousDDV, leagueSlug)} → ${fmtDDV(newDDV, leagueSlug)}${clampedNote}.\nReason: ${reason}`,
     ephemeral: false,
   };
 });
@@ -481,6 +495,11 @@ registerCommand("tp_view", async (ctx) => {
 registerCommand("ddv_team", async (ctx) => {
   const leagueId = ctx.leagueId;
   if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const leagueSlug = ctx.leagueSlug;
+  if (!leagueSlug) {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
@@ -572,12 +591,12 @@ registerCommand("ddv_team", async (ctx) => {
     const ddv = ddvByDriver.get(r.driver_id);
     if (ddv) {
       total += Number(ddv.current_ddv);
-      lines.push(`${name} — ${fmtDDV(Number(ddv.current_ddv), ctx.leagueSlug)} (Tier: ${ddv.tier_at_calc ?? "—"})`);
+      lines.push(`${name} — ${fmtDDV(Number(ddv.current_ddv), leagueSlug)} (Tier: ${ddv.tier_at_calc ?? "—"})`);
     } else {
       lines.push(`${name} — no DDV record yet`);
     }
   });
-  lines.push(`**Team Total:** ${fmtDDV(total, ctx.leagueSlug)}`);
+  lines.push(`**Team Total:** ${fmtDDV(total, leagueSlug)}`);
 
   return { content: lines.join("\n"), ephemeral: true };
 });
@@ -588,6 +607,11 @@ registerCommand("ddv_team", async (ctx) => {
 registerCommand("ddv_leaderboard", async (ctx) => {
   const leagueId = ctx.leagueId;
   if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const leagueSlug = ctx.leagueSlug;
+  if (!leagueSlug) {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
@@ -632,7 +656,7 @@ registerCommand("ddv_leaderboard", async (ctx) => {
   const lines = ["**DDV Leaderboard**"];
   rows.forEach((row, i) => {
     const name = (row as any).drivers.display_name ?? (row as any).drivers.discord_username ?? "Unknown";
-    lines.push(`${i + 1}. ${name} — ${fmtDDV(Number(row.current_ddv), ctx.leagueSlug)}`);
+    lines.push(`${i + 1}. ${name} — ${fmtDDV(Number(row.current_ddv), leagueSlug)}`);
   });
 
   return { content: lines.join("\n"), ephemeral: false };
