@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 
+const TRL_LEAGUE_ID = '3a005e8d-c35f-4a57-aa27-c59c0c3812e2'
+
 interface RosterDriver {
   id: string
   discord_id: string
@@ -47,6 +49,7 @@ export default function PitbossFranchiseDetailPage() {
   const { status } = useSession()
   const router = useRouter()
   const { leagueId, franchiseId } = useParams<{ leagueId: string; franchiseId: string }>()
+  const isTrl = leagueId === TRL_LEAGUE_ID
 
   const [franchise, setFranchise] = useState<any>(null)
   const [roster, setRoster] = useState<RosterEntry[]>([])
@@ -165,16 +168,18 @@ export default function PitbossFranchiseDetailPage() {
                     )}
                     <div className="min-w-0">
                       <p className="text-white text-sm font-semibold truncate">{name}</p>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <span
-                          className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-                          style={{ background: tierColor(d.tier) + '33', color: tierColor(d.tier) }}
-                        >
-                          {d.tier.toUpperCase()}
-                        </span>
-                        <span className={`w-1.5 h-1.5 rounded-full ${statusDot(d.super_licence_status)}`} />
-                        <span className="text-white/30 text-[10px]">{entry.contractClass}</span>
-                      </div>
+                      {isTrl && (
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span
+                            className="text-[10px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ background: tierColor(d.tier) + '33', color: tierColor(d.tier) }}
+                          >
+                            {d.tier.toUpperCase()}
+                          </span>
+                          <span className={`w-1.5 h-1.5 rounded-full ${statusDot(d.super_licence_status)}`} />
+                          <span className="text-white/30 text-[10px]">{entry.contractClass}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                   {d.pp_total > 0 && (
