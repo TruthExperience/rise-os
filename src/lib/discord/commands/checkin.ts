@@ -62,6 +62,15 @@ import {
 // passing the optional value straight into functions that expect a
 // required string. Same pattern used in cap.ts — see notes there for why
 // the earlier non-null-assertion / optional-chaining attempts got reverted.
+//
+// PATCH (2026-09-04 cont'd 3): ctx.channelId is also optional on
+// CommandContext (same refactor as leagueId above), so every call site
+// that resolves a division by channel now narrows it into a local
+// `channelId` up front and bails with a friendly error if it's missing,
+// rather than passing the optional value straight into
+// resolveDivisionByChannel (which requires a plain string). Fixes a
+// build-time type error at the call sites in checkin, checkin-status,
+// checkin-remind, and generate-grid.
 
 const ADMIN_FLAGS = [
   "is_owner",
@@ -245,12 +254,17 @@ registerCommand("checkin", async (ctx) => {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be used in a division's check-in channel.", ephemeral: true };
+  }
+
   const status = ctx.options.status as CheckinStatus;
   if (!status) {
     return { content: "status is required.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
@@ -302,12 +316,17 @@ registerCommand("checkin-status", async (ctx) => {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be used in a division's check-in channel.", ephemeral: true };
+  }
+
   const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
     return { content: "You don't have permission to view check-in status.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
@@ -369,12 +388,17 @@ registerCommand("checkin-remind", async (ctx) => {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be used in a division's check-in channel.", ephemeral: true };
+  }
+
   const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
     return { content: "You don't have permission to send check-in reminders.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
@@ -439,7 +463,7 @@ registerCommand("checkin-remind", async (ctx) => {
       }
 
       const mentions = missing.map((id: string) => `<@${id}>`).join(" ");
-      const res = await fetch(`${DISCORD_API_BASE}/channels/${ctx.channelId}/messages`, {
+      const res = await fetch(`${DISCORD_API_BASE}/channels/${channelId}/messages`, {
         method: "POST",
         headers: {
           Authorization: `Bot ${token}`,
@@ -663,12 +687,17 @@ registerCommand("generate-grid", async (ctx) => {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
 
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be used in a division's check-in channel.", ephemeral: true };
+  }
+
   const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
   if (!hasAnyFlag(membership, [...ADMIN_FLAGS])) {
     return { content: "You don't have permission to generate the grid.", ephemeral: true };
   }
 
-  const divisionResult = await resolveDivisionByChannel(leagueId, ctx.channelId);
+  const divisionResult = await resolveDivisionByChannel(leagueId, channelId);
   if ("error" in divisionResult) {
     return { content: divisionResult.error ?? "Something went wrong resolving the division.", ephemeral: true };
   }
