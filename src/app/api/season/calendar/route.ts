@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getAuthedDriver } from '@/lib/supabase/supabase-auth'
+
+// NOTE: previously gated on getServerSession(authOptions) (next-auth),
+// which is a different auth system than the rest of the app now uses —
+// see the identical fix in /api/pitboss/drivers/me/leagues. Swapped to
+// getAuthedDriver() (Supabase Auth) to match. This route only needed the
+// session as an auth gate (nothing else referenced session.user), so the
+// swap is a straight substitution.
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions)
-  if (!session?.user) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
