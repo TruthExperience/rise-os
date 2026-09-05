@@ -137,12 +137,17 @@ function formatContract(row: DriverContractRow, franchiseName: string): string {
 }
 
 registerCommand("contract_view", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
   const requestedDiscordId = (ctx.options.driver as string | undefined) ?? ctx.discordUserId;
   const rawSeason = ctx.options.season as string | undefined;
 
   const viewingSelf = requestedDiscordId === ctx.discordUserId;
   if (!viewingSelf) {
-    const membership = await getLeagueMembership(ctx.discordUserId, ctx.leagueId);
+    const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
     if (!hasAnyFlag(membership, [...EDITOR_FLAGS])) {
       return { content: "You can only view your own contract.", ephemeral: true };
     }
@@ -182,7 +187,7 @@ registerCommand("contract_view", async (ctx) => {
       "id, contract_class, season_start, season_end, base_salary_per_season, signing_bonus, performance_bonuses, special_conditions, status, division, tier, contract_value, ddv_at_signing, contract_floor, contract_ceiling, buyout_clause, dead_cap_pct, is_rookie_contract, hybrid_buffer_applied, grace_period_sessions_remaining, cooling_off_until, released_at, released_reason, franchise_id, created_at"
     )
     .eq("driver_id", driver.id)
-    .eq("league_id", ctx.leagueId);
+    .eq("league_id", leagueId);
 
   if (seasonFilter) {
     query = query.eq("season_start", seasonFilter);
