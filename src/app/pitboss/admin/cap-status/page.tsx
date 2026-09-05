@@ -8,6 +8,7 @@
 // (getAuthedDriver already uses this exact factory + .schema('pitboss')
 // pattern for a non-public-schema admin query — same approach here).
 import { createAdminClient } from "@/lib/supabase/server";
+import LeagueSelect from "./LeagueSelect";
 
 // Required: this page fetches live wallet/cap data on every request and
 // must not be statically prerendered at build time. Without this, the
@@ -16,8 +17,17 @@ import { createAdminClient } from "@/lib/supabase/server";
 // production deployments on 2026-09-02.
 export const dynamic = "force-dynamic";
 
-const LEAGUE_ID = "3a005e8d-c35f-4a57-aa27-c59c0c3812e2"; // TRL
+// Fallback only — used when no ?league= param is present, so existing
+// bookmarks/links to this page keep showing TRL exactly as before.
+// Was previously the only league this page could ever show.
+const DEFAULT_LEAGUE_ID = "3a005e8d-c35f-4a57-aa27-c59c0c3812e2"; // TRL
 const SEASON = "1";
+
+type League = {
+  id: string;
+  name: string;
+  slug: string;
+};
 
 type Franchise = {
   id: string;
@@ -42,13 +52,30 @@ type CapConfig = {
   hard_apron: number;
 };
 
-const DIVISION_LABELS: Record<string, string> = {
+// Known overrides for divisions whose short code doesn't self-describe a
+// season (TRL's current F1 division is coded "F1" with no year suffix).
+// Anything not in this map — e.g. HRL's "F1_26" — is auto-labelled below
+// instead of being silently dropped, which is what happened before.
+const KNOWN_DIVISION_LABELS: Record<string, string> = {
   F1: "F1 · 2026",
-  F1_25: "F1 · 2025",
   F2: "F2",
 };
 
-const DIVISION_ORDER = ["F1", "F1_25", "F2"];
+function labelForDivision(division: string) {
+  if (KNOWN_DIVISION_LABELS[division]) return KNOWN_DIVISION_LABELS[division];
+  const match = division.match(/^(.+)_(\d{2})$/);
+  if (match) return `${match[1]} · 20${match[2]}`;
+  return division;
+}
+
+// Sorts divisions with the current/undated season first, then descending
+// by year for anything with a "_25" / "_26" style suffix. Works for TRL's
+// scheme ("F1", "F1_25") and HRL's scheme ("F1_26", "F1_25") without
+// needing a hardcoded order per league.
+function divisionSortKey(division: string) {
+  const match = division.match(/_(\d{2})$/);
+  return match ? -Number(match[1]) : -9999;
+}
 
 function formatMoney(n: number) {
   return new Intl.NumberFormat("en-US", {
@@ -60,14 +87,30 @@ function formatMoney(n: number) {
     .replace("$", "$TRL ");
 }
 
-async function getData() {
+async function getLeagues(): Promise<League[]> {
+  const supabase = createAdminClient();
+
+  const { data, error } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("id, name, slug")
+    .eq("sport", "sim_racing")
+    .in("pitboss_status", ["active", "trial"])
+    .eq("is_public", true)
+    .order("name");
+
+  if (error) throw error;
+  return (data ?? []) as League[];
+}
+
+async function getData(leagueId: string) {
   const supabase = createAdminClient();
 
   const { data: franchises, error: franchiseErr } = await supabase
     .schema("rise_os")
     .from("franchises")
     .select("id, name, abbreviation, division, logo_url, primary_color, secondary_color, gm_id")
-    .eq("league_id", LEAGUE_ID)
+    .eq("league_id", leagueId)
     .order("division")
     .order("name");
 
@@ -77,7 +120,7 @@ async function getData() {
     .schema("pitboss")
     .from("franchise_wallets")
     .select("franchise_id, balance, starting_wallet")
-    .eq("league_id", LEAGUE_ID)
+    .eq("league_id", leagueId)
     .eq("season", SEASON);
 
   if (walletErr) throw walletErr;
@@ -86,7 +129,7 @@ async function getData() {
     .schema("pitboss")
     .from("league_financial_config")
     .select("division, soft_cap, hard_apron")
-    .eq("league_id", LEAGUE_ID);
+    .eq("league_id", leagueId);
 
   if (capErr) throw capErr;
 
@@ -97,23 +140,49 @@ async function getData() {
   };
 }
 
-export default async function CapStatusPage() {
-  const { franchises, wallets, caps } = await getData();
+export default async function CapStatusPage({
+  searchParams,
+}: {
+  searchParams: { league?: string };
+}) {
+  const leagues = await getLeagues();
+
+  const selected =
+    leagues.find((l) => l.slug === searchParams.league) ??
+    leagues.find((l) => l.id === DEFAULT_LEAGUE_ID) ??
+    leagues[0];
+
+  if (!selected) {
+    return (
+      <main className="min-h-screen bg-[#0C0D0F] p-10 text-[#EDEDEE]">
+        No sim racing leagues found.
+      </main>
+    );
+  }
+
+  const { franchises, wallets, caps } = await getData(selected.id);
 
   const walletByFranchise = new Map(wallets.map((w) => [w.franchise_id, w]));
   const capByDivision = new Map(caps.map((c) => [c.division, c]));
 
-  const byDivision = DIVISION_ORDER.map((division) => ({
+  const divisionOrder = Array.from(new Set(franchises.map((f) => f.division))).sort(
+    (a, b) => divisionSortKey(a) - divisionSortKey(b) || a.localeCompare(b)
+  );
+
+  const byDivision = divisionOrder.map((division) => ({
     division,
-    label: DIVISION_LABELS[division] ?? division,
+    label: labelForDivision(division),
     cap: capByDivision.get(division),
     teams: franchises.filter((f) => f.division === division),
-  })).filter((group) => group.teams.length > 0);
+  }));
 
   return (
     <main className="min-h-screen bg-[#0C0D0F] text-[#EDEDEE]">
       <header className="border-b border-[#232428] px-6 py-8 sm:px-10">
-        <p className="text-sm tracking-wide text-[#8A8D93]">Truth Racing League</p>
+        <div className="flex items-start justify-between gap-4">
+          <p className="text-sm tracking-wide text-[#8A8D93]">{selected.name}</p>
+          <LeagueSelect leagues={leagues} selectedSlug={selected.slug} />
+        </div>
         <h1 className="mt-1 text-3xl font-semibold sm:text-4xl">Franchise Cap Status</h1>
         <p className="mt-2 max-w-xl text-sm text-[#8A8D93]">
           Live wallet balances against each division&rsquo;s Soft Cap and Hard
@@ -126,11 +195,13 @@ export default async function CapStatusPage() {
           <section key={group.division} className="mb-14 last:mb-0">
             <div className="mb-5 flex items-baseline justify-between border-b border-[#232428] pb-3">
               <h2 className="text-lg font-medium">{group.label}</h2>
-              {group.cap && (
+              {group.cap ? (
                 <p className="text-sm text-[#8A8D93]">
                   Soft cap {formatMoney(group.cap.soft_cap)} &middot; Hard apron{" "}
                   {formatMoney(group.cap.hard_apron)}
                 </p>
+              ) : (
+                <p className="text-sm text-[#8A8D93]">No cap configured for this division</p>
               )}
             </div>
 
