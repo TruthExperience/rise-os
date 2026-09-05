@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
-import { getAuthedDriver } from '@/lib/supabase/supabase-auth'import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 
 // NOTE: previously gated on getServerSession(authOptions) (next-auth),
 // which is a different auth system than the rest of the app now uses —
