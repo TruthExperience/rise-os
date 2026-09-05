@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
-// ─── Types ────────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────�[...]
 
 type FmSetupParamKey = 'front_wing_angle' | 'rear_wing_angle' | 'anti_roll_bar' | 'tyre_camber' | 'toe_out'
 type FmBiasKey = 'oversteer' | 'braking' | 'cornering' | 'traction' | 'straights'
@@ -47,6 +47,13 @@ interface HistoryIteration {
   iteration_number: number
   feedback: Record<FmBiasKey, FmFeedbackValue> | Record<string, unknown>
   applied_deltas: Record<string, number> | null
+  // Null for iterations logged before this column existed — render gracefully.
+  setup_values: Record<FmSetupParamKey, number> | null
+  // True when setup_values was backfilled from the *next* iteration's
+  // logged recommendation rather than captured live at report time — an
+  // inference (assumes the driver applied the recommendation exactly),
+  // not an authoritative record. Surface this distinction in the UI.
+  setup_values_reconstructed: boolean
   created_at: string
 }
 
@@ -377,7 +384,7 @@ export default function FmSetupsPage() {
     }
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Render ──────────────────────────────────────────────────────────��[...]
 
   if (authStatus === 'loading' || loadingMeta) {
     return (
@@ -599,6 +606,27 @@ export default function FmSetupsPage() {
                                   </span>
                                 ))}
                               </div>
++                              {it.setup_values ? (
++                                <div className="flex flex-wrap gap-1 mt-1.5 pt-1.5 border-t border-white/5">
++                                  {params.map((p) => (
++                                    <span
++                                      key={p.param_key}
++                                      className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.02] text-white/35 border border-white/5"
++                                    >
++                                      {p.label}: {formatValue(it.setup_values![p.param_key], p)}
++                                    </span>
++                                  ))}
++                                  {it.setup_values_reconstructed && (
++                                    <span className="text-[9px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300/70 border border-amber-500/20">
++                                      reconstructed
++                                    </span>
++                                  )}
++                                </div>
++                              ) : (
++                                <p className="text-white/20 text-[10px] mt-1.5 pt-1.5 border-t border-white/5">
++                                  Setup values not recorded for this iteration.
++                                </p>
++                              )}
                             </div>
                           ))}
                         </div>

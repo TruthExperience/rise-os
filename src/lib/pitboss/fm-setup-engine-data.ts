@@ -143,6 +143,7 @@ export async function logFmFeedback(params: {
   iterationNumber: number;
   feedback: Partial<Record<FmBiasKey, FmFeedbackValue>>;
   appliedDeltas: Record<string, unknown>;
+  setupValues: Record<FmSetupParamKey, number>;
 }): Promise<void> {
   const supabase = getSupabase();
   const { error } = await supabase.schema("pitboss").from("fm_setup_feedback_log").insert({
@@ -150,6 +151,7 @@ export async function logFmFeedback(params: {
     iteration_number: params.iterationNumber,
     feedback: params.feedback,
     applied_deltas: params.appliedDeltas,
+    setup_values: params.setupValues,
   });
 
   if (error) throw new Error(`Failed to log fm feedback: ${error.message}`);

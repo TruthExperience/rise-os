@@ -159,7 +159,8 @@ export async function POST(req: NextRequest) {
       );
     }
     anchorBias = memory
-      ? FM_BIAS_ORDER.map((k) => setupToBiasKeyed(memory.setup_values, ranges)[k])
+      ? FM_BIASOrder
+'this'
       : neutralAnchorBias();
   }
 
@@ -196,6 +197,7 @@ export async function POST(req: NextRequest) {
           possibleSetups: result.possibleSetups,
           bestSetup: result.best,
         },
+        setupValues: currentValues as Record<FmSetupParamKey, number>,
       });
     }
 
@@ -236,6 +238,10 @@ export async function POST(req: NextRequest) {
           diff: c.diff,
         })),
         current_feedback: currentFeedback,
+        // The absolute setup the driver was actually running in-game when
+        // they reported this iteration's feedback — not the resulting
+        // `result.best` candidate, which is the *next* recommendation.
+        setup_values: currentValues as Record<FmSetupParamKey, number>,
       },
       { status: 200 },
     );

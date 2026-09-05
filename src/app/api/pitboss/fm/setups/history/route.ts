@@ -44,7 +44,7 @@ export async function GET(req: NextRequest) {
   const { data: log, error: logErr } = await supabase
     .schema("pitboss")
     .from("fm_setup_feedback_log")
-    .select("iteration_number, feedback, applied_deltas, created_at")
+    .select("iteration_number, feedback, applied_deltas, setup_values, setup_values_reconstructed, created_at")
     .eq("session_id", session_id)
     .order("iteration_number", { ascending: true });
 
