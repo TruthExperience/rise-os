@@ -124,15 +124,16 @@ export async function updateFmSetupSession(
   return data as unknown as FmSetupSessionRow;
 }
 
-export interface FmFeedbackLogEntry {
-  bias: FmBiasKey;
-  value: number;
-  feedback: FmFeedbackValue;
-}
-
 /**
  * Appends an audit row to fm_setup_feedback_log for this calculation.
- * `feedback` is the raw feedback points just recorded this call;
+ * `feedback` is a bias-keyed map of the feedback points just recorded this
+ * call — e.g. { oversteer: 'good', braking: 'bad' } — matching what the
+ * frontend history panel reads (Object.entries keyed by bias name).
+ * FIX: this used to be typed (and called) as an array of
+ * {bias, value, feedback} entries. `Object.entries()` on an array yields
+ * numeric-index keys with the whole entry object as the value, which is why
+ * the history panel rendered "[object Object]" instead of the feedback
+ * label — see calculate/route.ts for the corresponding call-site fix.
  * `appliedDeltas` is whatever the caller wants to record about the
  * resulting search (e.g. lowestRuleBreak, possibleSetups, chosen candidate)
  * for later debugging/analysis — shape is intentionally loose (jsonb).
@@ -140,7 +141,7 @@ export interface FmFeedbackLogEntry {
 export async function logFmFeedback(params: {
   sessionId: string;
   iterationNumber: number;
-  feedback: FmFeedbackLogEntry[];
+  feedback: Partial<Record<FmBiasKey, FmFeedbackValue>>;
   appliedDeltas: Record<string, unknown>;
 }): Promise<void> {
   const supabase = getSupabase();
