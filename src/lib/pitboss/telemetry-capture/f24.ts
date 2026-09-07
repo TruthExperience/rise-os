@@ -1,7 +1,8 @@
 // f24.ts — F1 24 packet body parsers (Motion, Session, LapData,
-// Participants, CarTelemetry, CarStatus, CarDamage). Field layouts and
-// byte offsets verified against the official EA-licensed F1 24 UDP
-// spec (https://github.com/MacManley/f1-24-udp), which itself mirrors
+// Participants, CarSetups, CarTelemetry, CarStatus, CarDamage). Field
+// layouts and byte offsets verified against the official EA-licensed
+// F1 24 UDP spec (https://github.com/MacManley/f1-24-udp), which itself
+// mirrors
 // https://answers.ea.com/t5/General-Discussion/F1-24-UDP-Specification/td-p/13745220.
 //
 // Every struct below was cross-checked by summing its field sizes and
@@ -18,6 +19,10 @@
 //     total 1131 -> 1285 bytes.
 //   - Participants: added `techLevel` (uint16) before `platform`.
 //     Per-car size 58 -> 60 bytes, total 1306 -> 1350 bytes.
+//   - CarSetups: added `engineBraking` (uint8, inserted after
+//     `brakeBias`), plus a trailing `nextFrontWingValue` (float,
+//     player-only) appended after the per-car array. Per-car size
+//     49 -> 50 bytes, total 1107 -> 1133 bytes.
 //   - Motion, CarTelemetry, CarStatus, CarDamage: unchanged from F23.
 //
 // Unlike f23.ts, worldForwardDir/worldRightDir here are read with the
@@ -516,6 +521,82 @@ export function parseParticipants24(buf: Buffer): PacketParticipantsData24 {
   const participants: ParticipantData24[] = [];
   for (let i = 0; i < NUM_CARS; i++) participants.push(readParticipantData24(r));
   return { header, numActiveCars, participants };
+}
+
+// ---------------------------------------------------------------------
+// CarSetups — 1133 bytes total = 29 (header) + 22 * 50 (CarSetupData)
+// + 4 (nextFrontWingValue). engineBraking added vs F23 (inserted after
+// brakeBias); nextFrontWingValue (player-only) appended after the array.
+// ---------------------------------------------------------------------
+
+export interface CarSetupData24 {
+  frontWing: number;
+  rearWing: number;
+  onThrottle: number;
+  offThrottle: number;
+  frontCamber: number;
+  rearCamber: number;
+  frontToe: number;
+  rearToe: number;
+  frontSuspension: number;
+  rearSuspension: number;
+  frontAntiRollBar: number;
+  rearAntiRollBar: number;
+  frontSuspensionHeight: number;
+  rearSuspensionHeight: number;
+  brakePressure: number;
+  brakeBias: number;
+  engineBraking: number; // new vs F23
+  rearLeftTyrePressure: number;
+  rearRightTyrePressure: number;
+  frontLeftTyrePressure: number;
+  frontRightTyrePressure: number;
+  ballast: number;
+  fuelLoad: number;
+}
+
+export interface PacketCarSetupData24 {
+  header: PacketHeader;
+  carSetups: CarSetupData24[];
+  /** Value of front wing after next pit stop — player's own car only; 0 for other cars. */
+  nextFrontWingValue: number;
+}
+
+function readCarSetupData24(r: Reader): CarSetupData24 {
+  return {
+    frontWing: r.u8(),
+    rearWing: r.u8(),
+    onThrottle: r.u8(),
+    offThrottle: r.u8(),
+    frontCamber: r.f32(),
+    rearCamber: r.f32(),
+    frontToe: r.f32(),
+    rearToe: r.f32(),
+    frontSuspension: r.u8(),
+    rearSuspension: r.u8(),
+    frontAntiRollBar: r.u8(),
+    rearAntiRollBar: r.u8(),
+    frontSuspensionHeight: r.u8(),
+    rearSuspensionHeight: r.u8(),
+    brakePressure: r.u8(),
+    brakeBias: r.u8(),
+    engineBraking: r.u8(),
+    rearLeftTyrePressure: r.f32(),
+    rearRightTyrePressure: r.f32(),
+    frontLeftTyrePressure: r.f32(),
+    frontRightTyrePressure: r.f32(),
+    ballast: r.u8(),
+    fuelLoad: r.f32(),
+  };
+}
+
+export function parseCarSetups24(buf: Buffer): PacketCarSetupData24 {
+  const header = parseHeader(buf);
+  const r = new Reader(buf, HEADER_SIZE_BYTES);
+  const carSetups: CarSetupData24[] = [];
+  for (let i = 0; i < NUM_CARS; i++) carSetups.push(readCarSetupData24(r));
+  const nextFrontWingValue = r.f32();
+  return { header, carSetups, nextFrontWingValue };
 }
 
 // ---------------------------------------------------------------------
