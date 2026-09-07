@@ -27,17 +27,23 @@ export const HEADER_SIZE_BYTES = 29; // shared by all four supported years
 
 export type TelemetryYear = 23 | 24 | 25 | 26;
 
-// Only the packet IDs this project actually captures. EA's spec defines
-// more (Event=3, CarSetups=5, FinalClassification=8, LobbyInfo=9,
-// SessionHistory=11, TyreSets=12, MotionEx=13, TimeTrial=14,
-// LapPositions=15) -- deliberately omitted since dispatch23/24/25/26 in
-// parser.ts don't handle them and would just fall through to `default:
-// return null` anyway.
+// Packet IDs this project captures. EA's spec defines more (Event=3,
+// FinalClassification=8, LobbyInfo=9, SessionHistory=11, TyreSets=12,
+// MotionEx=13, TimeTrial=14, LapPositions=15, and on F26, CarTelemetry2=16)
+// -- deliberately omitted since dispatch23/24/25/26 in parser.ts don't
+// handle them and would just fall through to `default: return null`
+// anyway.
+//
+// CarSetups = 5 was previously on this omitted list but is now captured
+// (see f23/f24/f25/f26.ts's parseCarSetupsNN) -- setup data feeds
+// pitboss.setup_submissions with source 'telemetry', in addition to the
+// existing driving-input telemetry this file's siblings already parse.
 export enum PacketId {
   Motion = 0,
   Session = 1,
   LapData = 2,
   Participants = 4,
+  CarSetups = 5,
   CarTelemetry = 6,
   CarStatus = 7,
   CarDamage = 10,
