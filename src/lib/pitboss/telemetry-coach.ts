@@ -1,3 +1,7 @@
+// =====================================================
+// FILE: src/lib/pitboss/telemetry-coach.ts
+// =====================================================
+
 /**
  * PitBoss — Telemetry Analysis & Coach Engine
  * ----------------------------------------------
@@ -18,6 +22,12 @@
  *      against F1_TRACKS' known turn count for this circuit, and appends
  *      a caveat to the summary if detection looks substantially
  *      incomplete (see "Track sanity check" section below).
+ *   6. Frame-density gate — a lap whose telemetry capture is too sparse
+ *      (see MIN_FRAMES_PER_SECOND below) can't support any of the above
+ *      trustworthily. Detected up front and short-circuits to an explicit
+ *      "too sparse to analyze" report instead of silently running corner
+ *      detection / comparison / narrative generation over data with
+ *      multi-second blackouts in it.
  *
  * SERVER-ONLY: this file calls pbInfer, which reads PITBOSS_INTERNAL_KEY.
  * Never import this from a 'use client' component — see the recharts /
@@ -33,6 +43,11 @@
  * yet (see the comment in lib/telemetry.ts's reshapeFrame). Without it,
  * "went off track" can only be inferred indirectly (e.g. a lap flagged
  * !lapValid), not pinpointed to a specific corner.
+ *
+ * KNOWN GAP — car-class redline lookup (see REDLINE_RPM_BY_CLASS below):
+ * the field name/values for a session's car class haven't been confirmed
+ * against the live TelemetrySession type, so the lookup currently reads
+ * off an `any`-cast property. Verify and replace once confirmed.
  */
 
 import { pbInfer } from '@/lib/pitboss-llm';
@@ -73,6 +88,27 @@ import type {
   CoachingReport,
 } from '@/lib/pitboss/telemetry-coach-types';
 
+export type SpeedUnit = 'kph' | 'mph';
+
+// =======================================================================
+// Speed unit conversion — all raw telemetry (frame.speed, F1 UDP's
+// m_speed field) and all internal detection thresholds (MIN_APEX_SPEED_
+// DROP_KMH, redline RPM lookups, etc.) are km/h always. Conversion to mph
+// happens exactly once, at the buildCoachingReport boundary, only on
+// values that get returned/displayed — never inside the detection math
+// itself. See CoachingReport.speedUnit's doc comment for the contract.
+// =======================================================================
+
+const KPH_TO_MPH = 1 / 1.609344;
+
+function convertSpeed(kph: number, unit: SpeedUnit): number {
+  return unit === 'mph' ? kph * KPH_TO_MPH : kph;
+}
+
+function speedUnitLabel(unit: SpeedUnit): string {
+  return unit === 'mph' ? 'mph' : 'km/h';
+}
+
 // =======================================================================
 // Distance-domain resampling — the backbone of lap comparison. Frames
 // arrive at fixed time intervals, not fixed distance intervals, so two
@@ -80,21 +116,47 @@ import type {
 // grid before comparing.
 // =======================================================================
 
-function resampleOntoGrid(frames: TelemetryFrame[], grid: number[]): number[] {
-  // Linear-interpolates speed (m/s equivalent, whatever unit frames use)
-  // at each grid distance. Frames assumed sorted by dist ascending.
-  const result: number[] = [];
+// A grid point interpolated across a large real-time gap between the two
+// bracketing frames (e.g. a dropped-UDP-packet capture dropout) is not a
+// trustworthy value — see DeltaPoint.deltaSeconds in
+// telemetry-coach-types.ts, which documents exactly this contract.
+// Confirmed against real uploads: capture gaps are bursty (tight clusters
+// of 16-50ms frames interrupted by multi-second blackouts), not a uniform
+// downsample, so this has to be measured per-point, not assumed constant.
+const SOURCE_GAP_UNRELIABLE_SECONDS = 0.5;
+
+interface ResampledSpeedPoint {
+  speed: number;
+  /**
+   * Estimated real-world time gap (seconds) between the two actual
+   * telemetry frames bracketing this grid point, derived from their
+   * distance gap and average speed. Large values mean this point was
+   * linearly interpolated across a real capture gap, not measured.
+   */
+  sourceGapSeconds: number;
+}
+
+function resampleOntoGrid(frames: TelemetryFrame[], grid: number[]): ResampledSpeedPoint[] {
+  // Linear-interpolates speed (raw km/h, straight from the F1 UDP
+  // m_speed field) at each grid distance. Frames assumed sorted by dist
+  // ascending.
+  const result: ResampledSpeedPoint[] = [];
   let i = 0;
   for (const d of grid) {
     while (i < frames.length - 2 && frames[i + 1].dist < d) i++;
     const a = frames[i];
     const b = frames[Math.min(i + 1, frames.length - 1)];
     if (b.dist === a.dist) {
-      result.push(a.speed);
+      result.push({ speed: a.speed, sourceGapSeconds: 0 });
       continue;
     }
     const t = (d - a.dist) / (b.dist - a.dist);
-    result.push(a.speed + t * (b.speed - a.speed));
+    const speed = a.speed + t * (b.speed - a.speed);
+    // Convert km/h -> m/s before using speed to turn a distance gap
+    // between the two real bracketing frames into a time-gap estimate.
+    const avgSpeedMs = (a.speed + b.speed) / 2 / 3.6;
+    const sourceGapSeconds = avgSpeedMs > 0.1 ? (b.dist - a.dist) / avgSpeedMs : 0;
+    result.push({ speed, sourceGapSeconds });
   }
   return result;
 }
@@ -116,8 +178,12 @@ function speedTraceToCumulativeTime(speeds: number[], stepMeters: number): numbe
   const EPSILON = 0.5; // m/s floor
   const cumulative: number[] = [0];
   for (let i = 1; i < speeds.length; i++) {
-    const avgSpeed = Math.max((speeds[i - 1] + speeds[i]) / 2, EPSILON);
-    const dt = stepMeters / avgSpeed;
+    // speeds[] is raw km/h (frame.speed, straight from F1 UDP's m_speed
+    // field) — must convert to m/s before dividing distance by it.
+    // Missing this made every dt, and therefore every deltaCurve point,
+    // zone, and per-straight delta downstream, too small by ~3.6x.
+    const avgSpeedMs = Math.max((speeds[i - 1] + speeds[i]) / 2 / 3.6, EPSILON);
+    const dt = stepMeters / avgSpeedMs;
     cumulative.push(cumulative[i - 1] + dt);
   }
   return cumulative;
@@ -142,16 +208,25 @@ export function compareLaps(lapA: TelemetryLap, lapB: TelemetryLap, stepMeters =
     stepMeters
   );
 
-  const speedsA = resampleOntoGrid(lapA.frames, grid);
-  const speedsB = resampleOntoGrid(lapB.frames, grid);
+  const resampledA = resampleOntoGrid(lapA.frames, grid);
+  const resampledB = resampleOntoGrid(lapB.frames, grid);
 
-  const timeA = speedTraceToCumulativeTime(speedsA, stepMeters);
-  const timeB = speedTraceToCumulativeTime(speedsB, stepMeters);
+  const timeA = speedTraceToCumulativeTime(resampledA.map((p) => p.speed), stepMeters);
+  const timeB = speedTraceToCumulativeTime(resampledB.map((p) => p.speed), stepMeters);
 
-  const deltaCurve: DeltaPoint[] = grid.map((dist, i) => ({
-    dist,
-    deltaSeconds: timeB[i] - timeA[i],
-  }));
+  const deltaCurve: DeltaPoint[] = grid.map((dist, i) => {
+    // If either lap's value at this grid point was interpolated across a
+    // real capture gap, the delta here isn't measured data — it's a
+    // straight line drawn through an unknown braking/apex/exit sequence.
+    // Null it out rather than presenting invented smoothness as fact.
+    const unreliable =
+      resampledA[i].sourceGapSeconds > SOURCE_GAP_UNRELIABLE_SECONDS ||
+      resampledB[i].sourceGapSeconds > SOURCE_GAP_UNRELIABLE_SECONDS;
+    return {
+      dist,
+      deltaSeconds: unreliable ? null : timeB[i] - timeA[i],
+    };
+  });
 
   const totalDeltaSeconds = lapB.lapTime - lapA.lapTime;
 
@@ -163,21 +238,32 @@ export function compareLaps(lapA: TelemetryLap, lapB: TelemetryLap, stepMeters =
   let maxIdx = 0;
 
   for (let i = 0; i < deltaCurve.length; i++) {
-    if (deltaCurve[i].deltaSeconds < minDelta) {
-      minDelta = deltaCurve[i].deltaSeconds;
+    const delta = deltaCurve[i].deltaSeconds;
+    if (delta === null) continue;
+    if (delta < minDelta) {
+      minDelta = delta;
       minIdx = i;
     }
-    if (deltaCurve[i].deltaSeconds > maxDelta) {
-      maxDelta = deltaCurve[i].deltaSeconds;
+    if (delta > maxDelta) {
+      maxDelta = delta;
       maxIdx = i;
     }
   }
 
   if (minDelta < -0.05) {
     // lapB gained time relative to lapA up to this point — find where the
-    // gaining streak started by walking backward while delta keeps improving
+    // gaining streak started by walking backward while delta keeps
+    // improving. Stops at the first null boundary too, since we can't
+    // compare across an unreliable point.
     let start = minIdx;
-    while (start > 0 && deltaCurve[start - 1].deltaSeconds >= deltaCurve[start].deltaSeconds) start--;
+    while (
+      start > 0 &&
+      deltaCurve[start - 1].deltaSeconds !== null &&
+      deltaCurve[start].deltaSeconds !== null &&
+      (deltaCurve[start - 1].deltaSeconds as number) >= (deltaCurve[start].deltaSeconds as number)
+    ) {
+      start--;
+    }
     biggestGainZone = {
       startDist: deltaCurve[start].dist,
       endDist: deltaCurve[minIdx].dist,
@@ -187,7 +273,14 @@ export function compareLaps(lapA: TelemetryLap, lapB: TelemetryLap, stepMeters =
 
   if (maxDelta > 0.05) {
     let start = maxIdx;
-    while (start > 0 && deltaCurve[start - 1].deltaSeconds <= deltaCurve[start].deltaSeconds) start--;
+    while (
+      start > 0 &&
+      deltaCurve[start - 1].deltaSeconds !== null &&
+      deltaCurve[start].deltaSeconds !== null &&
+      (deltaCurve[start - 1].deltaSeconds as number) <= (deltaCurve[start].deltaSeconds as number)
+    ) {
+      start--;
+    }
     biggestLossZone = {
       startDist: deltaCurve[start].dist,
       endDist: deltaCurve[maxIdx].dist,
@@ -239,12 +332,16 @@ export function compareLaps(lapA: TelemetryLap, lapB: TelemetryLap, stepMeters =
 // the REFERENCE_WINDOW_METERS immediately before/after the whole (possibly
 // bridged) corner — rather than the corner segment's own boundary frame,
 // which can still be mid-corner if bridging occurred.
+//
+// All speeds in this section (STEER_THRESHOLD_DEG excepted — that's
+// degrees, not speed) are km/h always, regardless of the report's
+// requested speedUnit — this is detection math, not a display value.
 // =======================================================================
 
 const STEER_THRESHOLD_DEG = 15; // realistic minimum steering input for an actual corner
 const GLAT_THRESHOLD = 1.2; // g — filters out straight-line curb/road noise
 const MIN_CONSECUTIVE_TURN_FRAMES = 4; // one noisy frame shouldn't start a corner
-const MIN_APEX_SPEED_DROP_KMH = 15; // apex must be genuinely slower than true entry/exit, or it's not a corner
+const MIN_APEX_SPEED_DROP_KMH = 15; // apex must be genuinely slower than true entry/exit, or it's not a corner — always km/h, independent of report display unit
 const GAP_BRIDGE_METERS = 25; // bridge brief straightening within a complex corner (chicanes, hairpin doubles) so one real corner isn't fragmented
 const REFERENCE_WINDOW_METERS = 150; // how far to look before/after a corner for its true (straight-line) entry/exit speed
 
@@ -441,6 +538,8 @@ export function analyzeStraight(
 ): StraightAnalysis {
   const zone = framesInRange(frames, straight.startDist, straight.endDist);
 
+  // topSpeed is always km/h at this stage — converted to the report's
+  // requested speedUnit once, at the buildCoachingReport boundary.
   let topSpeed = 0;
   let topSpeedDist = straight.startDist;
   for (const f of zone) {
@@ -457,12 +556,20 @@ export function analyzeStraight(
   // Time delta across this straight's distance range, sourced from the
   // already-computed lap comparison rather than recomputing anything —
   // consistent with the rule that the LLM (and this helper) never invents
-  // numbers, only reads what compareLaps already produced.
+  // numbers, only reads what compareLaps already produced. Skips any
+  // deltaCurve point whose value is null (unreliable — see DeltaPoint) so
+  // a single capture gap inside this straight's range doesn't silently
+  // corrupt the delta; if the endpoints we need are unreliable, the
+  // result is null rather than a wrong number.
   let deltaVsReferenceSeconds: number | null = null;
   if (comparison) {
     const inRange = comparison.deltaCurve.filter((p) => p.dist >= straight.startDist && p.dist <= straight.endDist);
     if (inRange.length >= 2) {
-      deltaVsReferenceSeconds = inRange[inRange.length - 1].deltaSeconds - inRange[0].deltaSeconds;
+      const first = inRange[0].deltaSeconds;
+      const last = inRange[inRange.length - 1].deltaSeconds;
+      if (first !== null && last !== null) {
+        deltaVsReferenceSeconds = last - first;
+      }
     }
   }
 
@@ -485,10 +592,22 @@ const BRAKE_THRESHOLD = 0.1; // 0-1 scale
 const THROTTLE_THRESHOLD = 0.1;
 const FULL_THROTTLE_THRESHOLD = 0.95;
 
-export function analyzeBraking(frames: TelemetryFrame[], corner: CornerSegment): BrakingAnalysis {
+export function analyzeBraking(
+  frames: TelemetryFrame[],
+  corner: CornerSegment,
+  previousCorner: CornerSegment | null
+): BrakingAnalysis {
   // Look slightly before corner entry for the actual brake point, which
-  // usually precedes the steering input.
-  const searchStart = Math.max(0, corner.entryDist - 150);
+  // usually precedes the steering input. Clamped to the previous corner's
+  // exit so a close-together sequence — the same case GAP_BRIDGE_METERS
+  // exists to handle for detection (chicanes, tight corner sequences) —
+  // doesn't pull braking/trail-brake frames that actually belong to the
+  // prior corner into this one's analysis. Without the clamp, a fixed
+  // 150m lookback can extend past the previous corner's exit whenever two
+  // corners sit closer together than 150m.
+  const searchStart = previousCorner
+    ? Math.max(corner.entryDist - 150, previousCorner.exitDist)
+    : Math.max(0, corner.entryDist - 150);
   const zone = framesInRange(frames, searchStart, corner.apexDist);
 
   const brakingFrames = zone.filter((f) => f.brake > BRAKE_THRESHOLD);
@@ -511,6 +630,8 @@ export function analyzeBraking(frames: TelemetryFrame[], corner: CornerSegment):
     brakePeakPressure,
     brakeDurationMeters,
     trailBrakePercent,
+    // Always km/h at this stage — converted to the report's requested
+    // speedUnit once, at the buildCoachingReport boundary.
     minSpeedInCorner: Number.isFinite(minSpeedInCorner) ? minSpeedInCorner : 0,
   };
 }
@@ -555,8 +676,61 @@ export function analyzeThrottle(frames: TelemetryFrame[], corner: CornerSegment,
 // 5. Consistency & mistake detection
 // =======================================================================
 
-export function detectIssues(frames: TelemetryFrame[]): DetectedIssue[] {
+// Redline thresholds by car class. SetupGen/telemetry-coach covers
+// multiple F1 car classes, and a single fixed RPM ceiling misfires
+// (false positives or missed detections) for any class whose rev limit
+// differs from whichever car 11500 was originally tuned against.
+//
+// KNOWN GAP: the key strings here (and the field read off session/lap to
+// look one up — see getRedlineRpm's caller in buildCoachingReport) have
+// not been confirmed against the live car-class data actually available
+// on TelemetrySession/TelemetryLap. Treat this as a best-effort lookup
+// with a safe default, not a verified mapping — confirm the real field
+// name and class values, then replace the `as any` cast at the call site.
+const REDLINE_RPM_BY_CLASS: Record<string, number> = {
+  f1: 11500,
+  f2: 11500,
+};
+const DEFAULT_REDLINE_RPM = 11500;
+
+function getRedlineRpm(carClass: string | null | undefined): number {
+  if (!carClass) return DEFAULT_REDLINE_RPM;
+  return REDLINE_RPM_BY_CLASS[carClass.toLowerCase()] ?? DEFAULT_REDLINE_RPM;
+}
+
+// Consecutive same-kind flags within this distance are one sustained
+// condition (e.g. RPM held at the limiter across many frames in a row
+// while the car covers a few meters), not N separate events. Without
+// merging, a single missed upshift could report as 4 distinct
+// engine_over_rev entries a meter apart — inflating majorIssueCount and
+// the per-corner issue list the driver reads, and making trends (e.g.
+// "62 over-revs total" in a season panel) look far worse than reality.
+const ISSUE_MERGE_DIST_METERS = 3;
+
+function mergeAdjacentIssues(issues: DetectedIssue[]): DetectedIssue[] {
+  if (issues.length === 0) return issues;
+  // issues arrive in dist-ascending order — detectIssues walks frames
+  // forward and pushes in order — so a simple forward scan is sufficient.
+  const merged: DetectedIssue[] = [];
+  for (const issue of issues) {
+    const last = merged[merged.length - 1];
+    if (last && last.kind === issue.kind && issue.dist - (last.endDist ?? last.dist) <= ISSUE_MERGE_DIST_METERS) {
+      last.endDist = issue.dist;
+      if (issue.severity === 'major') last.severity = 'major';
+    } else {
+      merged.push({ ...issue });
+    }
+  }
+  return merged;
+}
+
+export function detectIssues(
+  frames: TelemetryFrame[],
+  redlineRpm: number = DEFAULT_REDLINE_RPM,
+  speedUnit: SpeedUnit = 'kph'
+): DetectedIssue[] {
   const issues: DetectedIssue[] = [];
+  const unitLabel = speedUnitLabel(speedUnit);
 
   for (let i = 2; i < frames.length; i++) {
     const prev = frames[i - 1];
@@ -582,20 +756,25 @@ export function detectIssues(frames: TelemetryFrame[]): DetectedIssue[] {
 
     // Snap correction: large, fast steering reversal at speed — proxy for
     // a near-spin or correction after losing the rear. Threshold is a
-    // starting guess.
+    // starting guess. curr.speed (km/h internally) is converted + labeled
+    // here since this note text is user-facing and now needs to match
+    // whatever unit the rest of the report is displayed in.
     const steerDelta = curr.steer - prev.steer;
     if (Math.abs(steerDelta) > 25 && curr.speed > 30 && Math.sign(steerDelta) !== Math.sign(prev.steer - frames[i - 2].steer)) {
+      const displaySpeed = convertSpeed(curr.speed, speedUnit);
       issues.push({
         kind: 'snap_correction',
         dist: curr.dist,
         severity: Math.abs(steerDelta) > 45 ? 'major' : 'minor',
-        note: `Sharp steering correction (${steerDelta.toFixed(0)}° in one frame) at ${curr.speed.toFixed(0)} — possible rear-end slide.`,
+        note: `Sharp steering correction (${steerDelta.toFixed(0)}° in one frame) at ${displaySpeed.toFixed(0)} ${unitLabel} — possible rear-end slide.`,
       });
     }
 
     // Over-rev: sustained RPM at/above redline without a gear change
-    // suggests a missed upshift, not a deliberate hold.
-    if (curr.rpm > 0 && prev.gear === curr.gear && curr.rpm > 0.98 * (prev.rpm || curr.rpm) && curr.rpm > 11500) {
+    // suggests a missed upshift, not a deliberate hold. redlineRpm is
+    // caller-supplied (see getRedlineRpm) so this doesn't misfire for car
+    // classes with a different rev limit than the original 11500 tuning.
+    if (curr.rpm > 0 && prev.gear === curr.gear && curr.rpm > 0.98 * (prev.rpm || curr.rpm) && curr.rpm > redlineRpm) {
       issues.push({
         kind: 'engine_over_rev',
         dist: curr.dist,
@@ -605,7 +784,7 @@ export function detectIssues(frames: TelemetryFrame[]): DetectedIssue[] {
     }
   }
 
-  return issues;
+  return mergeAdjacentIssues(issues);
 }
 
 // =======================================================================
@@ -627,7 +806,7 @@ interface NarrativeCornerInput {
   brakePeakPressure: number;
   brakeDurationMeters: number;
   trailBrakePercent: number;
-  minSpeedInCorner: number;
+  minSpeedInCorner: number; // already in the report's requested speedUnit
   throttleApplicationDist: number;
   distFromApexToThrottle: number;
   fullThrottleDist: number | null;
@@ -640,7 +819,7 @@ interface NarrativeStraightInput {
   startDist: number;
   endDist: number;
   lengthMeters: number;
-  topSpeed: number;
+  topSpeed: number; // already in the report's requested speedUnit
   topSpeedDist: number;
   avgThrottle: number;
   drsActivePercent: number;
@@ -652,6 +831,7 @@ interface NarrativeInput {
   lapTime: number;
   lapValid: boolean;
   referenceLapNum: number | null;
+  speedUnit: SpeedUnit;
   comparison: {
     totalDeltaSeconds: number;
     sectorDeltas: { sector1: number; sector2: number; sector3: number };
@@ -673,7 +853,13 @@ interface CoachingNarrative {
   source: 'llm' | 'deterministic';
 }
 
-const COACH_SYSTEM_PROMPT = `You are PitBoss's sim-racing driving coach for F1 UDP telemetry.
+// Builds the system prompt with the correct speed-unit instruction baked
+// in. Previously this was a static string hardcoding "speeds in km/h" —
+// with speedUnit now selectable per-report, a hardcoded unit label would
+// have the LLM writing "km/h" in its prose right next to mph numbers.
+function buildCoachSystemPrompt(speedUnit: SpeedUnit): string {
+  const unitLabel = speedUnitLabel(speedUnit);
+  return `You are PitBoss's sim-racing driving coach for F1 UDP telemetry.
 You are given the ALREADY-COMPUTED structured output of a deterministic telemetry analysis for one lap: lap time, an optional comparison against a reference lap, a per-corner breakdown (braking point/pressure/duration, trail-brake %, min corner speed, throttle application point, distance from apex to throttle, full-throttle point, throttle smoothness 0-1, and any detected issues), and a per-straight breakdown (length, top speed and where it was reached, average throttle 0-1, % of the straight with DRS active, and time delta vs the reference lap across that straight if available).
 
 Your job is ONLY to interpret these numbers in plain, encouraging but honest coaching language. Do not invent facts, distances, or times that are not present in the data. Do not contradict the numbers given. If a value is missing or looks like a sensor gap (e.g. fullThrottleDist is null), say so rather than guessing.
@@ -682,7 +868,7 @@ Corner numbering: each corner object has an "id" field starting at 0 — this is
 
 Field names are internal variable names, not driving vocabulary — describe what they mean in plain racing language instead of naming the field. For example, say "throttle came on a bit late after the apex" rather than "distFromApexToThrottle was high".
 
-Units: distances in meters, speeds in km/h, times in seconds, angles in degrees, pressures/smoothness/throttle on a 0-1 scale.
+Units: distances in meters, speeds in ${unitLabel} (all speed values given — topSpeed, minSpeedInCorner — are already converted to this unit; use it consistently in your prose), times in seconds, angles in degrees, pressures/smoothness/throttle on a 0-1 scale.
 
 Respond with ONLY a single JSON object, no markdown fences, no prose outside the JSON, matching exactly this shape:
 {
@@ -693,6 +879,7 @@ Respond with ONLY a single JSON object, no markdown fences, no prose outside the
   "straightSuggestions": { "<straightId>": "1 short, concrete tip for that straight, or a short affirmation if it was clean", ... one entry per straight id given ... },
   "suggestions": ["3-5 short, concrete, prioritized next-lap tips covering the whole lap, each grounded in a specific number, corner, or straight from the data above, described in plain racing language rather than field names. Order from highest-impact first. Do not repeat the summary verbatim."]
 }`;
+}
 
 function stripJsonFences(text: string): string {
   return text.replace(/```json|```/g, '').trim();
@@ -877,9 +1064,9 @@ function deterministicCornerSuggestion(c: NarrativeCornerInput): string {
   return 'Solid execution here — no clear time on the table.';
 }
 
-function deterministicStraightNote(s: NarrativeStraightInput): string {
+function deterministicStraightNote(s: NarrativeStraightInput, unitLabel: string): string {
   const parts: string[] = [];
-  parts.push(`${s.lengthMeters.toFixed(0)}m straight, top speed ${s.topSpeed.toFixed(0)} km/h at ${s.topSpeedDist.toFixed(0)}m.`);
+  parts.push(`${s.lengthMeters.toFixed(0)}m straight, top speed ${s.topSpeed.toFixed(0)} ${unitLabel} at ${s.topSpeedDist.toFixed(0)}m.`);
   if (s.drsActivePercent > 0) {
     parts.push(`DRS active ${(s.drsActivePercent * 100).toFixed(0)}% of the way.`);
   }
@@ -908,6 +1095,7 @@ function deterministicStraightSuggestion(s: NarrativeStraightInput): string {
  * top-level suggestions even if the PitBoss worker is down.
  */
 function buildDeterministicNarrative(input: NarrativeInput): CoachingNarrative {
+  const unitLabel = speedUnitLabel(input.speedUnit);
   const summaryParts: string[] = [];
   summaryParts.push(`Lap ${input.lapNum}: ${input.lapTime.toFixed(3)}s${input.lapValid ? '' : ' (invalid)'}.`);
   if (input.comparison) {
@@ -928,7 +1116,7 @@ function buildDeterministicNarrative(input: NarrativeInput): CoachingNarrative {
   const cornerSuggestions = new Map<number, string>();
   for (const c of input.corners) {
     const parts: string[] = [];
-    parts.push(`Braked at ${c.brakePointDist.toFixed(0)}m, peak ${(c.brakePeakPressure * 100).toFixed(0)}% brake pressure, min speed ${c.minSpeedInCorner.toFixed(0)} km/h.`);
+    parts.push(`Braked at ${c.brakePointDist.toFixed(0)}m, peak ${(c.brakePeakPressure * 100).toFixed(0)}% brake pressure, min speed ${c.minSpeedInCorner.toFixed(0)} ${unitLabel}.`);
     parts.push(`Trail-braked through ${(c.trailBrakePercent * 100).toFixed(0)}% of the braking zone.`);
     parts.push(
       c.fullThrottleDist != null
@@ -945,7 +1133,7 @@ function buildDeterministicNarrative(input: NarrativeInput): CoachingNarrative {
   const straightNotes = new Map<number, string>();
   const straightSuggestions = new Map<number, string>();
   for (const s of input.straights) {
-    straightNotes.set(s.id, deterministicStraightNote(s));
+    straightNotes.set(s.id, deterministicStraightNote(s, unitLabel));
     straightSuggestions.set(s.id, deterministicStraightSuggestion(s));
   }
 
@@ -964,7 +1152,7 @@ async function generateCoachingNarrative(input: NarrativeInput): Promise<Coachin
   try {
     const result = await pbInfer({
       mode: 'reasoning',
-      system: COACH_SYSTEM_PROMPT,
+      system: buildCoachSystemPrompt(input.speedUnit),
       prompt: JSON.stringify(input),
       max_tokens: 2000,
       temperature: 0.4,
@@ -1002,22 +1190,68 @@ async function generateCoachingNarrative(input: NarrativeInput): Promise<Coachin
 // 7. Top-level orchestrator
 // =======================================================================
 
+// A lap whose telemetry capture is too sparse can't support corner
+// detection, braking/throttle analysis, or lap comparison trustworthily —
+// see the Aug 2026 investigation: a 350-frame, 101.44s lap (3.45 frames/
+// sec) against a healthy ~16.5 frames/sec baseline produced a straight
+// line through what should have been an entire braking-apex-exit
+// sequence, and only detected 4 of a track's ~16 corners. Gated up front
+// so a lap like this returns an explicit "too sparse to analyze" report
+// instead of silently running the full pipeline over fabricated zones.
+const MIN_FRAMES_PER_SECOND = 8;
+
+function buildSparseDataReport(
+  lapNum: number,
+  referenceLapNum: number | null,
+  frameCount: number,
+  lapTimeSeconds: number,
+  speedUnit: SpeedUnit
+): CoachingReport {
+  const density = lapTimeSeconds > 0 ? frameCount / lapTimeSeconds : 0;
+  return {
+    lapNum,
+    referenceLapNum,
+    comparison: null,
+    corners: [],
+    straights: [],
+    issues: [],
+    summaryText: `Lap ${lapNum}: telemetry capture for this lap is too sparse to analyze reliably (${frameCount} frames over ${lapTimeSeconds.toFixed(1)}s, ~${density.toFixed(1)} frames/sec — below the ${MIN_FRAMES_PER_SECOND}/sec floor needed to trust corner detection and lap comparison). This is likely dropped UDP packets during capture, not a real driving event. No corner, straight, or comparison analysis was run for this lap.`,
+    suggestions: [],
+    narrativeSource: 'deterministic',
+    speedUnit,
+  };
+}
+
 export async function buildCoachingReport(
   session: TelemetrySession,
   lapNum: number,
-  referenceLapNum?: number
+  referenceLapNum?: number,
+  speedUnit: SpeedUnit = 'kph'
 ): Promise<CoachingReport> {
   const lap = session.laps.find((l) => l.lapNum === lapNum);
   if (!lap) throw new Error(`Lap ${lapNum} not found in session ${session.sessionUid}`);
 
+  // Frame-density gate — see MIN_FRAMES_PER_SECOND comment above. Checked
+  // before any detection/comparison/LLM work runs, on the primary lap
+  // being analyzed (not the reference lap — a sparse reference lap still
+  // degrades comparison quality but doesn't invalidate this lap's own
+  // corner/straight/issue analysis the way sparse data on THIS lap does).
+  if (lap.lapTime > 0 && lap.frames.length / lap.lapTime < MIN_FRAMES_PER_SECOND) {
+    return buildSparseDataReport(lapNum, referenceLapNum ?? null, lap.frames.length, lap.lapTime, speedUnit);
+  }
+
   const referenceLap = referenceLapNum != null ? session.laps.find((l) => l.lapNum === referenceLapNum) : undefined;
   const comparison = referenceLap ? compareLaps(referenceLap, lap) : null;
 
+  // KNOWN GAP: car class field/values unconfirmed against the live
+  // TelemetrySession type — see REDLINE_RPM_BY_CLASS's header comment.
+  const redlineRpm = getRedlineRpm((session as any).carClass ?? (lap as any).carClass);
+
   const corners = detectCorners(lap.frames);
   const cornerAnalysis = corners.map((corner, idx) => {
-    const braking = analyzeBraking(lap.frames, corner);
+    const braking = analyzeBraking(lap.frames, corner, corners[idx - 1] ?? null);
     const throttle = analyzeThrottle(lap.frames, corner, corners[idx + 1] ?? null);
-    const cornerIssues = detectIssues(framesInRange(lap.frames, corner.entryDist - 50, corner.exitDist + 50));
+    const cornerIssues = detectIssues(framesInRange(lap.frames, corner.entryDist - 50, corner.exitDist + 50), redlineRpm, speedUnit);
     return { corner, braking, throttle, issues: cornerIssues };
   });
 
@@ -1027,13 +1261,14 @@ export async function buildCoachingReport(
     analysis: analyzeStraight(lap.frames, straight, comparison),
   }));
 
-  const allIssues = detectIssues(lap.frames);
+  const allIssues = detectIssues(lap.frames, redlineRpm, speedUnit);
 
   const narrativeInput: NarrativeInput = {
     lapNum: lap.lapNum,
     lapTime: lap.lapTime,
     lapValid: lap.lapValid,
     referenceLapNum: referenceLapNum ?? null,
+    speedUnit,
     comparison: comparison
       ? {
           totalDeltaSeconds: comparison.totalDeltaSeconds,
@@ -1052,7 +1287,7 @@ export async function buildCoachingReport(
       brakePeakPressure: braking.brakePeakPressure,
       brakeDurationMeters: braking.brakeDurationMeters,
       trailBrakePercent: braking.trailBrakePercent,
-      minSpeedInCorner: braking.minSpeedInCorner,
+      minSpeedInCorner: convertSpeed(braking.minSpeedInCorner, speedUnit),
       throttleApplicationDist: throttle.throttleApplicationDist,
       distFromApexToThrottle: throttle.distFromApexToThrottle,
       fullThrottleDist: throttle.fullThrottleDist,
@@ -1064,7 +1299,7 @@ export async function buildCoachingReport(
       startDist: straight.startDist,
       endDist: straight.endDist,
       lengthMeters: analysis.lengthMeters,
-      topSpeed: analysis.topSpeed,
+      topSpeed: convertSpeed(analysis.topSpeed, speedUnit),
       topSpeedDist: analysis.topSpeedDist,
       avgThrottle: analysis.avgThrottle,
       drsActivePercent: analysis.drsActivePercent,
@@ -1083,9 +1318,13 @@ export async function buildCoachingReport(
     return deterministicFallback;
   };
 
+  // Final output objects carry display-unit speeds (converted once here),
+  // matching narrativeInput above and CoachingReport.speedUnit's contract
+  // — braking/analysis themselves stay km/h-internal and are never
+  // mutated; these are fresh copies.
   const corners_: CornerCoaching[] = cornerAnalysis.map(({ corner, braking, throttle, issues }) => ({
     corner,
-    braking,
+    braking: { ...braking, minSpeedInCorner: convertSpeed(braking.minSpeedInCorner, speedUnit) },
     throttle,
     issues,
     coachingNote: narrative.cornerNotes.get(corner.id) ?? fallback().cornerNotes.get(corner.id) ?? '',
@@ -1094,7 +1333,7 @@ export async function buildCoachingReport(
 
   const straights_: StraightCoaching[] = straightAnalysis.map(({ straight, analysis }) => ({
     straight,
-    analysis,
+    analysis: { ...analysis, topSpeed: convertSpeed(analysis.topSpeed, speedUnit) },
     coachingNote: narrative.straightNotes.get(straight.id) ?? fallback().straightNotes.get(straight.id) ?? '',
     suggestion: narrative.straightSuggestions.get(straight.id) ?? fallback().straightSuggestions.get(straight.id) ?? '',
   }));
@@ -1125,6 +1364,6 @@ export async function buildCoachingReport(
     summaryText,
     suggestions: narrative.suggestions,
     narrativeSource: narrative.source,
+    speedUnit,
   };
 }
-
