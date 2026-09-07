@@ -14,14 +14,22 @@
 
 export interface DeltaPoint {
   dist: number;
-  deltaSeconds: number; // positive = lapB slower than lapA at this point
+  /**
+   * Positive = lapB slower than lapA at this point. Null when the real
+   * telemetry frames bracketing this distance, in either lap, were too far
+   * apart in time (see SOURCE_GAP_UNRELIABLE_SECONDS in telemetry-coach.ts)
+   * to trust a linear-interpolated value here — e.g. dropped UDP packets
+   * during capture left a multi-second hole in the recording. Treat null
+   * as "no data," not as "zero delta."
+   */
+  deltaSeconds: number | null;
 }
 
 export interface LapComparison {
   lapA: number; // lap number
   lapB: number;
   deltaCurve: DeltaPoint[]; // resampled onto a common distance grid
-  totalDeltaSeconds: number; // + means lapB slower overall
+  totalDeltaSeconds: number; // + means lapB slower overall — sourced from each lap's real recorded lap time, unaffected by any gaps in deltaCurve
   sectorDeltas: { sector1: number; sector2: number; sector3: number };
   biggestGainZone: { startDist: number; endDist: number; gainedSeconds: number } | null;
   biggestLossZone: { startDist: number; endDist: number; lostSeconds: number } | null;
@@ -57,6 +65,15 @@ export type IssueKind = 'lockup' | 'snap_correction' | 'off_track_suspected' | '
 export interface DetectedIssue {
   kind: IssueKind;
   dist: number;
+  /**
+   * If this issue is a merge of several consecutive same-kind detections
+   * (e.g. RPM held at the limiter across many frames in a row), the
+   * distance where the run ended. Absent for a genuinely single-frame
+   * issue. See mergeAdjacentIssues in telemetry-coach.ts — without this,
+   * one sustained condition was previously reported as N separate issues,
+   * one per frame it persisted across.
+   */
+  endDist?: number;
   severity: 'minor' | 'major';
   note: string;
 }
@@ -98,7 +115,7 @@ export interface StraightAnalysis {
   avgThrottle: number;
   /** % of frames on this straight where DRS was enabled, 0-1. */
   drsActivePercent: number;
-  /** Time delta vs the reference lap across this straight's distance range, if a comparison lap was requested. Positive = slower than reference here. Null if no comparison lap or insufficient overlapping data. */
+  /** Time delta vs the reference lap across this straight's distance range, if a comparison lap was requested. Positive = slower than reference here. Null if no comparison lap, insufficient overlapping data, or the overlapping deltaCurve points were all unreliable (see DeltaPoint). */
   deltaVsReferenceSeconds: number | null;
 }
 
