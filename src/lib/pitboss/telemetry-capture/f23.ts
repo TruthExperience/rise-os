@@ -1,7 +1,7 @@
 // f23.ts — F1 23 packet body parsers (Motion, Session, LapData,
-// Participants, CarTelemetry, CarStatus, CarDamage). Field layouts and
-// byte offsets verified against the official EA-licensed F1 23 UDP
-// spec (https://github.com/MacManley/f1-23-udp, mirroring
+// Participants, CarSetups, CarTelemetry, CarStatus, CarDamage). Field
+// layouts and byte offsets verified against the official EA-licensed
+// F1 23 UDP spec (https://github.com/MacManley/f1-23-udp, mirroring
 // https://answers.ea.com/t5/General-Discussion/F1-23-UDP-Specification/m-p/12633159).
 //
 // Every struct below was cross-checked by summing its field sizes and
@@ -425,6 +425,75 @@ export function parseParticipants23(buf: Buffer): PacketParticipantsData23 {
   const participants: ParticipantData23[] = [];
   for (let i = 0; i < NUM_CARS; i++) participants.push(readParticipantData23(r));
   return { header, numActiveCars, participants };
+}
+
+// ---------------------------------------------------------------------
+// CarSetups — 1107 bytes total = 29 (header) + 22 * 49 (CarSetupData)
+// ---------------------------------------------------------------------
+
+export interface CarSetupData23 {
+  frontWing: number;
+  rearWing: number;
+  onThrottle: number;
+  offThrottle: number;
+  frontCamber: number;
+  rearCamber: number;
+  frontToe: number;
+  rearToe: number;
+  frontSuspension: number;
+  rearSuspension: number;
+  frontAntiRollBar: number;
+  rearAntiRollBar: number;
+  frontSuspensionHeight: number;
+  rearSuspensionHeight: number;
+  brakePressure: number;
+  brakeBias: number;
+  rearLeftTyrePressure: number;
+  rearRightTyrePressure: number;
+  frontLeftTyrePressure: number;
+  frontRightTyrePressure: number;
+  ballast: number;
+  fuelLoad: number;
+}
+
+export interface PacketCarSetupData23 {
+  header: PacketHeader;
+  carSetups: CarSetupData23[];
+}
+
+function readCarSetupData23(r: Reader): CarSetupData23 {
+  return {
+    frontWing: r.u8(),
+    rearWing: r.u8(),
+    onThrottle: r.u8(),
+    offThrottle: r.u8(),
+    frontCamber: r.f32(),
+    rearCamber: r.f32(),
+    frontToe: r.f32(),
+    rearToe: r.f32(),
+    frontSuspension: r.u8(),
+    rearSuspension: r.u8(),
+    frontAntiRollBar: r.u8(),
+    rearAntiRollBar: r.u8(),
+    frontSuspensionHeight: r.u8(),
+    rearSuspensionHeight: r.u8(),
+    brakePressure: r.u8(),
+    brakeBias: r.u8(),
+    rearLeftTyrePressure: r.f32(),
+    rearRightTyrePressure: r.f32(),
+    frontLeftTyrePressure: r.f32(),
+    frontRightTyrePressure: r.f32(),
+    ballast: r.u8(),
+    fuelLoad: r.f32(),
+  };
+}
+
+export function parseCarSetups23(buf: Buffer): PacketCarSetupData23 {
+  const header = parseHeader(buf);
+  const r = new Reader(buf, HEADER_SIZE_BYTES);
+  const carSetups: CarSetupData23[] = [];
+  for (let i = 0; i < NUM_CARS; i++) carSetups.push(readCarSetupData23(r));
+  return { header, carSetups };
 }
 
 // ---------------------------------------------------------------------
