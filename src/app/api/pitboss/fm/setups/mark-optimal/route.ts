@@ -19,10 +19,13 @@ import { FM_SETUP_PARAM_ORDER, FmSetupParamKey } from "@/lib/pitboss/fm-setup-en
 
 interface MarkOptimalRequestBody {
   session_id: string;
-  // Which setup to confirm. Defaults to the session's current_values, but
-  // callers marking a specific ranked candidate from history (rather than
-  // whatever's currently on the sliders) should pass it explicitly.
-  setup_values?: Record<FmSetupParamKey, number>;
+  // Which setup to confirm. Can be omitted (defaults to the session's
+  // current_values), a full object (the old explicit-override behavior),
+  // or — new — a *partial* object representing just the sliders the
+  // driver touched in "Report Back From The Sim". Partial values are
+  // merged onto session.current_values, so confirming from the sliders
+  // doesn't require re-sending every param, only the ones that changed.
+  setup_values?: Partial<Record<FmSetupParamKey, number>>;
 }
 
 export async function POST(req: NextRequest) {
@@ -72,10 +75,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Session does not belong to this driver" }, { status: 403 });
   }
 
-  const confirmedValues = setup_values ?? session.current_values;
-  if (!confirmedValues || Object.keys(confirmedValues).length !== FM_SETUP_PARAM_ORDER.length) {
+  // Merge whatever was passed on top of the session's current setup.
+  // - No setup_values at all → confirms current_values unchanged (old
+  //   "mark the recommendation as optimal" behavior).
+  // - Full setup_values → fully overrides, same as before.
+  // - Partial setup_values (the sliders case) → only the touched params
+  //   change; everything else carries over from current_values.
+  const confirmedValues = {
+    ...(session.current_values ?? {}),
+    ...(setup_values ?? {}),
+  } as Record<FmSetupParamKey, number>;
+
+  const missingKeys = FM_SETUP_PARAM_ORDER.filter((key) => confirmedValues[key] === undefined);
+  if (missingKeys.length > 0) {
     return NextResponse.json(
-      { error: "No complete setup on this session to confirm — provide setup_values" },
+      {
+        error: `Setup is missing values for: ${missingKeys.join(", ")} — session has no current_values for these and none were provided`,
+      },
       { status: 422 },
     );
   }
@@ -117,10 +133,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: upsertErr.message }, { status: 500 });
   }
 
+  // Persist the confirmed values back onto the session too, so re-opening
+  // this session shows the sliders reflecting what was actually marked
+  // optimal — not just the original recommendation.
   const { error: sessionUpdateErr } = await supabase
     .schema("pitboss")
     .from("fm_setup_sessions")
-    .update({ marked_optimal_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .update({
+      current_values: confirmedValues,
+      marked_optimal_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     .eq("id", session.id);
 
   if (sessionUpdateErr) {
@@ -131,5 +154,6 @@ export async function POST(req: NextRequest) {
     success: true,
     circuit_id: session.circuit_id,
     conditions: session.conditions,
+    setup_values: confirmedValues,
   });
 }
