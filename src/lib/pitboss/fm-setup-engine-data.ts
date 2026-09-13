@@ -125,6 +125,44 @@ export async function updateFmSetupSession(
 }
 
 /**
+ * Clears every feedback point recorded on this session and resets the
+ * iteration counter, without touching current_values (the driver's slider
+ * position stays put — this is "forget what I've told the search", not
+ * "start the whole session over").
+ *
+ * Why this exists: every feedback point ever given is kept forever and
+ * revalidated on every search (see fm-setup-engine.ts's header comment).
+ * That's correct for a setup that hasn't changed, but it means an old
+ * "bad" rating near a bias value stays binding indefinitely — including
+ * after track/car balance assumptions have moved on, or after a rating
+ * was just a mis-tap. Once enough of these pile up (especially
+ * contradictory ones), lowest_rule_break stops being 0 and the search
+ * starts returning whichever setup violates the *fewest* old points
+ * rather than honoring the driver's latest slider position — which reads
+ * as "not following the feedback" even though the engine is working
+ * exactly as designed against a stale feedback history.
+ */
+export async function resetFmSetupSessionFeedback(sessionId: string): Promise<FmSetupSessionRow> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_sessions")
+    .update({
+      current_feedback: emptyFeedback(),
+      iteration_count: 0,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", sessionId)
+    .select(SESSION_SELECT)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to reset fm setup session feedback: ${error?.message ?? "unknown error"}`);
+  }
+  return data as unknown as FmSetupSessionRow;
+}
+
+/**
  * Appends an audit row to fm_setup_feedback_log for this calculation.
  * `feedback` is a bias-keyed map of the feedback points just recorded this
  * call — e.g. { oversteer: 'good', braking: 'bad' } — matching what the
@@ -189,10 +227,23 @@ export async function fetchFmSetupMemory(
 }
 
 /**
- * Records a converged setup for a circuit + conditions, but only if it's at
- * least as good (lowest_rule_break <= what's stored) as the current best —
- * the memory bank should monotonically improve, never regress toward a
- * worse-converged setup from an earlier or noisier session.
+ * Records a converged setup for a circuit + conditions, but only if it's
+ * *strictly* better (lowest_rule_break < what's stored) than the current
+ * best — the memory bank should monotonically improve, never churn between
+ * differently-anchored setups that happen to tie on rule-break count.
+ *
+ * FIX: this previously allowed the write through on a tie
+ * (`existing.lowest_rule_break < params.lowestRuleBreak` only blocks
+ * strictly-worse results, not equal ones). Many setups can tie at the same
+ * rule-break count — including 0 — and each one is the search's "nearest"
+ * setup only relative to *that specific driver's* anchor bias (their
+ * current slider position, see the anchor logic in calculate/route.ts).
+ * So every tied write was overwriting the community memory with whatever
+ * setup happened to be closest to whoever last submitted feedback, even
+ * though no actual improvement occurred. That's what made the recommended
+ * setup appear to "revert" to something no better than what was already on
+ * the sliders — it was a lateral move that overwrote a perfectly good
+ * memory-bank entry. Sample_count still only increments on a real write.
  */
 export async function upsertFmSetupMemory(params: {
   circuitId: string;
@@ -213,7 +264,7 @@ export async function upsertFmSetupMemory(params: {
 
   if (fetchErr) throw new Error(`Failed to check fm setup memory: ${fetchErr.message}`);
 
-  if (existing && existing.lowest_rule_break < params.lowestRuleBreak) {
+  if (existing && existing.lowest_rule_break <= params.lowestRuleBreak) {
     return;
   }
 
