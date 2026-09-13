@@ -326,10 +326,18 @@ export default function FmSetupsPage() {
   }
 
   // ── Mark as optimal ────────────────────────────────────────────────────
-
-  async function handleMarkOptimal(idx: 0 | 1) {
+  // `valuesOverride` lets this be called two ways:
+  //  - from the Recommended Setup panel, with no override → confirms
+  //    lane.result.best_setup (the algorithm's recommendation)
+  //  - from the Report Back sliders, passing lane.currentValues → confirms
+  //    whatever the driver has actually dialed in, which may have drifted
+  //    from the recommendation after manual tweaks
+  // Either way this hits the same mark-optimal endpoint, which merges
+  // partial values onto the session's current setup server-side.
+  async function handleMarkOptimal(idx: 0 | 1, valuesOverride?: Record<FmSetupParamKey, number>) {
     const lane = lanes[idx]
-    if (!lane.result?.best_setup) return
+    const valuesToConfirm = valuesOverride ?? lane.result?.best_setup
+    if (!lane.result || !valuesToConfirm) return
 
     const confirmed = window.confirm(
       'Confirm this setup worked in-game? This promotes it to the verified setup for this track and conditions, overriding any previous best.'
@@ -343,7 +351,7 @@ export default function FmSetupsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: lane.result.session_id,
-          setup_values: lane.result.best_setup,
+          setup_values: valuesToConfirm,
         }),
       })
       const data = await res.json()
@@ -351,22 +359,22 @@ export default function FmSetupsPage() {
 
       // Reflect the confirmation immediately without a full refetch —
       // if the history panel is open, its own state gets the same stamp.
-      updateLane(idx, {
-        history: lane.history
-          ? { ...lane.history, marked_optimal_at: new Date().toISOString() }
-          : lane.history,
-      })
-      // A lightweight local flag so the button swaps to a checkmark state
-      // even if the history panel was never opened this session.
+      // Also sync currentValues to whatever the server actually confirmed
+      // (it merges onto session.current_values, so this keeps the sliders
+      // showing exactly what's now marked optimal).
       setLanes((prev) => {
         const next = [...prev] as [LaneState, LaneState]
+        const prevLane = next[idx]
         next[idx] = {
-          ...next[idx],
-          history: next[idx].history ?? {
-            session_id: lane.result!.session_id,
-            marked_optimal_at: new Date().toISOString(),
-            iterations: [],
-          },
+          ...prevLane,
+          currentValues: data.setup_values ?? valuesToConfirm,
+          history: prevLane.history
+            ? { ...prevLane.history, marked_optimal_at: new Date().toISOString() }
+            : {
+                session_id: prevLane.result!.session_id,
+                marked_optimal_at: new Date().toISOString(),
+                iterations: [],
+              },
         }
         return next
       })
@@ -610,7 +618,22 @@ export default function FmSetupsPage() {
                     const currentValues = lane.currentValues!
                     return (
                     <div className="space-y-4 pt-2">
-                      <p className="text-white/70 font-bold text-xs">Report Back From The Sim</p>
+                      <div className="flex items-center justify-between">
+                        <p className="text-white/70 font-bold text-xs">Report Back From The Sim</p>
+                        {isMarkedOptimal ? (
+                          <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1">
+                            ✓ Confirmed Optimal
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleMarkOptimal(idx, currentValues)}
+                            disabled={lane.markingOptimal}
+                            className="text-[11px] font-bold uppercase tracking-wide text-rise-red disabled:opacity-40"
+                          >
+                            {lane.markingOptimal ? 'Saving…' : 'Mark as Optimal'}
+                          </button>
+                        )}
+                      </div>
                       <div className="space-y-3">
                         {params.map((p) => (
                           <div key={p.param_key}>
@@ -632,6 +655,9 @@ export default function FmSetupsPage() {
                           </div>
                         ))}
                       </div>
+                      {lane.markOptimalError && (
+                        <p className="text-red-400 text-[11px]">{lane.markOptimalError}</p>
+                      )}
 
                       <div className="space-y-3 pt-2 border-t border-white/10">
                         {FM_BIAS_ORDER.map((biasKey) => (
