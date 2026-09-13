@@ -117,6 +117,9 @@ interface LaneState {
   // Mark-as-optimal
   markingOptimal: boolean
   markOptimalError: string
+  // Reset feedback
+  resetting: boolean
+  resetError: string
 }
 
 function emptyLane(slot: 1 | 2): LaneState {
@@ -136,6 +139,8 @@ function emptyLane(slot: 1 | 2): LaneState {
     history: null,
     markingOptimal: false,
     markOptimalError: '',
+    resetting: false,
+    resetError: '',
   }
 }
 
@@ -385,6 +390,58 @@ export default function FmSetupsPage() {
     }
   }
 
+  // ── Reset feedback ─────────────────────────────────────────────────────
+  // Clears this lane's session feedback history and iteration count via the
+  // /calculate route's `action: "reset"` branch. Does NOT touch
+  // currentValues (the driver's slider position stays put) and does NOT
+  // re-run the solver — the Recommended Setup panel keeps showing whatever
+  // it last showed until the driver submits new feedback. This is
+  // deliberately a "forget what I've told the search" action, not
+  // "start the whole session over" (that's what the top-level "Change"
+  // button / resetSession() does).
+  async function handleResetFeedback(idx: 0 | 1) {
+    const lane = lanes[idx]
+    if (!lane.result) return
+
+    const confirmed = window.confirm(
+      'Clear all feedback given this session for this driver? This cannot be undone — the solver will treat this setup as having no prior ratings.'
+    )
+    if (!confirmed) return
+
+    updateLane(idx, { resetting: true, resetError: '' })
+    try {
+      const res = await fetch('/api/pitboss/fm/setups/calculate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          circuit_id: circuitId,
+          conditions,
+          driver_slot: lane.slot,
+          driver_slot_name: lane.driverName || null,
+          action: 'reset',
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to reset feedback')
+
+      updateLane(idx, {
+        result: lane.result
+          ? {
+              ...lane.result,
+              iteration_count: data.iteration_count,
+              current_feedback: data.current_feedback,
+            }
+          : lane.result,
+        history: null,
+        historyOpen: false,
+      })
+    } catch (err: any) {
+      updateLane(idx, { resetError: err.message })
+    } finally {
+      updateLane(idx, { resetting: false })
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   if (authStatus === 'loading' || loadingMeta) {
@@ -611,6 +668,19 @@ export default function FmSetupsPage() {
                           ))}
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {lane.expanded && lane.result && (
+                    <div className="flex items-center justify-between pt-1">
+                      <button
+                        onClick={() => handleResetFeedback(idx)}
+                        disabled={lane.resetting || lane.calculating}
+                        className="text-white/30 text-[11px] uppercase tracking-widest underline disabled:opacity-40"
+                      >
+                        {lane.resetting ? 'Resetting…' : 'Reset Feedback'}
+                      </button>
+                      {lane.resetError && <p className="text-red-400 text-[11px]">{lane.resetError}</p>}
                     </div>
                   )}
 
