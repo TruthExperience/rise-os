@@ -172,7 +172,7 @@ async function patchOriginalResponse(
 }
 
 function respond(
-  content: string,
+  content: string | undefined,
   ephemeral = false,
   embeds?: Record<string, unknown>[],
   components?: Record<string, unknown>[]
