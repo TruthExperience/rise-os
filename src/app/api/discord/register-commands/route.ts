@@ -756,6 +756,24 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      name: "standings",
+      description: "View the driver standings leaderboard",
+      options: [
+        {
+          type: 3,
+          name: "season",
+          description: "Season code (defaults to the most recent season with recorded results)",
+          required: false,
+        },
+        {
+          type: 4,
+          name: "limit",
+          description: "How many drivers to show (default 15, max 25)",
+          required: false,
+        },
+      ],
+    },
+    {
       name: "appeal",
       description: "File or review an appeal on a resolved incident",
       options: [
