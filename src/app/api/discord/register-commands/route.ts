@@ -834,6 +834,47 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      name: "setup",
+      description: "Set up this server as a PitBoss league, linking your existing channels (admin only)",
+      default_member_permissions: "8",
+      dm_permission: false,
+      options: [
+        {
+          type: 3,
+          name: "name",
+          description: "League name",
+          required: true,
+        },
+        {
+          type: 7,
+          name: "fia_category",
+          description: "Your existing category for FIA / race-control channels",
+          required: true,
+          channel_types: [4],
+        },
+        {
+          type: 7,
+          name: "reports_channel",
+          description: "Your existing text channel for incident reports",
+          required: true,
+          channel_types: [0],
+        },
+        {
+          type: 7,
+          name: "transcript_channel",
+          description: "Your existing text channel for ticket transcripts (optional)",
+          required: false,
+          channel_types: [0],
+        },
+        {
+          type: 5,
+          name: "financial_system",
+          description: "Does this league use a salary cap / financial system?",
+          required: false,
+        },
+      ],
+    },
+    {
       name: "kick",
       description: "Kick a member from the server (owner/co-owner only)",
       default_member_permissions: "2",
