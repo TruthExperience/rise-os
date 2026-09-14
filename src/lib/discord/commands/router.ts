@@ -7,6 +7,7 @@ import {
   isLeagueOptional,
   type ResolvedDiscordUser,
   type ResolvedDiscordAttachment,
+  type DeferredResponseFile,
 } from "./registry";
 
 registerCommand("ping", async () => ({
@@ -112,11 +113,14 @@ export async function routeCommand(interaction: any) {
     // original response once it resolves. waitUntil (from
     // @vercel/functions, not next/server's after()) is used because
     // after() only exists from Next.js 15.1+ — this project is on 14.2.3.
+    // The background work may also hand back files (e.g. a rendered
+    // report or image), in which case the followup PATCH is sent as
+    // multipart/form-data instead of plain JSON.
     if ("defer" in result && result.defer) {
       const backgroundFn = result.background;
 
       const backgroundWork = (async () => {
-        let final: { content: string };
+        let final: { content: string; files?: DeferredResponseFile[] };
         try {
           final = await backgroundFn();
         } catch (err) {
@@ -126,7 +130,12 @@ export async function routeCommand(interaction: any) {
               "Something went wrong finishing that up. Try running the command again.",
           };
         }
-        await patchOriginalResponse(applicationId, interactionToken, final.content);
+        await patchOriginalResponse(
+          applicationId,
+          interactionToken,
+          final.content,
+          final.files
+        );
       })();
 
       waitUntil(backgroundWork);
@@ -149,20 +158,49 @@ export async function routeCommand(interaction: any) {
   }
 }
 
+/**
+ * PATCHes the deferred followup message. Sends plain JSON when there
+ * are no files (the original behavior, unchanged), or multipart/form-data
+ * with a payload_json part plus one files[N] part per file when the
+ * background work produced attachments. Discord's PATCH-original-response
+ * endpoint accepts both content types, same as the initial webhook POST.
+ */
 async function patchOriginalResponse(
   applicationId: string,
   interactionToken: string,
-  content: string
+  content: string,
+  files?: DeferredResponseFile[]
 ) {
+  const url = `${DISCORD_API_BASE}/webhooks/${applicationId}/${interactionToken}/messages/@original`;
   try {
-    const res = await fetch(
-      `${DISCORD_API_BASE}/webhooks/${applicationId}/${interactionToken}/messages/@original`,
-      {
+    let res: Response;
+
+    if (files && files.length > 0) {
+      const form = new FormData();
+      form.append(
+        "payload_json",
+        JSON.stringify({
+          content,
+          attachments: files.map((f, i) => ({ id: i, filename: f.filename })),
+        })
+      );
+      files.forEach((f, i) => {
+        const blob = new Blob([f.data], {
+          type: f.contentType ?? "application/octet-stream",
+        });
+        form.append(`files[${i}]`, blob, f.filename);
+      });
+      // Do NOT set Content-Type manually — fetch derives the multipart
+      // boundary from the FormData body itself.
+      res = await fetch(url, { method: "PATCH", body: form });
+    } else {
+      res = await fetch(url, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
-      }
-    );
+      });
+    }
+
     if (!res.ok) {
       console.error("[discord] followup PATCH failed:", res.status, await res.text());
     }
