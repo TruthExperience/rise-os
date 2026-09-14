@@ -19,6 +19,19 @@ export interface ResolvedDiscordAttachment {
   contentType?: string;
 }
 
+/**
+ * A file to attach to the deferred followup PATCH (Discord's
+ * PATCH-original-response endpoint accepts multipart/form-data with
+ * file parts, same as the initial webhook). Used by handlers whose
+ * background work produces something to hand back — e.g. an exported
+ * report or rendered image.
+ */
+export interface DeferredResponseFile {
+  filename: string;
+  contentType?: string;
+  data: Buffer | Uint8Array | ArrayBuffer;
+}
+
 export interface CommandContext {
   guildId: string | undefined;
   channelId: string | undefined;
@@ -50,8 +63,9 @@ export type CommandHandler = (ctx: CommandContext) => Promise<CommandResponse>;
 
 // A handler either answers inline within Discord's 3s ACK window, or
 // defers: the router ACKs immediately and runs `background` afterward via
-// after(), PATCHing the resolved content into the original response once
-// it's done. See steward_analyse for the deferred case.
+// after(), PATCHing the resolved content (and optionally files) into the
+// original response once it's done. See steward_analyse for the deferred
+// case.
 export type CommandResponse = ImmediateResponse | DeferredResponse;
 
 export interface ImmediateResponse {
@@ -62,11 +76,10 @@ export interface ImmediateResponse {
   components?: Record<string, unknown>[];
 }
 
-
 export interface DeferredResponse {
   defer: true;
   ephemeral?: boolean;
-  background: () => Promise<{ content: string }>;
+  background: () => Promise<{ content: string; files?: DeferredResponseFile[] }>;
 }
 
 export const commandRegistry = new Map<string, CommandHandler>();
