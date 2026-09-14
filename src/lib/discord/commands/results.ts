@@ -3,6 +3,60 @@ import { createAdminClient } from "@/lib/supabase/server";
 import { resolveRound } from "./checkin";
 
 /**
+ * Resolves which round /results should show when no `round` option is
+ * given. Unlike checkin's resolveRound (which defaults to the NEXT
+ * scheduled race — right for check-ins, wrong for results), this defaults
+ * to the MOST RECENT round that actually has rows in pitboss.results, so
+ * "just show me the last race" works without the caller having to know
+ * the round number.
+ *
+ * pitboss.results and rise_os.calendar_rounds live in different exposed
+ * PostgREST schemas, so this can't use an embedded `calendar_rounds(...)`
+ * select on results (see the cross-schema embedding note in checkin.ts's
+ * generate-grid handler) — round_ids are fetched from results first, then
+ * calendar_rounds is queried separately and the newest by race_date wins.
+ */
+async function resolveMostRecentResultsRound(leagueId: string, seasonInput: string | undefined) {
+  const supabase = createAdminClient();
+
+  let resultsQuery = supabase
+    .schema("pitboss")
+    .from("results")
+    .select("round_id")
+    .eq("league_id", leagueId)
+    .not("round_id", "is", null);
+
+  if (seasonInput) {
+    resultsQuery = resultsQuery.eq("season", seasonInput);
+  }
+
+  const { data: resultRows, error: resultsErr } = await resultsQuery;
+  if (resultsErr) return { error: resultsErr.message } as const;
+
+  const roundIds = [...new Set((resultRows ?? []).map((r) => r.round_id).filter(Boolean))] as string[];
+  if (roundIds.length === 0) {
+    return {
+      error: seasonInput
+        ? `No results recorded yet for season ${seasonInput}.`
+        : "No results recorded yet for this league.",
+    } as const;
+  }
+
+  const { data: round, error: roundErr } = await supabase
+    .schema("rise_os")
+    .from("calendar_rounds")
+    .select("id, season_number, round_number, name, race_date, circuit, country, flag_emoji, division_id")
+    .in("id", roundIds)
+    .order("race_date", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (roundErr) return { error: roundErr.message } as const;
+  if (!round) return { error: "Couldn't resolve the most recent results round." } as const;
+  return { round } as const;
+}
+
+/**
  * Formats a finishing position with DNF handling. qualifying_position and
  * finish_position are both nullable in the schema (result may be entered
  * before quali is known, or a driver DNF'd with no classified finish).
@@ -42,12 +96,8 @@ function formatResultsTable(rows: ResultRow[], includeSprint: boolean): string {
     const sprintPts = `${r.sprintPoints}`.padStart(5, " ");
     return `${name} ${quali}  ${finish}  ${pts}  ${sprint}  ${sprintPts}`;
   });
-  const footer = "* = fastest lap";
-  return ["```", header, ...lines, "```", formatFootnote(rows, footer)].filter(Boolean).join("\n");
-}
-
-function formatFootnote(rows: ResultRow[], footer: string): string {
-  return rows.some((r) => r.fastestLap) ? footer : "";
+  const showFootnote = rows.some((r) => r.fastestLap);
+  return ["```", header, ...lines, "```", showFootnote ? "* = fastest lap" : ""].filter(Boolean).join("\n");
 }
 
 registerCommand("results", async (ctx) => {
@@ -58,11 +108,16 @@ registerCommand("results", async (ctx) => {
 
   const supabase = createAdminClient();
 
-  const roundResult = await resolveRound(
-    leagueId,
-    ctx.options.round as string | undefined,
-    ctx.options.season as string | undefined
-  );
+  const roundInput = ctx.options.round as string | undefined;
+  const seasonInput = ctx.options.season as string | undefined;
+
+  // Explicit round given → same lookup checkin.ts uses (by number or
+  // name match). No round given → most recent round with results, not
+  // the next upcoming race.
+  const roundResult = roundInput
+    ? await resolveRound(leagueId, roundInput, seasonInput)
+    : await resolveMostRecentResultsRound(leagueId, seasonInput);
+
   if ("error" in roundResult) {
     return { content: roundResult.error ?? "Something went wrong resolving the round.", ephemeral: true };
   }
