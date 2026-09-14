@@ -209,3 +209,9 @@ import "./checkin";
 import "./cap";
 // Side-effect import: registers the ddv_* and tp_view commands.
 import "./ddv";
+// Side-effect import: registers the standings command.
+import "./standings";
+// Side-effect import: registers the setup command.
+import "./setup";
+// Side-effect import: registers the results command.
+import "./results";
