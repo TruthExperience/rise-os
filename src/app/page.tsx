@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-rise-black px-6">
@@ -34,9 +36,25 @@ export default function Home() {
         ))}
       </div>
 
+      {/* Entry points */}
+      <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <Link
+          href="/directory"
+          className="rounded-md bg-rise-red px-5 py-2.5 text-sm font-medium text-white transition hover:opacity-90"
+        >
+          Browse leagues
+        </Link>
+        <Link
+          href="/login"
+          className="text-sm text-white/60 hover:text-white"
+        >
+          Sign in
+        </Link>
+      </div>
+
       {/* Footer */}
       <p className="mt-12 text-xs text-white/20">
-        TOPS Ecosystem · Rise OS v1.0-beta
+        TOPS Ecosystem · Rise OS beta 1.0
       </p>
     </main>
   );
