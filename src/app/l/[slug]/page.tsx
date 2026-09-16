@@ -74,7 +74,9 @@ export default async function LeaguePage({ params }: Props) {
                   .join(" · ")}
               </p>
               <p className="mt-4 text-sm text-white/50">
-                Lights out {formatRaceDate(nextRound.raceDate)}
+                {nextRound.raceDate
+                  ? `Lights out ${formatRaceDate(nextRound.raceDate)}`
+                  : "Date to be announced"}
               </p>
             </div>
           ) : (
