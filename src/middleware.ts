@@ -35,6 +35,7 @@ export async function middleware(request: NextRequest) {
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), AUTH_CHECK_TIMEOUT_MS)
+
     // getClaims() doesn't take an AbortSignal directly, so race it against
     // the timeout instead — this bounds worst-case latency without needing
     // the client to support cancellation.
@@ -59,6 +60,7 @@ export async function middleware(request: NextRequest) {
 
   if (
     !user &&
+    request.nextUrl.pathname !== '/' &&
     !request.nextUrl.pathname.startsWith('/login') &&
     !request.nextUrl.pathname.startsWith('/auth') &&
     !request.nextUrl.pathname.startsWith('/api') &&
