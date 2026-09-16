@@ -185,7 +185,14 @@ async function patchOriginalResponse(
         })
       );
       files.forEach((f, i) => {
-        const blob = new Blob([f.data], {
+        // f.data is typed as Buffer | Uint8Array | ArrayBuffer, and both
+        // Buffer and Uint8Array are generic over ArrayBufferLike (which
+        // includes SharedArrayBuffer) in current @types/node — but
+        // BlobPart only accepts a plain ArrayBuffer. At runtime this is
+        // never actually a SharedArrayBuffer (attachment bytes always come
+        // from a real ArrayBuffer), so this is a type-checker false
+        // positive; the cast reflects that guarantee.
+        const blob = new Blob([f.data as BlobPart], {
           type: f.contentType ?? "application/octet-stream",
         });
         form.append(`files[${i}]`, blob, f.filename);
