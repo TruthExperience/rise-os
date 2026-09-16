@@ -13,7 +13,15 @@ import { createAdminClient } from "@/lib/supabase/server";
  * anything that isn't this trusted, narrowly-scoped read path — nothing here
  * should ever accept unscoped input or select from franchise/contract/
  * financial tables.
+ *
+ * Governance documents live in the private `rule-documents` storage bucket.
+ * We never return the long-lived signed URL cached in
+ * pitboss.rule_books.document_url — that token was baked in at upload time
+ * and isn't meant to be handed out on every public page load. Instead we
+ * re-sign document_path here, server-side, with a short expiry per request.
  */
+
+const DOCUMENT_URL_EXPIRY_SECONDS = 60 * 60; // 1 hour — plenty for a click-through download
 
 export type PublicLeagueSummary = {
   id: string;
@@ -71,6 +79,16 @@ export type PublicLeagueDetail = {
     raceDate: string;
     roundNumber: number;
   } | null;
+  schedule: {
+    seasonNumber: number;
+    roundNumber: number | null;
+    name: string | null;
+    circuit: string | null;
+    country: string | null;
+    raceDate: string | null;
+    isSprint: boolean;
+    status: string;
+  }[];
   constructorStandings: {
     franchiseId: string;
     points: number;
@@ -81,6 +99,13 @@ export type PublicLeagueDetail = {
     articleNumber: string | null;
     title: string;
     chapter: string | null;
+  }[];
+  documents: {
+    id: string;
+    title: string;
+    documentCode: string | null;
+    version: string | null;
+    url: string | null;
   }[];
 };
 
@@ -102,7 +127,7 @@ export async function getPublicLeagueBySlug(
 
   const today = new Date().toISOString().slice(0, 10);
 
-  const [standingsRes, nextRoundRes, constructorRes, rulesRes] =
+  const [standingsRes, nextRoundRes, scheduleRes, constructorRes, rulesRes, rulebooksRes] =
     await Promise.all([
       supabase
         .schema("pitboss")
@@ -121,6 +146,15 @@ export async function getPublicLeagueBySlug(
         .limit(1)
         .maybeSingle(),
       supabase
+        .schema("rise_os")
+        .from("calendar_rounds")
+        .select(
+          "season_number, round_number, name, circuit, country, race_date, is_sprint, status",
+        )
+        .eq("league_id", league.id)
+        .order("season_number", { ascending: true })
+        .order("round_number", { ascending: true, nullsFirst: false }),
+      supabase
         .schema("pitboss")
         .from("constructor_standings")
         .select("franchise_id, points, wins")
@@ -136,12 +170,58 @@ export async function getPublicLeagueBySlug(
         .eq("is_canonical", true)
         .order("sort_order")
         .limit(6),
+      supabase
+        .schema("pitboss")
+        .from("rule_books")
+        .select("id, title, document_code, version, document_path")
+        .eq("league_id", league.id)
+        .eq("status", "active")
+        .order("title"),
     ]);
 
   if (standingsRes.error) throw standingsRes.error;
   if (nextRoundRes.error) throw nextRoundRes.error;
+  if (scheduleRes.error) throw scheduleRes.error;
   if (constructorRes.error) throw constructorRes.error;
   if (rulesRes.error) throw rulesRes.error;
+  if (rulebooksRes.error) throw rulebooksRes.error;
+
+  // Re-sign each document's storage path individually rather than trusting
+  // the long-lived URL cached in the row — a bad/expired path fails closed
+  // (null url, filtered out client-side) instead of taking down the whole
+  // page.
+  const documents = await Promise.all(
+    (rulebooksRes.data ?? []).map(async (doc) => {
+      if (!doc.document_path) {
+        return {
+          id: doc.id,
+          title: doc.title,
+          documentCode: doc.document_code,
+          version: doc.version,
+          url: null,
+        };
+      }
+
+      const { data: signed, error: signError } = await supabase.storage
+        .from("rule-documents")
+        .createSignedUrl(doc.document_path, DOCUMENT_URL_EXPIRY_SECONDS);
+
+      if (signError) {
+        console.error(
+          `[public-league] failed to sign document ${doc.id}:`,
+          signError,
+        );
+      }
+
+      return {
+        id: doc.id,
+        title: doc.title,
+        documentCode: doc.document_code,
+        version: doc.version,
+        url: signed?.signedUrl ?? null,
+      };
+    }),
+  );
 
   return {
     league: {
@@ -167,6 +247,16 @@ export async function getPublicLeagueBySlug(
           roundNumber: nextRoundRes.data.round_number,
         }
       : null,
+    schedule: (scheduleRes.data ?? []).map((r) => ({
+      seasonNumber: r.season_number,
+      roundNumber: r.round_number,
+      name: r.name,
+      circuit: r.circuit,
+      country: r.country,
+      raceDate: r.race_date,
+      isSprint: r.is_sprint ?? false,
+      status: r.status,
+    })),
     constructorStandings: (constructorRes.data ?? []).map((c) => ({
       franchiseId: c.franchise_id,
       points: Number(c.points),
@@ -178,5 +268,6 @@ export async function getPublicLeagueBySlug(
       title: r.title,
       chapter: r.chapter,
     })),
+    documents,
   };
 }
