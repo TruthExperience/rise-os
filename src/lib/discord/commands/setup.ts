@@ -1,4 +1,4 @@
-File: src/lib/discord/commands/setup.ts
+// File: src/lib/discord/commands/setup.ts
 //
 // Self-serve replacement for the manual Supabase work an admin used to need
 // from us for every new league (see e.g. the Absolut Vodka F2 setup: a
