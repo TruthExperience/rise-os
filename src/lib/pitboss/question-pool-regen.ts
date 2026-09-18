@@ -6,6 +6,12 @@ import { createAdminClient } from '@/lib/supabase/server'
 const PITBOSS_PROXY_URL = process.env.PITBOSS_PROXY_URL ?? 'https://pitboss-proxy.YOUR_SUBDOMAIN.workers.dev'
 const PITBOSS_INTERNAL_KEY = process.env.PITBOSS_INTERNAL_KEY
 
+// Topic exclusion is EFRL Jury-exam-only, not a general league feature.
+// Hardcoded to this specific (league_id, role_code) pair on purpose — every
+// other league/role in the system gets an empty exclusion list, no-op.
+const EFRL_LEAGUE_ID = '992e968c-c0e5-4aea-9fb2-bc19c3468fc6' // European Formula Racing League
+const EFRL_JURY_ROLE_CODE = 'JURY'
+
 // Reasoning models on the proxy's free pool prepend chain-of-thought prose
 // before the JSON (same issue as the telemetry narrative fix) — scan
 // backward from the last closing bracket instead of assuming the response
@@ -41,15 +47,19 @@ function extractTrailingJson(text: string): unknown {
   return JSON.parse(fenced.slice(openIdx, closeIdx + 1))
 }
 
-// Finds rulebook topics this league's exam pool should never draw new
+// Finds rulebook topics the EFRL Jury exam pool should never draw new
 // questions from. Matched by chapter/title text rather than a hardcoded
-// article number, so this stays league-agnostic: leagues whose rulebook
-// doesn't have a "Code of Conduct" chapter or a "League Structure" article
-// simply get an empty exclusion list back, no-op.
+// article number. Gated to EFRL + JURY only — every other (league, role)
+// pair short-circuits to [] before touching the database.
 async function getExcludedTopics(
   supabase: ReturnType<typeof createAdminClient>,
-  leagueId: string
+  leagueId: string,
+  roleCode: string
 ): Promise<string[]> {
+  if (leagueId !== EFRL_LEAGUE_ID || roleCode !== EFRL_JURY_ROLE_CODE) {
+    return []
+  }
+
   const { data: ruleBook } = await supabase
     .schema('pitboss')
     .from('rule_books')
@@ -78,8 +88,9 @@ async function getExcludedTopics(
 // oldest active questions in the same pool so the bank size stays roughly
 // steady instead of growing unbounded. New question IDs are automatically
 // "unseen" for every driver — driver_question_history doesn't need to be
-// touched here. League-agnostic: works identically for all 8 leagues,
-// driven entirely by leagueId/roleCode.
+// touched here. League-agnostic aside from the EFRL-Jury topic exclusion
+// above: works identically for all 8 leagues, driven entirely by
+// leagueId/roleCode.
 export async function regenerateQuestionPool(leagueId: string, roleCode: string) {
   const supabase = createAdminClient()
 
@@ -119,7 +130,7 @@ export async function regenerateQuestionPool(leagueId: string, roleCode: string)
 
   const categories = [...new Set((existing ?? []).map((q) => q.category))]
   const difficulties = [...new Set((existing ?? []).map((q) => q.difficulty))]
-  const excludedTopics = await getExcludedTopics(supabase, leagueId)
+  const excludedTopics = await getExcludedTopics(supabase, leagueId, roleCode)
 
   const generated = await generateQuestionsViaProxy(
     leagueId,
