@@ -5,8 +5,8 @@ import { regenerateQuestionPool } from '@/lib/pitboss/question-pool-regen'
 import { syncCertScoreToSheet } from '@/lib/pitboss/sheets-sync'
 
 const CERT_WINDOW_MS = 60 * 60 * 1000
-const LOCKOUT_HOURS  = 24
-const REGEN_EVERY_N  = 4
+const LOCKOUT_HOURS = 24
+const REGEN_EVERY_N = 4
 
 // Fires a pool regen once every REGEN_EVERY_N completed exams for this
 // (league, role). Never awaited by the caller's response path — a slow or
@@ -24,6 +24,7 @@ async function maybeTriggerRegen(supabase: any, leagueId: string, roleCode: stri
     console.error('[cert/submit] regen count check failed', error)
     return
   }
+
   if (count && count % REGEN_EVERY_N === 0) {
     regenerateQuestionPool(leagueId, roleCode).catch((err) =>
       console.error('[cert/submit] question pool regen failed', err)
@@ -33,13 +34,30 @@ async function maybeTriggerRegen(supabase: any, leagueId: string, roleCode: stri
 
 export async function POST(req: NextRequest) {
   const supabase = createAdminClient()
-
   const driver = await getAuthedDriver()
+
   if (!driver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const driverName = (driver as any).discord_username ?? (driver as any).display_name ?? driver.id
+  // Canonical username lives on public.users (the real identity table,
+  // joined via discord_id elsewhere in the app) — not on pitboss.drivers.
+  // Look it up via driver.user_id so exam results sync to sheets under the
+  // driver's actual username rather than a Discord display name. Falls
+  // back to the old chain only if a driver row somehow has no linked
+  // public.users row.
+  const { data: userRow } = await supabase
+    .schema('public')
+    .from('users')
+    .select('username')
+    .eq('id', (driver as any).user_id)
+    .maybeSingle()
+
+  const username =
+    userRow?.username ??
+    (driver as any).discord_username ??
+    (driver as any).display_name ??
+    driver.id
 
   let body: { certification_id: string; answers: Record<string, string> }
   try {
@@ -67,12 +85,15 @@ export async function POST(req: NextRequest) {
     console.error('[cert/submit] cert lookup', certError)
     return NextResponse.json({ error: certError.message }, { status: 500 })
   }
+
   if (!cert) {
     return NextResponse.json({ error: 'Certification not found' }, { status: 404 })
   }
+
   if (cert.driver_id !== driver.id) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
+
   if (cert.status !== 'in_progress') {
     return NextResponse.json(
       { error: `Certification is already ${cert.status}` },
@@ -80,11 +101,12 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const now     = new Date()
+  const now = new Date()
   const elapsed = now.getTime() - new Date(cert.started_at).getTime()
 
   if (elapsed > CERT_WINDOW_MS) {
     const lockedUntil = new Date(now.getTime() + LOCKOUT_HOURS * 60 * 60 * 1000)
+
     await supabase
       .schema('pitboss')
       .from('certifications')
@@ -94,12 +116,12 @@ export async function POST(req: NextRequest) {
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
     syncCertScoreToSheet({
-      leagueId:    cert.league_id,
-      roleCode:    cert.role_code,
-      driverName,
-      score:       0,
-      passMark:    Number(cert.pass_mark),
-      passed:      false,
+      leagueId: cert.league_id,
+      roleCode: cert.role_code,
+      username,
+      score: 0,
+      passMark: Number(cert.pass_mark),
+      passed: false,
       completedAt: now.toISOString(),
     }).catch((err) => console.error('[cert/submit] sheets sync failed', err))
 
@@ -113,7 +135,6 @@ export async function POST(req: NextRequest) {
   // driver was shown), scoped to this cert's role+league so answer keys
   // from another role/league can't be spoofed into the grading set.
   const submittedIds = Object.keys(answers)
-
   const { data: questions, error: questionsError } = await supabase
     .schema('pitboss')
     .from('questions')
@@ -127,8 +148,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to fetch questions' }, { status: 500 })
   }
 
-  const total   = questions.length
-  let   correct = 0
+  const total = questions.length
+  let correct = 0
   const breakdown: Record<string, { correct: boolean; correct_answer: string }> = {}
 
   for (const q of questions) {
@@ -138,7 +159,7 @@ export async function POST(req: NextRequest) {
     breakdown[q.id] = { correct: isCorrect, correct_answer: q.correct_answer }
   }
 
-  const score  = total > 0 ? Math.round((correct / total) * 100 * 100) / 100 : 0
+  const score = total > 0 ? Math.round((correct / total) * 100 * 100) / 100 : 0
   const passed = score >= Number(cert.pass_mark)
 
   if (passed) {
@@ -156,12 +177,12 @@ export async function POST(req: NextRequest) {
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
     syncCertScoreToSheet({
-      leagueId:    cert.league_id,
-      roleCode:    cert.role_code,
-      driverName,
+      leagueId: cert.league_id,
+      roleCode: cert.role_code,
+      username,
       score,
-      passMark:    Number(cert.pass_mark),
-      passed:      true,
+      passMark: Number(cert.pass_mark),
+      passed: true,
       completedAt: now.toISOString(),
     }).catch((err) => console.error('[cert/submit] sheets sync failed', err))
 
@@ -182,7 +203,7 @@ export async function POST(req: NextRequest) {
       .maybeSingle()
 
     let licenceNumber: string | null = existingLicence?.licence_number ?? null
-    let licenceId:     string | null = existingLicence?.id ?? null
+    let licenceId: string | null = existingLicence?.id ?? null
 
     if (!existingLicence) {
       const { data: league } = await supabase
@@ -219,29 +240,29 @@ export async function POST(req: NextRequest) {
       const { data: newLicence } = await supabase
         .schema('pitboss').from('licences')
         .insert({
-          driver_id:      driver.id,
-          league_id:      cert.league_id,
+          driver_id: driver.id,
+          league_id: cert.league_id,
           licence_number: newLicenceNumber,
-          role_code:      cert.role_code,
-          title:          `${league?.name ?? 'League'} ${roleReq?.role_name ?? cert.role_code}`,
-          status:         'active',
+          role_code: cert.role_code,
+          title: `${league?.name ?? 'League'} ${roleReq?.role_name ?? cert.role_code}`,
+          status: 'active',
         })
         .select('id, licence_number')
         .single()
 
       licenceNumber = newLicence?.licence_number ?? newLicenceNumber
-      licenceId     = newLicence?.id ?? null
+      licenceId = newLicence?.id ?? null
     }
 
     return NextResponse.json({
-      passed:         true,
+      passed: true,
       score,
-      pass_mark:      cert.pass_mark,
+      pass_mark: cert.pass_mark,
       correct,
       total,
       token,
       licence_number: licenceNumber,
-      licence_id:     licenceId,
+      licence_id: licenceId,
       breakdown,
     })
   } else {
@@ -254,22 +275,22 @@ export async function POST(req: NextRequest) {
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
     syncCertScoreToSheet({
-      leagueId:    cert.league_id,
-      roleCode:    cert.role_code,
-      driverName,
+      leagueId: cert.league_id,
+      roleCode: cert.role_code,
+      username,
       score,
-      passMark:    Number(cert.pass_mark),
-      passed:      false,
+      passMark: Number(cert.pass_mark),
+      passed: false,
       completedAt: now.toISOString(),
     }).catch((err) => console.error('[cert/submit] sheets sync failed', err))
 
     return NextResponse.json({
-      passed:       false,
+      passed: false,
       score,
-      pass_mark:    cert.pass_mark,
+      pass_mark: cert.pass_mark,
       correct,
       total,
-      missed_by:    Math.round((Number(cert.pass_mark) - score) * 100) / 100,
+      missed_by: Math.round((Number(cert.pass_mark) - score) * 100) / 100,
       locked_until: lockedUntil.toISOString(),
       breakdown,
     })
