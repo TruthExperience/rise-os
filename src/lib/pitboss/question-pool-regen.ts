@@ -41,6 +41,38 @@ function extractTrailingJson(text: string): unknown {
   return JSON.parse(fenced.slice(openIdx, closeIdx + 1))
 }
 
+// Finds rulebook topics this league's exam pool should never draw new
+// questions from. Matched by chapter/title text rather than a hardcoded
+// article number, so this stays league-agnostic: leagues whose rulebook
+// doesn't have a "Code of Conduct" chapter or a "League Structure" article
+// simply get an empty exclusion list back, no-op.
+async function getExcludedTopics(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string
+): Promise<string[]> {
+  const { data: ruleBook } = await supabase
+    .schema('pitboss')
+    .from('rule_books')
+    .select('id')
+    .eq('league_id', leagueId)
+    .eq('status', 'active')
+    .maybeSingle()
+
+  if (!ruleBook) return []
+
+  const { data: articles } = await supabase
+    .schema('pitboss')
+    .from('rule_articles')
+    .select('article_number, chapter, title')
+    .eq('rule_book_id', ruleBook.id)
+    .eq('active', true)
+    .or('chapter.ilike.%code of conduct%,title.ilike.%league structure%')
+
+  return (articles ?? []).map(
+    (a) => `Article ${a.article_number} — ${a.title} (${a.chapter})`
+  )
+}
+
 // Called every 4th completed exam for a given (league_id, role_code).
 // "Replace" strategy: generate N new questions, then deactivate the N
 // oldest active questions in the same pool so the bank size stays roughly
@@ -87,6 +119,7 @@ export async function regenerateQuestionPool(leagueId: string, roleCode: string)
 
   const categories = [...new Set((existing ?? []).map((q) => q.category))]
   const difficulties = [...new Set((existing ?? []).map((q) => q.difficulty))]
+  const excludedTopics = await getExcludedTopics(supabase, leagueId)
 
   const generated = await generateQuestionsViaProxy(
     leagueId,
@@ -98,6 +131,7 @@ export async function regenerateQuestionPool(leagueId: string, roleCode: string)
       categories,
       difficulties,
       avoidQuestions: (existing ?? []).map((q) => q.question),
+      excludedTopics,
     }
   )
 
@@ -160,6 +194,7 @@ async function generateQuestionsViaProxy(
     categories: string[]
     difficulties: string[]
     avoidQuestions: string[]
+    excludedTopics: string[]
   }
 ): Promise<Array<{
   category: string
@@ -188,6 +223,10 @@ async function generateQuestionsViaProxy(
     .map((q) => `- ${q}`)
     .join('\n')
 
+  const excludeBlock = context.excludedTopics.length > 0
+    ? context.excludedTopics.map((t) => `- ${t}`).join('\n')
+    : ''
+
   const system = `You are a certification exam question generator for ${context.leagueName}, a sim-racing league, generating questions for the "${context.roleName}" (${roleCode}) role.
 Return ONLY a valid JSON array — no markdown, no preamble, no trailing commentary.
 Shape: [ { "category": string, "question": string, "options": string[], "correct_answer": string, "explanation": string, "difficulty": "easy"|"medium"|"hard" } ]
@@ -196,7 +235,7 @@ Rules:
 - "options" must have 3-5 plausible choices; "correct_answer" must exactly match one of the option strings.
 - Cover roughly this category mix: ${categoryLine}.
 - Vary difficulty across: ${difficultyLine}.
-- Do not duplicate or closely rephrase any question in the AVOID list below.
+- Do not duplicate or closely rephrase any question in the AVOID list below.${excludeBlock ? `\n- Do NOT write any question — regardless of category — covering these rulebook topics, they are permanently off-limits for this exam pool:\n${excludeBlock}` : ''}
 - Base questions on realistic league rulebook / stewarding / setup / conduct knowledge appropriate to the role.`
 
   const promptParts = [
@@ -204,6 +243,9 @@ Rules:
   ]
   if (avoidBlock) {
     promptParts.push(`AVOID questions duplicating or closely rephrasing any of these existing ones:\n${avoidBlock}`)
+  }
+  if (excludeBlock) {
+    promptParts.push(`OFF-LIMITS TOPICS — do not write about these under any category:\n${excludeBlock}`)
   }
 
   try {
