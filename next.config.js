@@ -79,6 +79,18 @@ const withPWA = require("@ducanh2912/next-pwa").default({
         urlPattern: /^https?:\/\/[^/]+\/league\/[^/]+$/i,
         handler: "NetworkOnly",
       },
+      {
+        // Same issue as rules/drivers/setups/franchises/league[id] above:
+        // /join fetches its league list client-side via useEffect, but
+        // cacheOnFrontEndNav + aggressiveFrontEndNavCaching could replay a
+        // stale page shell/RSC payload (and stale bundled JS) on in-app
+        // navigation here too. The /api/leagues call itself is already
+        // safe under the NetworkOnly /api/.* rule above, but the page
+        // shell isn't — force NetworkOnly so every visit re-fetches the
+        // live page and the live client bundle.
+        urlPattern: /^https?:\/\/[^/]+\/join.*/i,
+        handler: "NetworkOnly",
+      },
     ],
   },
 });
