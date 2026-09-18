@@ -40,24 +40,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  // Canonical username lives on public.users (the real identity table,
-  // joined via discord_id elsewhere in the app) — not on pitboss.drivers.
-  // Look it up via driver.user_id so exam results sync to sheets under the
-  // driver's actual username rather than a Discord display name. Falls
-  // back to the old chain only if a driver row somehow has no linked
-  // public.users row.
-  const { data: userRow } = await supabase
-    .schema('public')
-    .from('users')
-    .select('username')
-    .eq('id', (driver as any).user_id)
-    .maybeSingle()
-
+  // Exam room results sync uses the driver's Discord username, falling back
+  // to display name or driver id if Discord username is somehow unset.
   const username =
-    userRow?.username ??
-    (driver as any).discord_username ??
-    (driver as any).display_name ??
-    driver.id
+    (driver as any).discord_username ?? (driver as any).display_name ?? driver.id
 
   let body: { certification_id: string; answers: Record<string, string> }
   try {
