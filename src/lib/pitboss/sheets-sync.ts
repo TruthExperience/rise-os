@@ -1,7 +1,7 @@
 import crypto from 'crypto'
 
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets'
-const TOKEN_URL     = 'https://oauth2.googleapis.com/token'
+const TOKEN_URL = 'https://oauth2.googleapis.com/token'
 
 function base64url(input: Buffer | string) {
   return Buffer.from(input)
@@ -13,7 +13,7 @@ function base64url(input: Buffer | string) {
 
 async function getAccessToken(): Promise<string | null> {
   const clientEmail = process.env.GOOGLE_SHEETS_CLIENT_EMAIL
-  const privateKey  = process.env.GOOGLE_SHEETS_PRIVATE_KEY?.replace(/\\n/g, '\n')
+  const privateKey = process.env.GOOGLE_SHEETS_PRIVATE_KEY?.replace(/\\n/g, '\n')
 
   if (!clientEmail || !privateKey) {
     console.error('[sheets-sync] missing GOOGLE_SHEETS_CLIENT_EMAIL / GOOGLE_SHEETS_PRIVATE_KEY')
@@ -23,11 +23,11 @@ async function getAccessToken(): Promise<string | null> {
   const now = Math.floor(Date.now() / 1000)
   const header = { alg: 'RS256', typ: 'JWT' }
   const claims = {
-    iss:   clientEmail,
+    iss: clientEmail,
     scope: SHEETS_SCOPE,
-    aud:   TOKEN_URL,
-    iat:   now,
-    exp:   now + 3600,
+    aud: TOKEN_URL,
+    iat: now,
+    exp: now + 3600,
   }
 
   const unsigned = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(claims))}`
@@ -64,7 +64,7 @@ async function appendRow(sheetId: string, values: (string | number)[]) {
     {
       method: 'POST',
       headers: {
-        'Content-Type':  'application/json',
+        'Content-Type': 'application/json',
         'Authorization': `Bearer ${accessToken}`,
       },
       body: JSON.stringify({ values: [values] }),
@@ -84,12 +84,12 @@ const SHEET_TARGETS: Record<string, string | undefined> = {
 }
 
 export async function syncCertScoreToSheet(params: {
-  leagueId:    string
-  roleCode:    string
-  driverName:  string
-  score:       number
-  passMark:    number
-  passed:      boolean
+  leagueId: string
+  roleCode: string
+  username: string
+  score: number
+  passMark: number
+  passed: boolean
   completedAt: string
 }) {
   const sheetId = SHEET_TARGETS[`${params.leagueId}:${params.roleCode}`]
@@ -97,7 +97,7 @@ export async function syncCertScoreToSheet(params: {
 
   await appendRow(sheetId, [
     params.completedAt,
-    params.driverName,
+    params.username,
     params.score,
     params.passMark,
     params.passed ? 'PASSED' : 'FAILED',
