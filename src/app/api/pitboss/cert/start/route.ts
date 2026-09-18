@@ -29,27 +29,28 @@ async function buildSessionPayload(
   if (error || !questions) return null
 
   const questionMap = new Map(questions.map((q: any) => [q.id, q]))
+
   const ordered = cert.question_ids
     .map((id) => questionMap.get(id))
     .filter(Boolean)
     .map((q: any) => ({
-      id:         q.id,
-      category:   q.category,
-      question:   q.question,
-      options:    shuffle(q.options as string[]),
+      id: q.id,
+      category: q.category,
+      question: q.question,
+      options: shuffle(q.options as string[]),
       difficulty: q.difficulty,
     }))
 
   return {
     certification_id: cert.id,
-    started_at:       cert.started_at,
-    pass_mark:        cert.pass_mark,
-    attempt_number:   cert.attempt_number,
-    role_code:        cert.role_code,
-    role_name:        roleName,
-    total_questions:  ordered.length,
+    started_at: cert.started_at,
+    pass_mark: cert.pass_mark,
+    attempt_number: cert.attempt_number,
+    role_code: cert.role_code,
+    role_name: roleName,
+    total_questions: ordered.length,
     league,
-    questions:        ordered,
+    questions: ordered,
   }
 }
 
@@ -112,12 +113,12 @@ async function recordQuestionHistory(
 ) {
   const nowIso = new Date().toISOString()
   const rows = drawnIds.map((qid) => ({
-    driver_id:    driverId,
-    league_id:    leagueId,
-    role_code:    roleCode,
-    question_id:  qid,
+    driver_id: driverId,
+    league_id: leagueId,
+    role_code: roleCode,
+    question_id: qid,
     last_seen_at: nowIso,
-    seen_count:   (historyMap.get(qid)?.seen_count ?? 0) + 1,
+    seen_count: (historyMap.get(qid)?.seen_count ?? 0) + 1,
   }))
 
   const { error } = await supabase
@@ -137,6 +138,7 @@ async function recordQuestionHistory(
 export async function GET(req: NextRequest) {
   const supabase = createAdminClient()
   const certificationId = req.nextUrl.searchParams.get('certification_id')
+
   if (!certificationId) {
     return NextResponse.json({ error: 'certification_id is required' }, { status: 400 })
   }
@@ -156,12 +158,15 @@ export async function GET(req: NextRequest) {
   if (certError) {
     return NextResponse.json({ error: certError.message }, { status: 500 })
   }
+
   if (!cert || cert.driver_id !== driver.id) {
     return NextResponse.json({ error: 'Certification not found' }, { status: 404 })
   }
+
   if (cert.status !== 'in_progress') {
     return NextResponse.json({ error: `Certification is ${cert.status}, not in progress` }, { status: 409 })
   }
+
   if (!cert.question_ids || cert.question_ids.length === 0) {
     // Legacy row from before question_ids existed — can't be recovered.
     return NextResponse.json(
@@ -195,8 +200,8 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const supabase = createAdminClient()
-
   const driver = await getAuthedDriver()
+
   if (!driver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
@@ -209,6 +214,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { league_id, role_code } = body
+
   if (!league_id) {
     return NextResponse.json({ error: 'league_id is required' }, { status: 400 })
   }
@@ -238,20 +244,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'League not found' }, { status: 404 })
   }
 
-  const { data: enrollment, error: enrollmentError } = await supabase
-    .schema('pitboss')
-    .from('driver_leagues')
-    .select('role')
-    .eq('driver_id', driver.id)
-    .eq('league_id', league_id)
-    .maybeSingle()
+  // Jury eligibility is intentionally broader than driver enrollment: the
+  // JURY exam builds a pool of eligible names for appeal-review rotation,
+  // not a roster of active competitors, so any authenticated driver can
+  // sit it regardless of whether they're rostered in this league. Every
+  // other role (e.g. STW) still requires league enrollment.
+  if (role_code !== 'JURY') {
+    const { data: enrollment, error: enrollmentError } = await supabase
+      .schema('pitboss')
+      .from('driver_leagues')
+      .select('role')
+      .eq('driver_id', driver.id)
+      .eq('league_id', league_id)
+      .maybeSingle()
 
-  if (enrollmentError) {
-    console.error('[cert/start] enrollment lookup', enrollmentError)
-    return NextResponse.json({ error: enrollmentError.message }, { status: 500 })
-  }
-  if (!enrollment) {
-    return NextResponse.json({ error: 'Driver not enrolled in this league' }, { status: 403 })
+    if (enrollmentError) {
+      console.error('[cert/start] enrollment lookup', enrollmentError)
+      return NextResponse.json({ error: enrollmentError.message }, { status: 500 })
+    }
+
+    if (!enrollment) {
+      return NextResponse.json({ error: 'Driver not enrolled in this league' }, { status: 403 })
+    }
   }
 
   const { data: requirement, error: requirementError } = await supabase
@@ -274,7 +288,6 @@ export async function POST(req: NextRequest) {
   }
 
   const now = new Date()
-
   const { data: latest } = await supabase
     .schema('pitboss')
     .from('certifications')
@@ -290,6 +303,7 @@ export async function POST(req: NextRequest) {
     if (latest.status === 'passed') {
       return NextResponse.json({ error: 'Already certified for this role' }, { status: 409 })
     }
+
     if (latest.status === 'in_progress') {
       // Resumable: rebuild and return the existing session instead of blocking.
       if (latest.question_ids && latest.question_ids.length > 0) {
@@ -307,6 +321,7 @@ export async function POST(req: NextRequest) {
         { status: 409 }
       )
     }
+
     if (
       latest.status === 'failed' &&
       latest.locked_until &&
@@ -328,6 +343,7 @@ export async function POST(req: NextRequest) {
     console.error('[cert/start] questions', questionsError)
     return NextResponse.json({ error: questionsError.message }, { status: 500 })
   }
+
   if (!questions || questions.length < requirement.question_count) {
     console.error(
       `[cert/start] insufficient bank for ${role_code}/${league_id}: ` +
@@ -346,20 +362,21 @@ export async function POST(req: NextRequest) {
     questions,
     requirement.question_count
   )
+
   const drawnIds = drawn.map((q) => q.id)
 
   const { data: cert, error: certError } = await supabase
     .schema('pitboss')
     .from('certifications')
     .insert({
-      driver_id:      driver.id,
+      driver_id: driver.id,
       league_id,
       role_code,
-      status:         'in_progress',
-      pass_mark:      requirement.pass_mark,
-      started_at:     now.toISOString(),
+      status: 'in_progress',
+      pass_mark: requirement.pass_mark,
+      started_at: now.toISOString(),
       attempt_number: attemptNumber,
-      question_ids:   drawnIds,
+      question_ids: drawnIds,
     })
     .select('id, started_at, pass_mark, attempt_number, role_code')
     .single()
@@ -375,22 +392,22 @@ export async function POST(req: NextRequest) {
   await recordQuestionHistory(supabase, driver.id, league_id, role_code, drawnIds, historyMap)
 
   const sanitized = drawn.map((q) => ({
-    id:         q.id,
-    category:   q.category,
-    question:   q.question,
-    options:    shuffle(q.options as string[]),
+    id: q.id,
+    category: q.category,
+    question: q.question,
+    options: shuffle(q.options as string[]),
     difficulty: q.difficulty,
   }))
 
   return NextResponse.json({
     certification_id: cert.id,
-    started_at:       cert.started_at,
-    pass_mark:        cert.pass_mark,
-    attempt_number:   cert.attempt_number,
-    role_code:        cert.role_code,
-    role_name:        requirement.role_name,
-    total_questions:  sanitized.length,
-    league:           { id: league.id, name: league.name, slug: league.slug },
-    questions:        sanitized,
+    started_at: cert.started_at,
+    pass_mark: cert.pass_mark,
+    attempt_number: cert.attempt_number,
+    role_code: cert.role_code,
+    role_name: requirement.role_name,
+    total_questions: sanitized.length,
+    league: { id: league.id, name: league.name, slug: league.slug },
+    questions: sanitized,
   })
 }
