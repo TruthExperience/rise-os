@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { regenerateQuestionPool } from '@/lib/pitboss/question-pool-regen'
+import { syncCertScoreToSheet } from '@/lib/pitboss/sheets-sync'
 
 const CERT_WINDOW_MS = 60 * 60 * 1000
 const LOCKOUT_HOURS  = 24
@@ -37,6 +38,8 @@ export async function POST(req: NextRequest) {
   if (!driver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
+
+  const driverName = (driver as any).discord_username ?? (driver as any).display_name ?? driver.id
 
   let body: { certification_id: string; answers: Record<string, string> }
   try {
@@ -90,6 +93,16 @@ export async function POST(req: NextRequest) {
 
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
+    syncCertScoreToSheet({
+      leagueId:    cert.league_id,
+      roleCode:    cert.role_code,
+      driverName,
+      score:       0,
+      passMark:    Number(cert.pass_mark),
+      passed:      false,
+      completedAt: now.toISOString(),
+    }).catch((err) => console.error('[cert/submit] sheets sync failed', err))
+
     return NextResponse.json(
       { error: 'Time expired — certification failed', locked_until: lockedUntil.toISOString() },
       { status: 422 }
@@ -141,6 +154,16 @@ export async function POST(req: NextRequest) {
       .eq('league_id', cert.league_id)
 
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
+
+    syncCertScoreToSheet({
+      leagueId:    cert.league_id,
+      roleCode:    cert.role_code,
+      driverName,
+      score,
+      passMark:    Number(cert.pass_mark),
+      passed:      true,
+      completedAt: now.toISOString(),
+    }).catch((err) => console.error('[cert/submit] sheets sync failed', err))
 
     // Re-certification guard: a driver can retake and pass a role they're
     // already actively licenced for (e.g. sitting a fresh attempt after a
@@ -229,6 +252,16 @@ export async function POST(req: NextRequest) {
       .eq('id', certification_id)
 
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
+
+    syncCertScoreToSheet({
+      leagueId:    cert.league_id,
+      roleCode:    cert.role_code,
+      driverName,
+      score,
+      passMark:    Number(cert.pass_mark),
+      passed:      false,
+      completedAt: now.toISOString(),
+    }).catch((err) => console.error('[cert/submit] sheets sync failed', err))
 
     return NextResponse.json({
       passed:       false,
