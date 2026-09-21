@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from '@/lib/compat/next-auth-react'
+import { isLikelyInAppBrowser, safariEscapeUrl } from '@/lib/isInAppBrowser'
 
 interface League {
   id: string
@@ -49,6 +50,16 @@ export default function CertPageClient() {
   const [starting, setStarting]             = useState<string | null>(null)
   const [error, setError]                   = useState<string | null>(null)
   const [loading, setLoading]               = useState(true)
+  const [inAppBrowser, setInAppBrowser]     = useState(false)
+
+  // Middleware already catches the unauthenticated in-app-browser case
+  // site-wide. This is defense-in-depth for the case where the session
+  // cookie was present but went stale mid-visit (still hits cert/status
+  // as a 401), so the message stays accurate instead of a bare
+  // "Unauthorized".
+  useEffect(() => {
+    setInAppBrowser(isLikelyInAppBrowser(navigator.userAgent))
+  }, [])
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -99,7 +110,17 @@ export default function CertPageClient() {
       // would then quietly fall back to "eligible" even for a passed or
       // in-progress cert, only surfacing as an error once the user tapped
       // Begin and hit cert/start's own checks. Surface it here instead.
-      if (!statusRes.ok) throw new Error(statusData.error ?? 'Failed to load certification status')
+      if (!statusRes.ok) {
+        // A 401 here is very often not a real auth bug — it's the session
+        // cookie simply not existing in an in-app browser's separate
+        // webview (Discord, etc.). Give that its own message instead of
+        // the generic error, since "Unauthorized" alone sends people down
+        // a debugging rabbit hole for a one-tap fix.
+        if (statusRes.status === 401 && inAppBrowser) {
+          throw new Error('INAPP_BROWSER_SESSION')
+        }
+        throw new Error(statusData.error ?? 'Failed to load certification status')
+      }
 
       const requirements: RoleRequirement[] = reqData.requirements ?? []
 
@@ -142,6 +163,10 @@ export default function CertPageClient() {
       const data = await res.json()
 
       if (!res.ok) {
+        if (res.status === 401 && inAppBrowser) {
+          setError('INAPP_BROWSER_SESSION')
+          return
+        }
         // The session cookie can occasionally not be fully readable
         // server-side on the very first request right after the page
         // loads (webview/mobile session bridge timing), producing a
@@ -207,7 +232,24 @@ export default function CertPageClient() {
         </p>
       </div>
 
-      {error && (
+      {error === 'INAPP_BROWSER_SESSION' ? (
+        <div className="mb-6 rounded-xl border border-yellow-500/40 bg-yellow-500/10 px-4 py-3">
+          <p className="text-sm text-yellow-300 font-bold mb-1">
+            Open this in Safari
+          </p>
+          <p className="text-xs text-yellow-300/70 mb-3">
+            You're viewing this inside an app's built-in browser, which
+            doesn't share your login with Safari. Open the link in Safari
+            to continue.
+          </p>
+          <a
+            href={typeof window !== 'undefined' ? safariEscapeUrl(window.location.href) : '#'}
+            className="inline-block rounded-lg bg-yellow-500/20 px-3 py-1.5 text-xs font-bold text-yellow-300"
+          >
+            Open in Safari
+          </a>
+        </div>
+      ) : error && (
         <div className="mb-6 rounded-xl border border-rise-red/40 bg-rise-red/10 px-4 py-3">
           <p className="text-sm text-rise-red">{error}</p>
         </div>
@@ -245,7 +287,7 @@ export default function CertPageClient() {
             </div>
           )}
 
-          {!loadingRoles && roles.length === 0 && (
+          {!loadingRoles && roles.length === 0 && error !== 'INAPP_BROWSER_SESSION' && (
             <p className="text-white/30 text-sm text-center mt-12">
               No exams available for this league.
             </p>
