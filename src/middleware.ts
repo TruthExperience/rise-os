@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { isLikelyInAppBrowser } from '@/lib/isInAppBrowser'
 
 // getClaims() is a network call to Supabase auth with no built-in timeout.
 // Vercel middleware has a hard ~25-30s execution ceiling — if Supabase auth
@@ -58,15 +59,29 @@ export async function middleware(request: NextRequest) {
     user = null
   }
 
-  if (
-    !user &&
-    request.nextUrl.pathname !== '/' &&
-    !request.nextUrl.pathname.startsWith('/login') &&
-    !request.nextUrl.pathname.startsWith('/auth') &&
-    !request.nextUrl.pathname.startsWith('/api') &&
-    !request.nextUrl.pathname.startsWith('/directory') &&
-    !request.nextUrl.pathname.startsWith('/l/')
-  ) {
+  const isExempt =
+    request.nextUrl.pathname === '/' ||
+    request.nextUrl.pathname.startsWith('/login') ||
+    request.nextUrl.pathname.startsWith('/auth') ||
+    request.nextUrl.pathname.startsWith('/api') ||
+    request.nextUrl.pathname.startsWith('/directory') ||
+    request.nextUrl.pathname.startsWith('/l/') ||
+    request.nextUrl.pathname.startsWith('/open-in-safari')
+
+  if (!user && !isExempt) {
+    // No session AND it's a likely in-app browser (Discord link taps are
+    // the common case): don't send them into /login as if this were a
+    // normal logged-out visit. That cookie jar is a dead end even after
+    // signing in there — send them to an interstitial that explains why
+    // and gets them into real Safari instead, preserving where they were
+    // headed.
+    if (isLikelyInAppBrowser(request.headers.get('user-agent'))) {
+      const url = request.nextUrl.clone()
+      url.pathname = '/open-in-safari'
+      url.searchParams.set('next', request.nextUrl.pathname + request.nextUrl.search)
+      return NextResponse.redirect(url)
+    }
+
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
