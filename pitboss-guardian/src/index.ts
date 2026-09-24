@@ -94,6 +94,37 @@
 //   The watchdog fails open: if the Supabase check itself fails (network
 //   blip, transient 5xx), the instance does NOT retire on that tick. Only
 //   an explicit, successfully-read mismatch triggers retirement.
+//
+// PATCH (2026-09-23): retuned raid/nuke detection — the previous values
+// were tripping on normal server activity, not just actual attacks:
+//   1. WEBHOOK_CREATE and BOT_ADD were never actually threshold-gated
+//      despite NUKE_WEBHOOK_THRESHOLD / NUKE_BOT_ADD_THRESHOLD existing as
+//      constants — both action types fired an instant ban on the very
+//      first occurrence, ignoring the threshold value entirely. A member
+//      with Manage Webhooks setting up one legitimate integration, or a
+//      member with Manage Server adding one ordinary bot, got auto-banned
+//      on the spot. Folded both into the same per-actor windowed counter
+//      already used for deletions/bans/creations/role-grants below, so
+//      they now require threshold-or-more occurrences by the same actor
+//      within NUKE_WINDOW_MS, same as every other tracked nuke pattern.
+//   2. Raised RAID_JOIN_COUNT_THRESHOLD, RAID_SCORE_THRESHOLD,
+//      AVATAR_HASH_SHARE_THRESHOLD, NUKE_DELETE_THRESHOLD,
+//      NUKE_BAN_KICK_THRESHOLD, NUKE_CREATE_THRESHOLD, and
+//      NUKE_ROLE_GRANT_THRESHOLD — the old values were tight enough that
+//      ordinary bursts (a growth spurt, a round of event-channel setup, a
+//      bulk end-of-season role grant) could plausibly cross them. New
+//      values keep the same detection shape but need materially more
+//      volume/velocity before firing.
+//   3. Left the unauthorized-bot-removal check, GUILD_UPDATE (verification
+//      level lowered, ownership transferred), and ROLE_UPDATE (dangerous
+//      permission granted) as instant single-occurrence triggers —
+//      unlike a webhook or a bot, there's no ordinary reason for a
+//      non-whitelisted actor to do any of these even once, so
+//      threshold-gating them would just slow down response to an
+//      unambiguous attack.
+//   Tune further by adjusting the constants directly below if your
+//   servers' normal activity still trips these — they're plain numbers,
+//   nothing else needs to change to raise or lower them again.
 
 var CONFIG_REFRESH_INTERVAL_MS = 30_000;
 var VERSION_WATCHDOG_INTERVAL_MS = 30_000;
@@ -146,17 +177,17 @@ var LOCKDOWN_DENY_MASK =
   LOCKDOWN_DENY_PERMISSIONS.SEND_MESSAGES | LOCKDOWN_DENY_PERMISSIONS.CREATE_INSTANT_INVITE;
 
 var RAID_WINDOW_MS = 60_000;
-var RAID_SCORE_THRESHOLD = 10;
-var RAID_JOIN_COUNT_THRESHOLD = 8;
-var AVATAR_HASH_SHARE_THRESHOLD = 3;
+var RAID_SCORE_THRESHOLD = 15;
+var RAID_JOIN_COUNT_THRESHOLD = 15;
+var AVATAR_HASH_SHARE_THRESHOLD = 4;
 
 var NUKE_WINDOW_MS = 30_000;
-var NUKE_DELETE_THRESHOLD = 3;
-var NUKE_BAN_KICK_THRESHOLD = 5;
-var NUKE_CREATE_THRESHOLD = 5;
-var NUKE_ROLE_GRANT_THRESHOLD = 5;
-var NUKE_WEBHOOK_THRESHOLD = 1;
-var NUKE_BOT_ADD_THRESHOLD = 1;
+var NUKE_DELETE_THRESHOLD = 4;
+var NUKE_BAN_KICK_THRESHOLD = 8;
+var NUKE_CREATE_THRESHOLD = 8;
+var NUKE_ROLE_GRANT_THRESHOLD = 10;
+var NUKE_WEBHOOK_THRESHOLD = 2;
+var NUKE_BOT_ADD_THRESHOLD = 2;
 
 var AUDIT_ACTION = {
   GUILD_UPDATE: 1,
@@ -897,18 +928,6 @@ var GuildGuardian = class {
     const actorId = entry.user_id;
     const actionType = entry.action_type;
 
-    if (actionType === AUDIT_ACTION.WEBHOOK_CREATE) {
-      const reason = `Webhook created by non-whitelisted actor (threshold: ${NUKE_WEBHOOK_THRESHOLD})`;
-      await this.respondToThreat(guildId, "nuke", { reason, actorIds: [actorId], detail: { entry } });
-      await this.recordBannedId(guildId, actorId, "webhook_create", reason);
-      return;
-    }
-    if (actionType === AUDIT_ACTION.BOT_ADD) {
-      const reason = `Bot/integration added by non-whitelisted actor (threshold: ${NUKE_BOT_ADD_THRESHOLD})`;
-      await this.respondToThreat(guildId, "nuke", { reason, actorIds: [actorId], detail: { entry } });
-      await this.recordBannedId(guildId, actorId, "bot_add", reason);
-      return;
-    }
     if (actionType === AUDIT_ACTION.GUILD_UPDATE) {
       const dangerous = this.guildUpdateIsDangerous(entry);
       if (dangerous) {
@@ -924,9 +943,14 @@ var GuildGuardian = class {
       }
     }
 
+    // Everything else that matters is windowed/threshold-based rather than
+    // an instant single-occurrence trigger — see PATCH (2026-09-23) at the
+    // top of the file for why WEBHOOK_CREATE and BOT_ADD were folded in
+    // here instead of firing on their first occurrence.
     const trackedTypes = [
       AUDIT_ACTION.CHANNEL_DELETE, AUDIT_ACTION.ROLE_DELETE, AUDIT_ACTION.MEMBER_BAN_ADD,
-      AUDIT_ACTION.MEMBER_KICK, AUDIT_ACTION.CHANNEL_CREATE, AUDIT_ACTION.ROLE_CREATE, AUDIT_ACTION.MEMBER_ROLE_UPDATE
+      AUDIT_ACTION.MEMBER_KICK, AUDIT_ACTION.CHANNEL_CREATE, AUDIT_ACTION.ROLE_CREATE,
+      AUDIT_ACTION.MEMBER_ROLE_UPDATE, AUDIT_ACTION.WEBHOOK_CREATE, AUDIT_ACTION.BOT_ADD
     ];
     if (trackedTypes.includes(actionType)) {
       if (!this.nukeActionsByGuildAndActor.has(guildId)) this.nukeActionsByGuildAndActor.set(guildId, new Map());
@@ -941,16 +965,29 @@ var GuildGuardian = class {
       const banKickCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.MEMBER_BAN_ADD || e.actionType === AUDIT_ACTION.MEMBER_KICK).length;
       const createCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.CHANNEL_CREATE || e.actionType === AUDIT_ACTION.ROLE_CREATE).length;
       const roleGrantCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.MEMBER_ROLE_UPDATE).length;
+      const webhookCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.WEBHOOK_CREATE).length;
+      const botAddCount = pruned.filter((e) => e.actionType === AUDIT_ACTION.BOT_ADD).length;
 
-      const fire = async (reason, score, isDeleteSpam = false) => {
-        await this.respondToThreat(guildId, "nuke", { reason, score, actorIds: [actorId], detail: { entries: pruned }, isDeleteSpam });
+      const fire = async (reason, score, opts = {}) => {
+        await this.respondToThreat(guildId, "nuke", {
+          reason,
+          score,
+          actorIds: [actorId],
+          detail: { entries: pruned },
+          isDeleteSpam: opts.isDeleteSpam === true
+        });
+        if (opts.recordAs) {
+          await this.recordBannedId(guildId, actorId, opts.recordAs, reason);
+        }
         guildActorMap.delete(actorId);
       };
 
-      if (deleteCount >= NUKE_DELETE_THRESHOLD) await fire(`${deleteCount} channel/role deletions by one actor in ${NUKE_WINDOW_MS / 1000}s`, deleteCount, true);
+      if (deleteCount >= NUKE_DELETE_THRESHOLD) await fire(`${deleteCount} channel/role deletions by one actor in ${NUKE_WINDOW_MS / 1000}s`, deleteCount, { isDeleteSpam: true });
       else if (banKickCount >= NUKE_BAN_KICK_THRESHOLD) await fire(`${banKickCount} bans/kicks by one actor in ${NUKE_WINDOW_MS / 1000}s`, banKickCount);
       else if (createCount >= NUKE_CREATE_THRESHOLD) await fire(`${createCount} channel/role creations by one actor in ${NUKE_WINDOW_MS / 1000}s (spam)`, createCount);
       else if (roleGrantCount >= NUKE_ROLE_GRANT_THRESHOLD) await fire(`${roleGrantCount} role grants to members by one actor in ${NUKE_WINDOW_MS / 1000}s`, roleGrantCount);
+      else if (webhookCount >= NUKE_WEBHOOK_THRESHOLD) await fire(`${webhookCount} webhooks created by one actor in ${NUKE_WINDOW_MS / 1000}s`, webhookCount, { recordAs: "webhook_create" });
+      else if (botAddCount >= NUKE_BOT_ADD_THRESHOLD) await fire(`${botAddCount} bots/integrations added by one actor in ${NUKE_WINDOW_MS / 1000}s`, botAddCount, { recordAs: "bot_add" });
     }
   }
 
