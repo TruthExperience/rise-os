@@ -125,6 +125,20 @@
 //   Tune further by adjusting the constants directly below if your
 //   servers' normal activity still trips these — they're plain numbers,
 //   nothing else needs to change to raise or lower them again.
+//
+// PATCH (2026-09-25): fetch() had no top-level try/catch. Any uncaught
+// exception in the routing block or in handleManualLockdown/
+// handleManualEndLockdown (e.g. Discord returning non-JSON on a transient
+// outage, a malformed permission_overwrite value, or a CPU/wall-clock
+// limit hit while a Gateway-triggered response was mid-flight for the
+// same guild) bubbled out as a bare framework 500 with no body. On the
+// Next.js side, moderation.ts's guardianCall() does
+// `data?.error ?? "pitboss-guardian error (${status})"` — with a null
+// body that fallback is all a steward ever saw, with no way to tell what
+// actually broke. Wrapping the whole method means any thrown error is now
+// caught, logged, and returned as { ok: false, error: <message> } at 500,
+// so that fallback picks up the real reason instead. Doesn't fix whatever
+// throws; makes the next occurrence self-diagnosing.
 
 var CONFIG_REFRESH_INTERVAL_MS = 30_000;
 var VERSION_WATCHDOG_INTERVAL_MS = 30_000;
@@ -256,63 +270,75 @@ var GuildGuardian = class {
   }
 
   async fetch(req) {
-    await this.ensureConfigsLoaded();
-    const url = new URL(req.url);
+    try {
+      await this.ensureConfigsLoaded();
+      const url = new URL(req.url);
 
-    if (url.pathname === "/start") {
-      if (this.retired) {
-        return new Response("This instance has retired in favor of a newer deployment.", { status: 410 });
-      }
-      if (!this.ws || this.ws.readyState !== WebSocket.READY_STATE_OPEN) {
-        await this.connectGateway();
-        return new Response("Gateway connection starting.", { status: 200 });
-      }
-      return new Response("Already connected.", { status: 200 });
-    }
-
-    if (url.pathname === "/guilds") {
-      return Response.json({
-        guilds: [...this.guildConfigs.entries()].map(([guildId, cfg]) => ({ guildId, ...cfg }))
-      });
-    }
-
-    if (url.pathname === "/status") {
-      const token = this.env.DISCORD_BOT_TOKEN ?? "";
-      return Response.json({
-        connected: this.ws?.readyState === WebSocket.READY_STATE_OPEN,
-        retired: this.retired,
-        myVersionId: this.myVersionId,
-        sessionId: this.sessionId,
-        sequence: this.sequence,
-        guildsProvisioned: this.guildConfigs.size,
-        consecutiveAuthFailures: this.consecutiveAuthFailures,
-        configLastLoadedAt: this.configsLoadedAt ? new Date(this.configsLoadedAt).toISOString() : null,
-        tokenDiagnostic: {
-          length: token.length,
-          startsWithBotPrefix: token.startsWith("Bot "),
-          hasLeadingOrTrailingWhitespace: token !== token.trim(),
-          preview: token.length > 10 ? `${token.slice(0, 6)}...${token.slice(-4)}` : "(too short to preview)"
+      if (url.pathname === "/start") {
+        if (this.retired) {
+          return new Response("This instance has retired in favor of a newer deployment.", { status: 410 });
         }
-      });
-    }
+        if (!this.ws || this.ws.readyState !== WebSocket.READY_STATE_OPEN) {
+          await this.connectGateway();
+          return new Response("Gateway connection starting.", { status: 200 });
+        }
+        return new Response("Already connected.", { status: 200 });
+      }
 
-    if (url.pathname === "/lockdown") {
-      return this.handleManualLockdown(req);
-    }
-    if (url.pathname === "/endlockdown") {
-      return this.handleManualEndLockdown(req);
-    }
+      if (url.pathname === "/guilds") {
+        return Response.json({
+          guilds: [...this.guildConfigs.entries()].map(([guildId, cfg]) => ({ guildId, ...cfg }))
+        });
+      }
 
-    // Manual cache-bust: call this right after editing
-    // pitboss.guardian_guild_config (e.g. adding someone to
-    // whitelisted_actor_ids) to make it take effect immediately instead
-    // of waiting up to CONFIG_REFRESH_INTERVAL_MS.
-    if (url.pathname === "/reload-config") {
-      await this.ensureConfigsLoaded(true);
-      return Response.json({ ok: true, guildsLoaded: this.guildConfigs.size, loadedAt: new Date(this.configsLoadedAt).toISOString() });
-    }
+      if (url.pathname === "/status") {
+        const token = this.env.DISCORD_BOT_TOKEN ?? "";
+        return Response.json({
+          connected: this.ws?.readyState === WebSocket.READY_STATE_OPEN,
+          retired: this.retired,
+          myVersionId: this.myVersionId,
+          sessionId: this.sessionId,
+          sequence: this.sequence,
+          guildsProvisioned: this.guildConfigs.size,
+          consecutiveAuthFailures: this.consecutiveAuthFailures,
+          configLastLoadedAt: this.configsLoadedAt ? new Date(this.configsLoadedAt).toISOString() : null,
+          tokenDiagnostic: {
+            length: token.length,
+            startsWithBotPrefix: token.startsWith("Bot "),
+            hasLeadingOrTrailingWhitespace: token !== token.trim(),
+            preview: token.length > 10 ? `${token.slice(0, 6)}...${token.slice(-4)}` : "(too short to preview)"
+          }
+        });
+      }
 
-    return new Response("Not found", { status: 404 });
+      if (url.pathname === "/lockdown") {
+        return await this.handleManualLockdown(req);
+      }
+      if (url.pathname === "/endlockdown") {
+        return await this.handleManualEndLockdown(req);
+      }
+
+      // Manual cache-bust: call this right after editing
+      // pitboss.guardian_guild_config (e.g. adding someone to
+      // whitelisted_actor_ids) to make it take effect immediately instead
+      // of waiting up to CONFIG_REFRESH_INTERVAL_MS.
+      if (url.pathname === "/reload-config") {
+        await this.ensureConfigsLoaded(true);
+        return Response.json({ ok: true, guildsLoaded: this.guildConfigs.size, loadedAt: new Date(this.configsLoadedAt).toISOString() });
+      }
+
+      return new Response("Not found", { status: 404 });
+    } catch (err) {
+      // See PATCH (2026-09-25) at the top of the file: without this, an
+      // uncaught exception anywhere above returned a bare framework 500
+      // with no body, so guardianCall() on the Next.js side had nothing
+      // to surface beyond "pitboss-guardian error (500)".
+      console.error("[guardian] unhandled error in fetch():", err);
+      return Response.json(
+        { ok: false, error: err instanceof Error ? err.message : "internal error" },
+        { status: 500 }
+      );
+    }
   }
 
   // ─── Config loading / provisioning ──────────────────────────────────────
