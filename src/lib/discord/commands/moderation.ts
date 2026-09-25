@@ -155,6 +155,10 @@ registerCommand("lockdown", async (ctx) => {
   if (!leagueId) {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
 
   const denied = await requireOwner({ discordUserId: ctx.discordUserId, leagueId });
   if (denied) return { content: denied, ephemeral: true };
@@ -166,6 +170,7 @@ registerCommand("lockdown", async (ctx) => {
     ephemeral: false,
     background: async () => {
       const result = await guardianCall("/lockdown", {
+        guildId,
         reason,
         triggeredBy: ctx.discordUserId,
       });
@@ -191,6 +196,10 @@ registerCommand("endlockdown", async (ctx) => {
   if (!leagueId) {
     return { content: "This command must be used in a league channel.", ephemeral: true };
   }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
 
   const denied = await requireOwner({ discordUserId: ctx.discordUserId, leagueId });
   if (denied) return { content: denied, ephemeral: true };
@@ -199,7 +208,7 @@ registerCommand("endlockdown", async (ctx) => {
     defer: true,
     ephemeral: false,
     background: async () => {
-      const result = await guardianCall("/endlockdown");
+      const result = await guardianCall("/endlockdown", { guildId });
 
       if (!result.ok) {
         return { content: `Couldn't lift the lockdown: ${result.error}` };
