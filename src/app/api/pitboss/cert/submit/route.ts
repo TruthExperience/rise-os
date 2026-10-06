@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
 
   // Exam room results sync uses the driver's Discord username, falling back
   // to display name or driver id if Discord username is somehow unset.
-  const username =
+  const discordUsername =
     (driver as any).discord_username ?? (driver as any).display_name ?? driver.id
 
   let body: { certification_id: string; answers: Record<string, string> }
@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
     syncCertScoreToSheet({
       leagueId: cert.league_id,
       roleCode: cert.role_code,
-      username,
+      discordUsername,
       score: 0,
       passMark: Number(cert.pass_mark),
       passed: false,
@@ -165,7 +165,7 @@ export async function POST(req: NextRequest) {
     syncCertScoreToSheet({
       leagueId: cert.league_id,
       roleCode: cert.role_code,
-      username,
+      discordUsername,
       score,
       passMark: Number(cert.pass_mark),
       passed: true,
@@ -263,7 +263,7 @@ export async function POST(req: NextRequest) {
     syncCertScoreToSheet({
       leagueId: cert.league_id,
       roleCode: cert.role_code,
-      username,
+      discordUsername,
       score,
       passMark: Number(cert.pass_mark),
       passed: false,
