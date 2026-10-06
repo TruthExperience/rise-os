@@ -86,7 +86,7 @@ const SHEET_TARGETS: Record<string, string | undefined> = {
 export async function syncCertScoreToSheet(params: {
   leagueId: string
   roleCode: string
-  username: string
+  discordUsername: string
   score: number
   passMark: number
   passed: boolean
@@ -97,7 +97,7 @@ export async function syncCertScoreToSheet(params: {
 
   await appendRow(sheetId, [
     params.completedAt,
-    params.username,
+    params.discordUsername,
     params.score,
     params.passMark,
     params.passed ? 'PASSED' : 'FAILED',
