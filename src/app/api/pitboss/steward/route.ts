@@ -9,8 +9,7 @@
 // of the app uses — NOT pitboss.licences, which is unused/legacy).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 
 // role is stored as free text, sometimes a comma-separated list
@@ -46,7 +45,7 @@ async function resolveStewardDriver(supabase: ReturnType<typeof createAdminClien
 }
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
@@ -102,7 +101,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
