@@ -155,7 +155,7 @@ export async function getAuthedDriver(): Promise<{
  * auth_user_id unique constraint, so duplicate calls just no-op onto the
  * same row rather than erroring or creating duplicates.
  */
-async function healMissingProfileLink(authUserId: string): Promise<string | null> {
+export async function healMissingProfileLink(authUserId: string): Promise<string | null> {
   const admin = createAdminClient();
 
   const { data: authUser, error: authUserError } = await admin.auth.admin.getUserById(authUserId);
