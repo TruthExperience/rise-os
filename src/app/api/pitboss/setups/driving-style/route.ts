@@ -8,8 +8,7 @@
 // pitboss.drivers.id — not a route param.
 
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { getSession } from "@/lib/session";
 import { createAdminClient } from "@/lib/supabase/server";
 
 const CAR_FEEL_OPTIONS = [
@@ -42,7 +41,7 @@ async function resolveDriverId(discordId: string) {
 }
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await getSession();
   const discordId = session?.user?.discordId;
   if (!discordId) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -80,7 +79,7 @@ interface PutBody {
 }
 
 export async function PUT(req: Request) {
-  const session = await getServerSession(authOptions);
+  const session = await getSession();
   const discordId = session?.user?.discordId;
   if (!discordId) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
