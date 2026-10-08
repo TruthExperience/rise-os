@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
@@ -33,7 +32,7 @@ async function resolveDriverAndCheckSteward(discordId: string, leagueId: string)
 
 // GET — results for a league, filterable by season/round
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
@@ -107,7 +106,7 @@ export async function GET(req: NextRequest) {
 
 // POST — bulk insert results for a round (steward only)
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
@@ -169,7 +168,7 @@ export async function POST(req: NextRequest) {
 
 // PUT — edit a single result
 export async function PUT(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
