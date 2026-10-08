@@ -6,8 +6,7 @@
 //   AWC  → any driver in the league
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getSession } from '@/lib/session'
 import { createClient } from '@supabase/supabase-js'
 
 function getSupabase() {
@@ -22,7 +21,7 @@ const TRL_LEAGUE_ID  = '3a005e8d-c35f-4a57-aa27-c59c0c3812e2'
 const TRL_PRIVILEGED = ['team_principal', 'sporting_director', 'commissioner', 'head_steward']
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
@@ -58,7 +57,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
