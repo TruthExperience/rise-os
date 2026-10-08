@@ -11,15 +11,14 @@
 // and can't be attributed as a party to an incident.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }

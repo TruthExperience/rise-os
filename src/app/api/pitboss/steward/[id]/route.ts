@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { getServerSession } from 'next-auth';
+import { getSession } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,7 +16,7 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   const supabase = getSupabase();
-  const session = await getServerSession();
+  const session = await getSession();
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { data, error } = await supabase
@@ -35,7 +35,7 @@ export async function POST(
   { params }: { params: { id: string } }
 ) {
   const supabase = getSupabase();
-  const session = await getServerSession();
+  const session = await getSession();
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const body = await req.json();

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getSession } from '@/lib/session'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -19,12 +18,12 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const discordId = (session.user as any).discordId
+  const discordId = session.user.discordId
   if (!discordId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
@@ -33,7 +32,7 @@ async function resolveDriverAndCheckSteward(discordId: string, leagueId: string)
 
 // GET — all penalties in a league (steward view)
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
@@ -95,7 +94,7 @@ export async function GET(req: NextRequest) {
 
 // POST — issue manual penalty (steward only)
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
@@ -152,7 +151,7 @@ export async function POST(req: NextRequest) {
 
 // DELETE — remove a manual penalty (steward only)
 export async function DELETE(req: NextRequest) {
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   if (!session?.user?.discordId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }

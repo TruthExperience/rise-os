@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { getSession } from '@/lib/session'
 import { hasLeagueRole, getDriverId } from '@/lib/pitbossAuth'
 
 function getSupabase() {
@@ -25,7 +24,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'league_id required' }, { status: 400 })
   }
 
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   const isMember = await hasLeagueRole(session, leagueId, 'driver')
   if (!isMember) {
     return NextResponse.json({ error: 'Not a member of this league' }, { status: 403 })
@@ -89,7 +88,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Points must be between 1 and 25' }, { status: 400 })
   }
 
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   const isSteward = await hasLeagueRole(session, league_id, 'steward')
   if (!isSteward) {
     return NextResponse.json({ error: 'Forbidden — steward role required' }, { status: 403 })
@@ -160,7 +159,7 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: 'Penalty not found' }, { status: 404 })
   }
 
-  const session = await getServerSession(authOptions)
+  const session = await getSession()
   const isSteward = await hasLeagueRole(session, penalty.league_id, 'steward')
   if (!isSteward) {
     return NextResponse.json({ error: 'Forbidden — steward role required' }, { status: 403 })
