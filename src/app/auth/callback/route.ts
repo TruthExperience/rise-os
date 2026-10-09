@@ -1,10 +1,14 @@
-import { createClient, createAdminClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient, getVerifiedDiscordId } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
   const code = searchParams.get('code')
-  const next = searchParams.get('next') ?? '/'
+  // Only allow same-site relative paths. `${origin}${next}` with next="@evil.com"
+  // or "//evil.com" would otherwise redirect off-site.
+  const rawNext = searchParams.get('next') ?? '/'
+  const next =
+    rawNext.startsWith('/') && !rawNext.startsWith('//') && !rawNext.startsWith('/\\') ? rawNext : '/'
 
   if (!code) {
     return NextResponse.redirect(`${origin}/login?error=auth_failed`)
@@ -24,10 +28,12 @@ export async function GET(request: Request) {
   if (user) {
     const admin = createAdminClient()
     const meta = user.user_metadata ?? {}
-    // Discord sign-in: Supabase stores the Discord snowflake under
-    // provider_id (and mirrors it in `sub`). Email/password sign-ins have
-    // neither, so discordId is null for those accounts.
-    const discordId: string | null = meta.provider_id ?? meta.sub ?? null
+    // Discord id comes from a verified Discord identity only. user_metadata
+    // is user-editable, so an email account could otherwise put any member's
+    // Discord id there and have this upsert re-point that member's
+    // public.users row (auth_user_id) at the attacker's login.
+    // Email/password accounts have no Discord identity, so this is null.
+    const discordId: string | null = getVerifiedDiscordId(user)
     const username: string | null = meta.full_name ?? meta.name ?? null
     const avatar: string | null = meta.avatar_url ?? null
 

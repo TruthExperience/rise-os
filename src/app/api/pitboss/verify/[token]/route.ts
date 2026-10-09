@@ -1,8 +1,11 @@
 // src/app/api/pitboss/verify/[token]/route.ts
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 
 export const dynamic = 'force-dynamic'
+
+const MAX_ANSWERS = 200
 
 function getSupabase() {
   return createClient(
@@ -11,11 +14,19 @@ function getSupabase() {
   )
 }
 
-// GET — resolve token, start cert if pending, return questions
+// GET — resolve token, start cert if pending, return questions.
+// The token alone is no longer enough: the caller must be signed in as the
+// driver the certification was issued to. The /verify/[token] page is already
+// behind login, so a legitimate driver is always signed in here.
 export async function GET(
   _req: NextRequest,
   { params }: { params: { token: string } }
 ) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const supabase = getSupabase()
   const { token } = params
 
@@ -28,6 +39,13 @@ export async function GET(
 
   if (error || !cert) {
     return NextResponse.json({ error: 'Invalid or expired token' }, { status: 404 })
+  }
+
+  if (cert.driver_id !== driver.id) {
+    return NextResponse.json(
+      { error: 'This certification belongs to a different driver' },
+      { status: 403 }
+    )
   }
 
   // Already finished
@@ -52,13 +70,15 @@ export async function GET(
     )
   }
 
-  // Transition pending → in_progress
+  // Transition pending → in_progress (only if still pending, so two tabs
+  // can't both "start" it and reset started_at)
   if (cert.status === 'pending') {
     await supabase
       .schema('pitboss')
       .from('certifications')
       .update({ status: 'in_progress', started_at: new Date().toISOString() })
       .eq('id', cert.id)
+      .eq('status', 'pending')
   }
 
   // Fetch active questions for this league
@@ -86,13 +106,27 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { token: string } }
 ) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const supabase = getSupabase()
   const { token } = params
-  const body = await req.json()
-  const answers: Record<string, string> = body.answers // { question_id: selected_answer }
 
-  if (!answers || typeof answers !== 'object') {
+  let body: { answers?: Record<string, string> }
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const answers = body?.answers // { question_id: selected_answer }
+
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
     return NextResponse.json({ error: 'answers object required' }, { status: 400 })
+  }
+  if (Object.keys(answers).length > MAX_ANSWERS) {
+    return NextResponse.json({ error: 'Too many answers' }, { status: 400 })
   }
 
   const { data: cert, error } = await supabase
@@ -107,23 +141,37 @@ export async function POST(
     return NextResponse.json({ error: 'No active certification found for this token' }, { status: 404 })
   }
 
-  // Fetch correct answers
-  const questionIds = Object.keys(answers)
-  const { data: questions } = await supabase
+  if (cert.driver_id !== driver.id) {
+    return NextResponse.json(
+      { error: 'This certification belongs to a different driver' },
+      { status: 403 }
+    )
+  }
+
+  // Grade against the FULL active question set for this league, the same set
+  // GET serves. Previously the score was calculated only over the question
+  // ids the client chose to send, so answering one question correctly and
+  // skipping the rest scored 100% and passed. Unanswered now counts as wrong,
+  // and ids from other leagues or inactive questions are ignored.
+  const { data: questions, error: questionsError } = await supabase
     .schema('pitboss')
     .from('questions')
     .select('id, correct_answer, explanation')
-    .in('id', questionIds)
+    .eq('league_id', cert.league_id)
+    .eq('active', true)
 
+  if (questionsError) {
+    return NextResponse.json({ error: 'Failed to load questions' }, { status: 500 })
+  }
   if (!questions?.length) {
-    return NextResponse.json({ error: 'No matching questions found' }, { status: 400 })
+    return NextResponse.json({ error: 'No active questions for this league' }, { status: 422 })
   }
 
   // Score
   let correct = 0
   const breakdown = questions.map((q) => {
     const submitted = answers[q.id]
-    const isCorrect = submitted === q.correct_answer
+    const isCorrect = typeof submitted === 'string' && submitted === q.correct_answer
     if (isCorrect) correct++
     return {
       question_id: q.id,
@@ -143,26 +191,41 @@ export async function POST(
     ? null
     : new Date(Date.now() + lockHours * 60 * 60 * 1000).toISOString()
 
-  await supabase
+  // Claim the result atomically: only the request that still sees
+  // status = 'in_progress' wins, so a double-submit or two parallel requests
+  // can't both grade (and can't both bump attempt_number).
+  const { data: claimed, error: updateError } = await supabase
     .schema('pitboss')
     .from('certifications')
     .update({
       status: passed ? 'passed' : 'failed',
-      score,
+      score: Math.round(score * 100) / 100,
       completed_at: now,
       locked_until,
       attempt_number: cert.attempt_number + (passed ? 0 : 1),
     })
     .eq('id', cert.id)
+    .eq('status', 'in_progress')
+    .select('id')
+
+  if (updateError) {
+    return NextResponse.json({ error: 'Failed to record result' }, { status: 500 })
+  }
+  if (!claimed?.length) {
+    return NextResponse.json({ error: 'This certification was already submitted' }, { status: 409 })
+  }
 
   // If passed, mark driver as certified in driver_leagues
   if (passed) {
-    await supabase
+    const { error: certifyError } = await supabase
       .schema('pitboss')
       .from('driver_leagues')
       .update({ certified: true, certified_at: now })
       .eq('driver_id', cert.driver_id)
       .eq('league_id', cert.league_id)
+    if (certifyError) {
+      console.error('[verify] failed to mark driver certified', certifyError.message)
+    }
   }
 
   return NextResponse.json({

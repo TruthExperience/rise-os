@@ -146,6 +146,36 @@ export async function getAuthedDriver(): Promise<{
 }
 
 /**
+ * The Discord snowflake for an auth user, taken ONLY from a Discord identity
+ * (auth.identities). Identities are created by the auth server when someone
+ * completes OAuth with Discord, so they can't be forged.
+ *
+ * Never read the Discord id from user_metadata (provider_id / sub): users can
+ * edit their own user_metadata (auth.updateUser, or options.data at signUp),
+ * so an email account could claim any member's Discord id and be linked to
+ * that member's public.users row.
+ *
+ * Returns null for accounts with no Discord identity (e.g. email/password).
+ */
+export function getVerifiedDiscordId(
+  user:
+    | {
+        identities?: Array<{
+          provider: string
+          id?: string
+          identity_data?: Record<string, any> | null
+        }> | null
+      }
+    | null
+    | undefined
+): string | null {
+  const identity = user?.identities?.find((i) => i.provider === 'discord')
+  if (!identity) return null
+  const id = identity.identity_data?.provider_id ?? identity.identity_data?.sub ?? identity.id
+  return typeof id === 'string' && id.length > 0 ? id : null
+}
+
+/**
  * Links or creates the public.users row for an authenticated Supabase Auth
  * user, mirroring handle_new_auth_user()'s matching logic (discord_id ->
  * email -> create new) but callable from app code as a retry path. Uses
@@ -166,7 +196,11 @@ export async function healMissingProfileLink(authUserId: string): Promise<string
 
   const email = authUser.user.email;
   const meta = authUser.user.user_metadata ?? {};
-  const discordId: string | null = meta.provider_id ?? meta.sub ?? null;
+  // Discord id comes from a verified Discord identity, never from
+  // user_metadata (user-editable). See getVerifiedDiscordId.
+  const discordId: string | null = getVerifiedDiscordId(authUser.user);
+  // Only trust the email for linking once it has been confirmed.
+  const emailConfirmed = Boolean(authUser.user.email_confirmed_at);
   const username: string | null =
     meta.user_name ?? meta.full_name ?? meta.name ?? email.split("@")[0];
   const avatar: string | null = meta.avatar_url ?? null;
@@ -174,7 +208,7 @@ export async function healMissingProfileLink(authUserId: string): Promise<string
   // 1. Try to link an existing unlinked row by discord_id, then email —
   //    same precedence as handle_new_auth_user().
   const matchColumn = discordId ? "discord_id" : "email";
-  const matchValue = discordId ?? email;
+  const matchValue = discordId ?? (emailConfirmed ? email : null);
 
   if (matchValue) {
     const { data: existing } = await admin

@@ -1,24 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
+import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import { fetchParamRanges } from '@/lib/pitboss/setup-engine-data';
-import { resolveDriverIdFromSession } from '@/lib/pitboss/resolveDriver';
 
 export const dynamic = 'force-dynamic';
+
+const CONDITIONS = ['dry', 'wet', 'mixed'] as const;
+const SESSION_TYPES = ['race', 'qualifying', 'sprint', 'time_trial', 'practice'] as const;
+const MAX_NOTES_LENGTH = 1000;
 
 interface SubmissionRequestBody {
   league_id?: string | null;
   car_class_id: string;
   track_id: string;
-  conditions: 'dry' | 'wet' | 'mixed';
-  session_type: 'race' | 'qualifying' | 'sprint' | 'time_trial' | 'practice';
+  conditions: (typeof CONDITIONS)[number];
+  session_type: (typeof SESSION_TYPES)[number];
   setup_values: Record<string, number>;
   notes?: string | null;
-  discord_id?: string | null;
+  discord_id?: string | null; // ignored — identity comes from the signed-in driver
 }
 
 const DEFAULT_CONFIDENCE = 0.5;
 
 export async function POST(req: NextRequest) {
+  // submitted_by comes from the signed-in driver, never from the request body.
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   const supabaseAdmin = createAdminClient();
   let body: SubmissionRequestBody;
   try {
@@ -34,21 +44,43 @@ export async function POST(req: NextRequest) {
     session_type,
     setup_values,
     notes = null,
-    discord_id = null,
-  } = body;
+  } = body ?? ({} as SubmissionRequestBody);
   if (!car_class_id || !track_id || !conditions || !session_type || !setup_values) {
     return NextResponse.json(
       { error: 'car_class_id, track_id, conditions, session_type, and setup_values are required' },
       { status: 400 }
     );
   }
-  if (!discord_id) {
-    return NextResponse.json({ error: 'discord_id is required to attribute a submission' }, { status: 401 });
+  if (!CONDITIONS.includes(conditions)) {
+    return NextResponse.json({ error: `conditions must be one of: ${CONDITIONS.join(', ')}` }, { status: 400 });
   }
-  const driver_id = await resolveDriverIdFromSession(discord_id);
-  if (!driver_id) {
-    return NextResponse.json({ error: 'Could not resolve driver identity' }, { status: 401 });
+  if (!SESSION_TYPES.includes(session_type)) {
+    return NextResponse.json({ error: `session_type must be one of: ${SESSION_TYPES.join(', ')}` }, { status: 400 });
   }
+  if (typeof setup_values !== 'object' || Array.isArray(setup_values)) {
+    return NextResponse.json({ error: 'setup_values must be an object' }, { status: 400 });
+  }
+  if (notes !== null && (typeof notes !== 'string' || notes.length > MAX_NOTES_LENGTH)) {
+    return NextResponse.json(
+      { error: `notes must be a string of ${MAX_NOTES_LENGTH} characters or fewer` },
+      { status: 400 }
+    );
+  }
+
+  // A submission tagged with a league must come from a member of that league.
+  if (league_id) {
+    const { data: membership } = await supabaseAdmin
+      .schema('pitboss')
+      .from('driver_leagues')
+      .select('driver_id')
+      .eq('driver_id', driver.id)
+      .eq('league_id', league_id)
+      .maybeSingle();
+    if (!membership) {
+      return NextResponse.json({ error: 'You are not a member of this league' }, { status: 403 });
+    }
+  }
+
   let ranges;
   try {
     ranges = await fetchParamRanges(car_class_id, session_type);
@@ -109,7 +141,7 @@ export async function POST(req: NextRequest) {
       source_url: null,
       confidence: DEFAULT_CONFIDENCE,
       verified: false,
-      submitted_by: driver_id,
+      submitted_by: driver.id,
       notes,
     })
     .select('id, created_at')

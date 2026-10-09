@@ -1,22 +1,40 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
+import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import { pbSetupFeedback } from '@/lib/pitboss-llm';
 import { applyFeedbackAdjustments, type FeedbackAdjustment, type GeneratedRecommendation } from '@/lib/pitboss/setup-engine';
 import { fetchParamRanges, fetchOverrides } from '@/lib/pitboss/setup-engine-data';
 
 export const dynamic = 'force-dynamic';
 
+const MAX_FEEDBACK_LENGTH = 2000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 interface FeedbackRequestBody {
   feedback_text: string;
+  // driver_id / discord_id in the body are ignored. The driver is always the
+  // signed-in one (see getAuthedDriver below).
   driver_id?:    string;
+  discord_id?:   string;
 }
 
 export async function POST(
   req: NextRequest,
   { params }: { params: { recommendationId: string } }
 ) {
+  // Every call here costs an LLM request and writes new recommendation rows,
+  // so it needs a signed-in driver, and attribution comes from the session.
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   const supabaseAdmin = createAdminClient();
   const { recommendationId } = params;
+
+  if (!UUID_RE.test(recommendationId)) {
+    return NextResponse.json({ error: 'Invalid recommendation id' }, { status: 400 });
+  }
 
   let body: FeedbackRequestBody;
   try {
@@ -25,10 +43,16 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const { feedback_text, driver_id } = body;
+  const { feedback_text } = body ?? ({} as FeedbackRequestBody);
 
-  if (!feedback_text?.trim()) {
+  if (typeof feedback_text !== 'string' || !feedback_text.trim()) {
     return NextResponse.json({ error: 'feedback_text is required' }, { status: 400 });
+  }
+  if (feedback_text.length > MAX_FEEDBACK_LENGTH) {
+    return NextResponse.json(
+      { error: `feedback_text must be ${MAX_FEEDBACK_LENGTH} characters or fewer` },
+      { status: 400 }
+    );
   }
 
   // 1. Load the recommendation being reacted to
@@ -44,6 +68,13 @@ export async function POST(
       { error: `Recommendation not found: ${recErr?.message ?? recommendationId}` },
       { status: 404 }
     );
+  }
+
+  // Only the driver the recommendation was generated for can react to it.
+  // Recommendations generated while signed out have no driver_id; those stay
+  // open to any signed-in driver who holds the (unguessable) id.
+  if (rec.driver_id && rec.driver_id !== driver.id) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
   const generatedSetup = (rec.generated_setup ?? {}) as Record<string, number>;
@@ -102,7 +133,7 @@ export async function POST(
       .from('setup_feedback')
       .insert({
         recommendation_id: recommendationId,
-        driver_id:          driver_id ?? rec.driver_id ?? null,
+        driver_id:          driver.id,
         feedback_text,
         llm_adjustments:    [],
         llm_summary:        null,
@@ -131,7 +162,7 @@ export async function POST(
       .from('setup_feedback')
       .insert({
         recommendation_id: recommendationId,
-        driver_id:          driver_id ?? rec.driver_id ?? null,
+        driver_id:          driver.id,
         feedback_text,
         llm_adjustments:    [],
         llm_summary:        null,
@@ -167,7 +198,7 @@ export async function POST(
       .from('setup_feedback')
       .insert({
         recommendation_id: recommendationId,
-        driver_id:          driver_id ?? rec.driver_id ?? null,
+        driver_id:          driver.id,
         feedback_text,
         llm_adjustments:    [],
         llm_summary:        llmResult.summary,
@@ -213,7 +244,7 @@ export async function POST(
       track_id:                   rec.track_id,
       conditions:                 rec.conditions,
       session_type:               rec.session_type,
-      driver_id:                   driver_id ?? rec.driver_id ?? null,
+      driver_id:                   driver.id,
       generated_setup:             adjustedResult.generated_setup,
       rationale:                   adjustedResult.rationale,
       baseline_used:               adjustedResult.baseline_used,
@@ -239,7 +270,7 @@ export async function POST(
     .from('setup_feedback')
     .insert({
       recommendation_id:           recommendationId,
-      driver_id:                    driver_id ?? rec.driver_id ?? null,
+      driver_id:                    driver.id,
       feedback_text,
       llm_adjustments:              validated,
       llm_summary:                  llmResult.summary,
