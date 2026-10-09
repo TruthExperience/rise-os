@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 // NOTE: assumes these env vars exist server-side, matching what cert/steward/
 // setup-feedback routes already use to call pitboss-proxy. Rename below if
 // your actual var names differ.
-const PITBOSS_PROXY_URL = process.env.PITBOSS_PROXY_URL ?? 'https://pitboss-proxy.YOUR_SUBDOMAIN.workers.dev'
+const PITBOSS_PROXY_URL = process.env.PITBOSS_WORKER_URL || 'https://pitboss-proxy.truthexper.workers.dev'
 const PITBOSS_INTERNAL_KEY = process.env.PITBOSS_INTERNAL_KEY
 
 // Topic exclusion is EFRL Jury-exam-only, not a general league feature.
