@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { isPitbossLeagueAdmin } from '@/lib/pitboss/leagueAdminAccess'
+import { checkPersonnelFields } from '@/lib/pitboss/personnelValidation'
 
 export const dynamic = 'force-dynamic'
 
@@ -86,6 +87,11 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
   if (Object.keys(body).length === 0) {
     return NextResponse.json({ error: 'Nothing to update' }, { status: 400 })
+  }
+
+  const fieldError = checkPersonnelFields(body as Record<string, any>)
+  if (fieldError) {
+    return NextResponse.json({ error: fieldError }, { status: 400 })
   }
 
   const supabase = createAdminClient()
