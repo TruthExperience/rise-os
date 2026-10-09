@@ -144,6 +144,22 @@ function emptyLane(slot: 1 | 2): LaneState {
   }
 }
 
+// Track deep links. The page can be opened as:
+//   /pitboss/fm-setups?track=<slug>
+//   /pitboss/fm-setups/<slug>
+//   /api/pitboss/fm/setups/<slug>   (legacy location, kept as an alias)
+// Read straight from the URL (no useSearchParams) so the page doesn't need a
+// Suspense boundary just for this.
+function trackSlugFromUrl(): string | null {
+  if (typeof window === 'undefined') return null
+  const fromQuery = new URLSearchParams(window.location.search).get('track')
+  if (fromQuery) return fromQuery
+  const match = window.location.pathname.match(
+    /^\/(?:pitboss\/fm-setups|api\/pitboss\/fm\/setups)\/([^/]+)\/?$/
+  )
+  return match ? decodeURIComponent(match[1]) : null
+}
+
 export default function FmSetupsPage() {
   // Self-contained Supabase Auth check rather than next-auth/react's
   // useSession() (always empty — the app's real login flow at
@@ -207,6 +223,12 @@ export default function FmSetupsPage() {
       if (!res.ok) throw new Error(data.error ?? 'Failed to load setup data')
       setTracks(data.tracks ?? [])
       setParams(data.params ?? [])
+      // Preselect the track named in the URL, if it matches a known slug.
+      const wanted = trackSlugFromUrl()
+      if (wanted) {
+        const match = (data.tracks ?? []).find((t: Track) => t.slug === wanted)
+        if (match) setCircuitId(match.id)
+      }
     } catch (err: any) {
       setMetaError(err.message)
     } finally {

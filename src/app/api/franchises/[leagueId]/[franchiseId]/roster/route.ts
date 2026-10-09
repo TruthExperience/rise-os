@@ -1,25 +1,68 @@
-import { createClient } from "@supabase/supabase-js";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+
+export const dynamic = 'force-dynamic';
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
 
 export async function GET(
-  _req: Request,
+  req: NextRequest,
   { params }: { params: { leagueId: string; franchiseId: string } }
 ) {
-  const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { db: { schema: "rise_os" } }
-  );
-
-  const { data, error } = await supabaseAdmin
-    .from("players")
+  const supabase = getSupabase();
+  const { leagueId, franchiseId } = params;
+  if (!leagueId || !franchiseId) {
+    return NextResponse.json(
+      { error: 'leagueId and franchiseId are required' },
+      { status: 400 }
+    );
+  }
+  const { data, error } = await supabase
+    .schema('pitboss')
+    .from('driver_contracts')
     .select(
-      "id, name, position, status, ovr, jersey_number, class_year, dev_trait, seasons_played"
+      `
+      id,
+      contract_class,
+      status,
+      season_start,
+      season_end,
+      driver:drivers (
+        id,
+        discord_id,
+        display_name,
+        discord_username,
+        discord_avatar,
+        tier,
+        pp_total,
+        super_licence_status,
+        clean_race_streak,
+        era_endorsements
+      )
+      `
     )
-    .eq("franchise_id", params.franchiseId)
-    .eq("league_id", params.leagueId)
-    .order("ovr", { ascending: false, nullsFirst: false });
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data ?? []);
+    .eq('league_id', leagueId)
+    .eq('franchise_id', franchiseId)
+    .eq('status', 'active')
+    .order('contract_class', { ascending: true });
+  if (error) {
+    console.error('[pitboss roster] Supabase query error:', error.message);
+    return NextResponse.json({ error: 'Failed to load roster' }, { status: 500 });
+  }
+  const roster = (data ?? []).map((contract: any) => ({
+    contractId: contract.id,
+    contractClass: contract.contract_class,
+    seasonStart: contract.season_start,
+    seasonEnd: contract.season_end,
+    driver: contract.driver,
+  }));
+  return NextResponse.json(
+    { leagueId, franchiseId, count: roster.length, roster },
+    { headers: { 'Cache-Control': 'no-store, must-revalidate' } }
+  );
 }
