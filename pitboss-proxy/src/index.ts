@@ -126,11 +126,25 @@ const PAID_FALLBACK = [
 
 // ─── CORS helpers ────────────────────────────────────────────────────────────
 
+// No Access-Control-Allow-Origin: every caller is server-to-server (Vercel
+// routes, cron), so browsers have no reason to reach this Worker directly.
+// If a browser client is ever added, set an explicit origin here — never "*".
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, X-PitBoss-Key"
 };
+
+// Constant-time string compare. Both sides are hashed first so lengths
+// always match (timingSafeEqual throws on unequal lengths).
+async function safeEqual(a: string | null | undefined, b: string | null | undefined): Promise<boolean> {
+  if (!a || !b) return false;
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b))
+  ]);
+  return crypto.subtle.timingSafeEqual(ha, hb);
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -1156,7 +1170,7 @@ export default {
     }
 
     const key = request.headers.get("X-PitBoss-Key");
-    if (key !== env.PITBOSS_INTERNAL_KEY) {
+    if (!(await safeEqual(key, env.PITBOSS_INTERNAL_KEY))) {
       return jsonResponse({ error: "Unauthorized" }, 401);
     }
 
