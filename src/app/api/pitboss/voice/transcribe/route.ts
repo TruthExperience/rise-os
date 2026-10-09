@@ -7,12 +7,33 @@ const GROQ_TRANSCRIBE_URL = 'https://api.groq.com/openai/v1/audio/transcriptions
 // signed-in account can't push huge files through the Groq key.
 const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 
+// Best-effort per-user limit (in memory, so per server instance). Stops a loop
+// from one signed-in account running up the Groq bill; not a hard cap.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_CALLS = 15;
+const hits = new Map<string, number[]>();
+function rateLimited(key: string): boolean {
+  const now = Date.now();
+  const recent = (hits.get(key) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_MAX_CALLS) {
+    hits.set(key, recent);
+    return true;
+  }
+  recent.push(now);
+  hits.set(key, recent);
+  return false;
+}
+
 export async function POST(req: NextRequest) {
   // Require a signed-in user. Without this the route was open to anyone and
   // billed every request to GROQ_API_KEY.
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  if (rateLimited(session.user.userId)) {
+    return NextResponse.json({ error: 'Too many requests. Please wait a minute.' }, { status: 429 });
   }
 
   const apiKey = process.env.GROQ_API_KEY;
