@@ -141,3 +141,16 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Cloudflare Workers (pitboss-guardian, pitboss-proxy): local secrets and dev state
+.dev.vars
+.dev.vars.*
+.wrangler/
+
+# next-pwa generated service worker output (dest: "public" in next.config.js)
+public/sw.js
+public/sw.js.map
+public/workbox-*.js
+public/workbox-*.js.map
+public/swe-worker-*.js
+public/fallback-*.js
