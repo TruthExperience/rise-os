@@ -1,35 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 
-function getSupabase() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { db: { schema: 'pitboss' } }
-  )
-}
+export const dynamic = 'force-dynamic'
 
-export async function GET(req: NextRequest) {
-  const questionId = req.nextUrl.searchParams.get('question_id')
-  const answer = req.nextUrl.searchParams.get('answer')
-
-  if (!questionId || answer === null) {
-    return NextResponse.json({ error: 'question_id and answer required' }, { status: 400 })
+// This endpoint used to return whether any answer to any question was
+// correct, with no login. That let anyone work out the answer key one
+// guess at a time. Answers are now graded on the server when they are
+// saved (PATCH /api/exam-session/progress), so nothing here needs to
+// reveal correctness. It stays so the exam page's existing call doesn't
+// break. Remove it, and the call in exam/page.tsx, together.
+export async function GET() {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-
-  const supabase = getSupabase()
-
-  const { data: q, error } = await supabase
-    .from('questions')
-    .select('correct_answer')
-    .eq('id', questionId)
-    .single()
-
-  if (error || !q) {
-    return NextResponse.json({ error: 'Question not found' }, { status: 404 })
-  }
-
-  return NextResponse.json({
-    is_correct: q.correct_answer === answer,
-  })
+  return NextResponse.json({ is_correct: null })
 }

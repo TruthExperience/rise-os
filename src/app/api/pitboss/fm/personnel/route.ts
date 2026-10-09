@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+
+export const dynamic = 'force-dynamic'
 
 interface PersonnelCreateBody {
   full_name: string
@@ -50,6 +53,11 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   let body: PersonnelCreateBody
   try {
     body = await req.json()
@@ -57,6 +65,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
+  // discord_id in the body is ignored. created_by comes from the signed-in driver.
   const {
     full_name,
     team_name = null,
@@ -66,7 +75,6 @@ export async function POST(req: NextRequest) {
     league_id = null,
     attributes = {},
     notes = null,
-    discord_id = null,
   } = body
 
   if (!full_name || !position_category || !position) {
@@ -82,7 +90,28 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  // Custom entries belong to a league. A row with no league_id would show
+  // up in every league's list next to the game-canon rows.
+  if (!league_id) {
+    return NextResponse.json(
+      { error: 'league_id is required for custom entries' },
+      { status: 400 },
+    )
+  }
+
   const supabase = createAdminClient()
+
+  const { data: membership } = await supabase
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('driver_id')
+    .eq('driver_id', driver.id)
+    .eq('league_id', league_id)
+    .maybeSingle()
+
+  if (!membership) {
+    return NextResponse.json({ error: 'You are not a member of this league' }, { status: 403 })
+  }
 
   const { data, error } = await supabase
     .schema('pitboss')
@@ -98,7 +127,7 @@ export async function POST(req: NextRequest) {
       notes,
       source: 'custom', // this route only ever creates custom entries —
                          // game-canon rows are seeded via migration, not this API
-      created_by: discord_id,
+      created_by: driver.discordId ?? driver.id,
     })
     .select()
     .single()

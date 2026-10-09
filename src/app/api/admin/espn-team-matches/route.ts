@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getAuthedDriver } from "@/lib/getSupabaseUserId";
+import { isAuthorizedForCapAdmin } from "@/lib/pitboss/isAuthorizedForCapAdmin";
+
+export const dynamic = "force-dynamic";
 
 const ESPN_TEAMS_URL =
   "https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams";
@@ -37,8 +41,14 @@ function similarity(a: string, b: string) {
   return 0;
 }
 
-// GET: return suggested matches for unmatched franchises
+// GET: return suggested matches for unmatched franchises.
+// Signed-in drivers only.
 export async function GET() {
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
   const supabase = getSupabase();
   const [fbs, fcs] = await Promise.all([fetchEspnTeams(80), fetchEspnTeams(81)]);
   const espnTeams = [...fbs, ...fcs];
@@ -68,17 +78,60 @@ export async function GET() {
   return NextResponse.json({ count: suggestions.length, suggestions });
 }
 
-// POST: confirm matches -> [{ franchiseId, espnTeamId }]
+// POST: confirm matches -> [{ franchiseId, espnTeamId }].
+// Each franchise's league must be one the caller can cap-administer
+// (same gate as the luxury-tax and wallet admin routes).
 export async function POST(req: NextRequest) {
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  const matches: { franchiseId: string; espnTeamId: number }[] = Array.isArray(body?.matches)
+    ? body.matches
+    : [];
+
   const supabase = getSupabase();
-  const body = await req.json();
-  const matches: { franchiseId: string; espnTeamId: number }[] = body.matches ?? [];
+  const leagueOk = new Map<string, boolean>();
 
   const results = [];
   for (const m of matches) {
+    if (typeof m?.franchiseId !== "string" || !Number.isFinite(Number(m?.espnTeamId))) {
+      results.push({ franchiseId: m?.franchiseId, ok: false, error: "Invalid match" });
+      continue;
+    }
+
+    const { data: franchise } = await supabase
+      .from("franchises")
+      .select("league_id")
+      .eq("id", m.franchiseId)
+      .maybeSingle();
+
+    if (!franchise?.league_id) {
+      results.push({ franchiseId: m.franchiseId, ok: false, error: "Franchise not found" });
+      continue;
+    }
+
+    if (!leagueOk.has(franchise.league_id)) {
+      leagueOk.set(
+        franchise.league_id,
+        await isAuthorizedForCapAdmin(driver.id, franchise.league_id)
+      );
+    }
+    if (!leagueOk.get(franchise.league_id)) {
+      results.push({ franchiseId: m.franchiseId, ok: false, error: "Not authorized for this league" });
+      continue;
+    }
+
     const { error } = await supabase
       .from("franchises")
-      .update({ espn_team_id: m.espnTeamId })
+      .update({ espn_team_id: Number(m.espnTeamId) })
       .eq("id", m.franchiseId);
     results.push({ franchiseId: m.franchiseId, ok: !error, error: error?.message });
   }

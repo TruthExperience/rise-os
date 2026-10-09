@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+import { isPitbossLeagueAdmin } from '@/lib/pitboss/leagueAdminAccess'
+
+export const dynamic = 'force-dynamic'
 
 interface PersonnelUpdateBody {
   full_name?: string
@@ -11,36 +15,83 @@ interface PersonnelUpdateBody {
   is_active?: boolean
 }
 
+// Fields a caller may change through PATCH. source, league_id and
+// created_by are never editable.
+const PATCHABLE_FIELDS = [
+  'full_name',
+  'team_name',
+  'position',
+  'driver_number',
+  'attributes',
+  'notes',
+  'is_active',
+]
+
+// An entry can be changed by the driver who created it, or by a
+// commissioner, owner or co-owner of the entry's league.
+async function loadEditableEntry(supabase: any, id: string, driver: { id: string; discordId: string | null }) {
+  const { data: existing, error: fetchError } = await supabase
+    .schema('pitboss')
+    .from('fm_personnel')
+    .select('source, created_by, league_id')
+    .eq('id', id)
+    .single()
+
+  if (fetchError || !existing) {
+    return { error: NextResponse.json({ error: 'Entry not found' }, { status: 404 }) }
+  }
+
+  // Game-canon rows (source = 'game') are seeded via migration and locked
+  // from this route — only custom entries can be changed here.
+  if (existing.source !== 'custom') {
+    return {
+      error: NextResponse.json(
+        { error: 'Only custom entries can be changed through this route' },
+        { status: 403 },
+      ),
+    }
+  }
+
+  const isCreator = existing.created_by === (driver.discordId ?? driver.id)
+  const isLeagueAdmin = existing.league_id
+    ? await isPitbossLeagueAdmin(driver.id, existing.league_id)
+    : false
+
+  if (!isCreator && !isLeagueAdmin) {
+    return { error: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) }
+  }
+
+  return { existing }
+}
+
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   let body: PersonnelUpdateBody
   try {
     body = await req.json()
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return NextResponse.json({ error: 'Invalid body' }, { status: 400 })
+  }
+
+  const rejected = Object.keys(body).filter((k) => !PATCHABLE_FIELDS.includes(k))
+  if (rejected.length > 0) {
+    return NextResponse.json({ error: `Fields not editable: ${rejected.join(', ')}` }, { status: 400 })
+  }
+  if (Object.keys(body).length === 0) {
+    return NextResponse.json({ error: 'Nothing to update' }, { status: 400 })
+  }
 
   const supabase = createAdminClient()
 
-  // Game-canon rows (source = 'game') are seeded via migration and locked
-  // from this route — only custom entries can be edited here. Swap this
-  // check out for whatever role/permission helper the rest of pitboss uses
-  // if you want commissioners to be able to correct canon rows too.
-  const { data: existing, error: fetchError } = await supabase
-    .schema('pitboss')
-    .from('fm_personnel')
-    .select('source')
-    .eq('id', params.id)
-    .single()
-
-  if (fetchError) {
-    return NextResponse.json({ error: fetchError.message }, { status: 404 })
-  }
-  if (existing.source !== 'custom') {
-    return NextResponse.json(
-      { error: 'Only custom entries can be edited through this route' },
-      { status: 403 },
-    )
-  }
+  const loaded = await loadEditableEntry(supabase, params.id, driver)
+  if (loaded.error) return loaded.error
 
   const { data, error } = await supabase
     .schema('pitboss')
@@ -58,24 +109,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 }
 
 export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const supabase = createAdminClient()
 
-  const { data: existing, error: fetchError } = await supabase
-    .schema('pitboss')
-    .from('fm_personnel')
-    .select('source')
-    .eq('id', params.id)
-    .single()
-
-  if (fetchError) {
-    return NextResponse.json({ error: fetchError.message }, { status: 404 })
-  }
-  if (existing.source !== 'custom') {
-    return NextResponse.json(
-      { error: 'Only custom entries can be deleted through this route' },
-      { status: 403 },
-    )
-  }
+  const loaded = await loadEditableEntry(supabase, params.id, driver)
+  if (loaded.error) return loaded.error
 
   // Soft delete — keeps history/foreign-key references intact
   const { error } = await supabase
