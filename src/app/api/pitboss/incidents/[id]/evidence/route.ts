@@ -148,33 +148,8 @@ export async function POST(
   if (source !== 'upload' && source !== 'link') {
     return NextResponse.json({ error: "source must be 'upload' or 'link'" }, { status: 400 })
   }
-  if (typeof url !== 'string' || !url.trim()) {
+  if (!url?.trim()) {
     return NextResponse.json({ error: 'url is required' }, { status: 400 })
-  }
-  if (url.length > 2000) {
-    return NextResponse.json({ error: 'url is too long' }, { status: 400 })
-  }
-  if (label != null && (typeof label !== 'string' || label.length > 200)) {
-    return NextResponse.json({ error: 'label must be text under 200 characters' }, { status: 400 })
-  }
-
-  // 'link' entries must be real http(s) URLs (no javascript:/data: links that
-  // would run when someone clicks them). 'upload' entries are storage paths in
-  // the private bucket and the server signs them with the admin key, so the
-  // path MUST sit inside this incident's own folder. Without that, anyone
-  // could submit another incident's file path and be handed a signed link to it.
-  const cleanedUrl = url.trim()
-  if (source === 'link') {
-    try {
-      const parsed = new URL(cleanedUrl)
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('bad protocol')
-    } catch {
-      return NextResponse.json({ error: 'Evidence links must be http(s) URLs' }, { status: 400 })
-    }
-  } else {
-    if (!cleanedUrl.startsWith(`${params.id}/`) || cleanedUrl.includes('..')) {
-      return NextResponse.json({ error: 'Invalid upload path for this incident' }, { status: 400 })
-    }
   }
 
   const supabase = createAdminClient()
@@ -202,10 +177,8 @@ export async function POST(
   // Discord). A party can only add evidence tagged as themselves, and only
   // while the incident is still open — matches the existing defence-editing
   // rule of "no changes after resolved".
-  // A steward who is themselves the reporter or accused is treated as that
-  // party, not as a steward, so they can't add evidence for the other side.
   let addedByRole: 'reporter' | 'accused' | 'steward'
-  if (isSteward && !isReporter && !isAccused) {
+  if (isSteward) {
     addedByRole = 'steward'
   } else if (party === 'reporter' && isReporter) {
     addedByRole = 'reporter'
@@ -229,7 +202,7 @@ export async function POST(
       incident_id: params.id,
       party,
       source,
-      url: cleanedUrl,
+      url: url.trim(),
       label,
       added_by: requestingDriver.id,
       added_by_role: addedByRole,

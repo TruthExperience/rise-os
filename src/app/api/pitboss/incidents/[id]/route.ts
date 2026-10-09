@@ -5,27 +5,6 @@ import { pbSteward, pbInfer } from '@/lib/pitboss-llm'
 import type { RuleArticle } from '@/lib/pitboss-llm'
 import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
 
-
-const MAX_URLS = 10
-// Returns a cleaned string[] (or null when none), or 'invalid' if any entry is
-// not an http(s) URL — keeps javascript:/data: links out of the incident record.
-function cleanUrls(input: unknown): string[] | null | 'invalid' {
-  if (input == null) return null
-  if (!Array.isArray(input) || input.length > MAX_URLS) return 'invalid'
-  const out: string[] = []
-  for (const u of input) {
-    if (typeof u !== 'string' || u.length > 2000) return 'invalid'
-    try {
-      const p = new URL(u.trim())
-      if (p.protocol !== 'http:' && p.protocol !== 'https:') return 'invalid'
-      out.push(p.toString())
-    } catch {
-      return 'invalid'
-    }
-  }
-  return out.length ? out : null
-}
-
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -146,23 +125,11 @@ export async function PATCH(
     )
   }
 
-  let body: any
-  try {
-    body = await req.json()
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
-  }
-  const accused_response = typeof body?.accused_response === 'string' ? body.accused_response : ''
-  const accused_evidence_urls = cleanUrls(body?.accused_evidence_urls)
+  const body = await req.json()
+  const { accused_response, accused_evidence_urls } = body
 
-  if (!accused_response.trim()) {
+  if (!accused_response?.trim()) {
     return NextResponse.json({ error: 'Response cannot be empty' }, { status: 400 })
-  }
-  if (accused_response.length > 5000) {
-    return NextResponse.json({ error: 'Response is too long (max 5000 characters)' }, { status: 400 })
-  }
-  if (accused_evidence_urls === 'invalid') {
-    return NextResponse.json({ error: 'Evidence links must be http(s) URLs (max 10)' }, { status: 400 })
   }
 
   const { error: updateError } = await supabase
@@ -170,7 +137,7 @@ export async function PATCH(
     .from('incidents')
     .update({
       accused_response:      accused_response.trim(),
-      accused_evidence_urls: accused_evidence_urls,
+      accused_evidence_urls: accused_evidence_urls ?? null,
       accused_response_at:   new Date().toISOString(),
     })
     .eq('id', params.id)
@@ -199,13 +166,8 @@ export async function POST(
     return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
   }
 
-  let body: any
-  try {
-    body = await req.json()
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
-  }
-  const { action } = body ?? {}
+  const body = await req.json()
+  const { action } = body
 
   const { data: incident, error: incError } = await supabase
     .schema('pitboss')
@@ -233,32 +195,13 @@ export async function POST(
       override_reason = null,
     } = body
 
-    if (!verdict || typeof verdict !== 'string' || verdict.length > 50) {
+    if (!verdict) {
       return NextResponse.json({ error: 'verdict is required' }, { status: 400 })
-    }
-    if (typeof penalty_points !== 'number' || !Number.isFinite(penalty_points) || penalty_points < 0 || penalty_points > 1000) {
-      return NextResponse.json({ error: 'penalty_points must be a number between 0 and 1000' }, { status: 400 })
-    }
-    for (const [k, v] of [['penalty', penalty], ['steward_notes', steward_notes], ['override_reason', override_reason]] as const) {
-      if (v != null && (typeof v !== 'string' || v.length > 4000)) {
-        return NextResponse.json({ error: `${k} must be text under 4000 characters` }, { status: 400 })
-      }
-    }
-
-    // Conflict of interest: a steward can't rule on an incident filed against them.
-    if (incident.accused_driver_id === requestingDriver.id) {
-      return NextResponse.json(
-        { error: 'A steward cannot rule on an incident filed against them' },
-        { status: 403 }
-      )
     }
 
     const now = new Date().toISOString()
 
-    // Only an unresolved incident can be resolved here, and only one request
-    // wins. Before, a second resolve (double tap, retry) wrote a second
-    // penalty_ledger row. Overturning a ruling goes through the appeal flow.
-    const { data: resolvedRow, error: updateError } = await supabase
+    const { error: updateError } = await supabase
       .schema('pitboss')
       .from('incidents')
       .update({
@@ -272,17 +215,10 @@ export async function POST(
         resolved_at:     now,
       })
       .eq('id', params.id)
-      .neq('status', 'resolved')
-      .neq('status', 'appealed')
-      .select('id')
-      .maybeSingle()
 
     if (updateError) {
       console.error('[incidents/id POST] resolve update', updateError)
       return NextResponse.json({ error: updateError.message }, { status: 500 })
-    }
-    if (!resolvedRow) {
-      return NextResponse.json({ error: 'This incident has already been resolved' }, { status: 409 })
     }
 
     if (verdict === 'guilty' && penalty_points > 0 && incident.accused_driver_id) {
@@ -317,13 +253,6 @@ export async function POST(
 
   // ── Action: analyse ──────────────────────────────────────────────────────
   if (action === 'analyse') {
-    // Each analyse costs two LLM calls. Block repeat runs within 30s so a
-    // double tap or script can't spam them.
-    const lastRun = incident.ai_analysed_at ? new Date(incident.ai_analysed_at).getTime() : 0
-    if (Date.now() - lastRun < 30_000) {
-      return NextResponse.json({ error: 'Analysis was just run. Wait a moment and try again.' }, { status: 429 })
-    }
-
     const { data: articles } = await supabase
       .schema('pitboss')
       .from('rule_articles')
