@@ -1,5 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+import { getLeagueAccess } from "@/lib/leagueAdmin";
+
+export const dynamic = "force-dynamic";
 
 // Lazy singletons — constructed on first use inside a handler, not at
 // module load. Avoids "supabaseUrl is required" during Next.js's
@@ -60,9 +63,24 @@ export async function GET(_req: Request, { params }: { params: { leagueId: strin
 }
 
 export async function POST(req: Request, { params }: { params: { leagueId: string } }) {
+  // Creating a franchise is a league-admin action.
+  const access = await getLeagueAccess(params.leagueId);
+  if (!access.userId) {
+    return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
+  }
+  if (!access.isAdmin) {
+    return NextResponse.json({ error: "Only league admins can create franchises" }, { status: 403 });
+  }
+
   const supabaseAdmin = getSupabaseAdmin();
-  const body = await req.json();
-  const { name, abbreviation, primary_color, secondary_color } = body;
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  const { name, abbreviation, primary_color, secondary_color } = body ?? {};
 
   if (!name || typeof name !== "string") {
     return NextResponse.json({ error: "name is required" }, { status: 400 });
