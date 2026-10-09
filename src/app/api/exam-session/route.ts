@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+
+export const dynamic = 'force-dynamic'
 
 function getSupabase() {
   return createClient(
@@ -9,13 +12,42 @@ function getSupabase() {
   )
 }
 
+// Loads the certification and confirms it belongs to the signed-in driver.
+// Same ownership rule as /api/pitboss/cert/submit.
+async function loadOwnCertification(supabase: any, certificationId: string, driverId: string) {
+  const { data: cert, error } = await supabase
+    .from('certifications')
+    .select('id, driver_id, league_id, role_code, status')
+    .eq('id', certificationId)
+    .maybeSingle()
+
+  if (error) {
+    return { error: NextResponse.json({ error: error.message }, { status: 500 }) }
+  }
+  if (!cert) {
+    return { error: NextResponse.json({ error: 'Certification not found' }, { status: 404 }) }
+  }
+  if (cert.driver_id !== driverId) {
+    return { error: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) }
+  }
+  return { cert }
+}
+
 export async function GET(req: NextRequest) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const certificationId = req.nextUrl.searchParams.get('certification_id')
   if (!certificationId) {
     return NextResponse.json({ error: 'certification_id required' }, { status: 400 })
   }
 
   const supabase = getSupabase()
+
+  const own = await loadOwnCertification(supabase, certificationId, driver.id)
+  if (own.error) return own.error
 
   const { data: session, error } = await supabase
     .from('exam_sessions')
@@ -45,23 +77,56 @@ export async function GET(req: NextRequest) {
   const questionMap = Object.fromEntries(questions!.map((q: any) => [q.id, q]))
   const orderedQuestions = session.question_ids.map((id: string) => questionMap[id]).filter(Boolean)
 
+  // Don't send per-answer correctness back to the exam taker mid-exam.
+  const answers = (session.answers ?? []).map((a: any) => ({
+    question_id: a.question_id,
+    selected_answer: a.selected_answer,
+  }))
+
   return NextResponse.json({
     session: {
       ...session,
+      answers,
       questions: orderedQuestions,
     },
   })
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json()
-  const { certification_id, driver_id, league_id, role_code } = body
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
 
-  if (!certification_id || !driver_id || !league_id || !role_code) {
-    return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+
+  // driver_id, league_id and role_code in the request body are ignored.
+  // They come from the signed-in driver and the certification row.
+  const certification_id = body?.certification_id
+  if (!certification_id || typeof certification_id !== 'string') {
+    return NextResponse.json({ error: 'certification_id required' }, { status: 400 })
   }
 
   const supabase = getSupabase()
+
+  const own = await loadOwnCertification(supabase, certification_id, driver.id)
+  if (own.error) return own.error
+  const cert = own.cert
+
+  if (cert.status === 'passed' || cert.status === 'failed') {
+    return NextResponse.json(
+      { error: `Certification is already ${cert.status}` },
+      { status: 409 }
+    )
+  }
+
+  const league_id = cert.league_id
+  const role_code = cert.role_code
 
   await supabase
     .from('exam_sessions')
@@ -104,7 +169,7 @@ export async function POST(req: NextRequest) {
     .from('exam_sessions')
     .insert({
       certification_id,
-      driver_id,
+      driver_id: driver.id,
       league_id,
       question_ids: questionIds,
       answers: [],
