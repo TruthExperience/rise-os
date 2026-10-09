@@ -11,6 +11,18 @@ function getSupabase() {
   )
 }
 
+
+// expires_at must be a real future-or-past ISO date or absent; reason is capped.
+function validPenaltyText(reason: unknown, expires_at: unknown): string | null {
+  if (typeof reason !== 'string' || !reason.trim() || reason.length > 1000) {
+    return 'reason must be text up to 1000 characters'
+  }
+  if (expires_at != null && (typeof expires_at !== 'string' || Number.isNaN(new Date(expires_at).getTime()))) {
+    return 'expires_at must be a valid date'
+  }
+  return null
+}
+
 // ── GET ───────────────────────────────────────────────────────────────────────
 // Read access: any authenticated league member can view penalties (matches the
 // existing "penalty_ledger: members can view" RLS intent). Stewards/commissioners
@@ -56,7 +68,7 @@ export async function GET(req: NextRequest) {
   if (driverIds.length > 0) {
     const { data: driverData } = await supabase
       .from('drivers')
-      .select('id, discord_username, display_name, discord_avatar, discord_id, pp_total, tier')
+      .select('id, discord_username, display_name, discord_avatar, pp_total, tier')
       .in('id', driverIds)
     drivers = driverData ?? []
   }
@@ -77,15 +89,24 @@ export async function GET(req: NextRequest) {
 // session — never trusted from the request body — so a penalty can't be
 // attributed to someone other than whoever is actually signed in.
 export async function POST(req: NextRequest) {
-  const body = await req.json()
-  const { driver_id, league_id, points, reason, expires_at } = body
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const { driver_id, league_id, points, reason, expires_at } = body ?? {}
 
   if (!driver_id || !league_id || !points || !reason) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
-  if (typeof points !== 'number' || points < 1 || points > 25) {
-    return NextResponse.json({ error: 'Points must be between 1 and 25' }, { status: 400 })
+  if (typeof points !== 'number' || !Number.isInteger(points) || points < 1 || points > 25) {
+    return NextResponse.json({ error: 'Points must be a whole number between 1 and 25' }, { status: 400 })
+  }
+  const textError = validPenaltyText(reason, expires_at)
+  if (textError) {
+    return NextResponse.json({ error: textError }, { status: 400 })
   }
 
   const session = await getSession()
@@ -100,6 +121,17 @@ export async function POST(req: NextRequest) {
   }
 
   const supabase = getSupabase()
+
+  // The penalised driver must belong to this league.
+  const { data: targetMember } = await supabase
+    .from('driver_leagues')
+    .select('driver_id')
+    .eq('driver_id', driver_id)
+    .eq('league_id', league_id)
+    .limit(1)
+  if (!targetMember?.length) {
+    return NextResponse.json({ error: 'That driver is not a member of this league' }, { status: 400 })
+  }
 
   const { data: penalty, error: penaltyErr } = await supabase
     .from('penalty_ledger')
@@ -120,18 +152,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: penaltyErr.message }, { status: 500 })
   }
 
+  // pp_total is maintained by the trg_penalty_ledger_pp_total trigger, which
+  // recalculates it from the ledger on every insert/update/delete. Adding the
+  // points here as well counted every manual penalty twice. Just read it back.
   const { data: driver } = await supabase
     .from('drivers')
     .select('pp_total')
     .eq('id', driver_id)
     .single()
-
-  const newTotal = (driver?.pp_total ?? 0) + points
-
-  await supabase
-    .from('drivers')
-    .update({ pp_total: newTotal })
-    .eq('id', driver_id)
+  const newTotal = driver?.pp_total ?? 0
 
   return NextResponse.json({ penalty, new_pp_total: newTotal })
 }
@@ -140,8 +169,13 @@ export async function POST(req: NextRequest) {
 // Write access: steward or above only, scoped to the penalty's own league —
 // removed_by is derived from the verified session, same as issued_by above.
 export async function DELETE(req: NextRequest) {
-  const body = await req.json()
-  const { penalty_id } = body
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const { penalty_id } = body ?? {}
 
   if (!penalty_id) {
     return NextResponse.json({ error: 'penalty_id required' }, { status: 400 })
@@ -180,23 +214,25 @@ export async function DELETE(req: NextRequest) {
 
   const now = new Date().toISOString()
 
-  await supabase
+  // Only the request that finds it still un-removed wins (double-click safe).
+  const { data: removedRow } = await supabase
     .from('penalty_ledger')
     .update({ removed_at: now, removed_by: removedBy })
     .eq('id', penalty_id)
+    .is('removed_at', null)
+    .select('id')
+    .maybeSingle()
+  if (!removedRow) {
+    return NextResponse.json({ error: 'Penalty already removed' }, { status: 409 })
+  }
 
+  // pp_total is recalculated by the ledger trigger; don't subtract again here.
   const { data: driver } = await supabase
     .from('drivers')
     .select('pp_total')
     .eq('id', penalty.driver_id)
     .single()
-
-  const newTotal = Math.max(0, (driver?.pp_total ?? 0) - penalty.points)
-
-  await supabase
-    .from('drivers')
-    .update({ pp_total: newTotal })
-    .eq('id', penalty.driver_id)
+  const newTotal = driver?.pp_total ?? 0
 
   return NextResponse.json({ ok: true, new_pp_total: newTotal })
 }
