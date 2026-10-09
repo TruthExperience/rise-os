@@ -22,6 +22,7 @@ interface SubmitSetupFormProps {
   conditions: 'dry' | 'wet' | 'mixed'
   sessionType: 'race' | 'qualifying' | 'sprint' | 'time_trial' | 'practice'
   leagueId?: string | null
+  /** @deprecated No longer used. The server identifies the driver from the session. */
   discordId?: string | null
 }
 
@@ -35,7 +36,7 @@ const GROUP_LABELS: Record<string, string> = {
   tyres: 'Tyres',
 }
 
-export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, leagueId = null, discordId }: SubmitSetupFormProps) {
+export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, leagueId = null }: SubmitSetupFormProps) {
   const [expanded, setExpanded] = useState(false)
   const [params, setParams] = useState<ParamRange[]>([])
   const [loadingParams, setLoadingParams] = useState(false)
@@ -97,10 +98,6 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
   }
 
   async function handleSubmit() {
-    if (!discordId) {
-      setError('You need to be signed in to submit a setup.')
-      return
-    }
     setSubmitting(true)
     setError('')
     setSuccess(false)
@@ -116,7 +113,6 @@ export function SubmitSetupForm({ carClassId, trackId, conditions, sessionType, 
           session_type: sessionType,
           setup_values: values,
           notes: notes.trim() || null,
-          discord_id: discordId,
         }),
       })
       const data = await res.json()
