@@ -1,7 +1,10 @@
-// src/app/api/pitboss/exam-session/progress/route.ts
+// src/app/api/exam-session/progress/route.ts
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+
+export const dynamic = 'force-dynamic'
 
 function getSupabase() {
   return createClient(
@@ -11,11 +14,34 @@ function getSupabase() {
   )
 }
 
-export async function PATCH(req: NextRequest) {
-  const body = await req.json()
-  const { session_id, question_id, selected_answer, is_correct } = body
+// Looks up the question's correct answer on the server. Correctness is
+// never taken from the request.
+async function lookupCorrectAnswers(supabase: any, questionIds: string[]) {
+  const { data } = await supabase
+    .from('questions')
+    .select('id, correct_answer')
+    .in('id', questionIds)
+  const map: Record<string, string> = {}
+  for (const q of data ?? []) map[q.id] = q.correct_answer
+  return map
+}
 
-  if (!session_id || !question_id || selected_answer === undefined) {
+export async function PATCH(req: NextRequest) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  // is_correct and next_index in the body are ignored on purpose.
+  const { session_id, question_id, selected_answer } = body ?? {}
+
+  if (!session_id || !question_id || typeof selected_answer !== 'string') {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
@@ -23,12 +49,16 @@ export async function PATCH(req: NextRequest) {
 
   const { data: session, error: fetchErr } = await supabase
     .from('exam_sessions')
-    .select('answers, question_ids, status, expires_at, current_index')
+    .select('driver_id, answers, question_ids, status, expires_at, current_index')
     .eq('id', session_id)
     .single()
 
   if (fetchErr || !session) {
     return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+  }
+
+  if (session.driver_id !== driver.id) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
   if (session.status !== 'active') {
@@ -41,6 +71,10 @@ export async function PATCH(req: NextRequest) {
       .update({ status: 'expired' })
       .eq('id', session_id)
     return NextResponse.json({ error: 'Session expired' }, { status: 410 })
+  }
+
+  if (!session.question_ids.includes(question_id)) {
+    return NextResponse.json({ error: 'Question is not part of this exam' }, { status: 400 })
   }
 
   // Idempotency guard: if this question was already answered (e.g. client retry
@@ -56,6 +90,9 @@ export async function PATCH(req: NextRequest) {
       duplicate: true,
     })
   }
+
+  const correctMap = await lookupCorrectAnswers(supabase, [question_id])
+  const is_correct = correctMap[question_id] === selected_answer
 
   const updatedAnswers = [
     ...session.answers,
@@ -87,8 +124,18 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
-  const body = await req.json()
-  const { session_id } = body
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const { session_id } = body ?? {}
 
   if (!session_id) {
     return NextResponse.json({ error: 'session_id required' }, { status: 400 })
@@ -106,18 +153,41 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: 'Session not found' }, { status: 404 })
   }
 
-  const correct = session.answers.filter((a: any) => a.is_correct).length
-  const total = session.question_ids.length
-  const score = total > 0 ? Math.round((correct / total) * 100) : 0
+  if (session.driver_id !== driver.id) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  if (session.status !== 'active' && session.status !== 'completed') {
+    return NextResponse.json({ error: `Session is ${session.status}` }, { status: 409 })
+  }
 
   const { data: cert } = await supabase
     .from('certifications')
-    .select('pass_mark')
+    .select('pass_mark, status')
     .eq('id', session.certification_id)
     .single()
 
+  // Grade from the stored answers, checked against the question bank
+  // here. Any is_correct value saved earlier is not used.
+  const correctMap = await lookupCorrectAnswers(supabase, session.question_ids)
+  const correct = (session.answers ?? []).filter(
+    (a: any) =>
+      session.question_ids.includes(a.question_id) &&
+      correctMap[a.question_id] !== undefined &&
+      correctMap[a.question_id] === a.selected_answer
+  ).length
+  const total = session.question_ids.length
+  const score = total > 0 ? Math.round((correct / total) * 100) : 0
+
   const passMark = cert?.pass_mark ?? 95
   const passed = score >= passMark
+
+  // A retry after the exam was already graded returns the same result
+  // without writing anything again.
+  if (session.status === 'completed') {
+    return NextResponse.json({ ok: true, score, passed, correct, total })
+  }
+
   const now = new Date().toISOString()
 
   await supabase
