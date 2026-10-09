@@ -34,7 +34,8 @@ const GAME_VERSION = "CFB27";
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  // An unset CRON_SECRET must not turn this into the string "Bearer undefined".
+  if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response("Unauthorized", { status: 401 });
   }
 
