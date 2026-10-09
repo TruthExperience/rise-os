@@ -30,6 +30,33 @@ async function resolveDriverAndCheckSteward(discordId: string, leagueId: string)
   return { supabase, driver, licence }
 }
 
+
+const NUMERIC_FIELDS = [
+  'round', 'qualifying_position', 'finish_position', 'points_earned', 'penalty_points_added',
+  'sprint_qualifying_position', 'sprint_finish_position', 'sprint_points_earned',
+]
+
+// Returns an error message, or null when the row is acceptable. `partial` is
+// true for edits, where driver_id/season/round need not be present.
+function checkResultRow(r: any, partial = false): string | null {
+  if (!r || typeof r !== 'object') return 'Each row must be an object'
+  if (!partial) {
+    if (typeof r.driver_id !== 'string' || !r.driver_id) return 'Each row needs a driver_id'
+    if (r.season == null || r.season === '') return 'Each row needs a season'
+    if (r.round == null || !Number.isInteger(Number(r.round))) return 'Each row needs a whole-number round'
+  }
+  for (const f of NUMERIC_FIELDS) {
+    const v = r[f]
+    if (v != null && (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1000)) {
+      return `${f} must be a number between 0 and 1000`
+    }
+  }
+  for (const f of ['dnf_reason', 'track']) {
+    if (r[f] != null && (typeof r[f] !== 'string' || r[f].length > 200)) return `${f} must be text under 200 characters`
+  }
+  return null
+}
+
 // GET — results for a league, filterable by season/round
 export async function GET(req: NextRequest) {
   const session = await getSession()
@@ -43,6 +70,9 @@ export async function GET(req: NextRequest) {
 
   if (!leagueId) {
     return NextResponse.json({ error: 'league_id required' }, { status: 400 })
+  }
+  if (round != null && !Number.isInteger(Number(round))) {
+    return NextResponse.json({ error: 'round must be a whole number' }, { status: 400 })
   }
 
   const supabase = createAdminClient()
@@ -111,11 +141,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
-  const body = await req.json()
-  const { league_id, rows } = body
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const { league_id, rows } = body ?? {}
 
   if (!league_id || !Array.isArray(rows) || rows.length === 0) {
     return NextResponse.json({ error: 'league_id and rows[] required' }, { status: 400 })
+  }
+  if (rows.length > 100) {
+    return NextResponse.json({ error: 'At most 100 rows per request' }, { status: 400 })
+  }
+  const rowError = rows.map(checkResultRow).find(Boolean)
+  if (rowError) {
+    return NextResponse.json({ error: rowError }, { status: 400 })
   }
 
   const { supabase, driver, licence } = await resolveDriverAndCheckSteward(
@@ -125,6 +167,20 @@ export async function POST(req: NextRequest) {
 
   if (!driver) return NextResponse.json({ error: 'Driver not found' }, { status: 403 })
   if (!licence) return NextResponse.json({ error: 'Steward access required' }, { status: 403 })
+
+  // Every driver in the batch must belong to this league.
+  const rowDriverIds = [...new Set(rows.map((r: any) => r.driver_id))] as string[]
+  const { data: leagueMembers } = await supabase
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('driver_id')
+    .eq('league_id', league_id)
+    .in('driver_id', rowDriverIds)
+  const memberSet = new Set((leagueMembers ?? []).map((m: any) => m.driver_id))
+  const outsider = rowDriverIds.find((id) => !memberSet.has(id))
+  if (outsider) {
+    return NextResponse.json({ error: `Driver ${outsider} is not a member of this league` }, { status: 400 })
+  }
 
   const inserts = rows.map((r: any) => ({
     league_id,
@@ -173,8 +229,13 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
-  const body = await req.json()
-  const { result_id, league_id, ...updates } = body
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const { result_id, league_id, ...updates } = body ?? {}
 
   if (!result_id || !league_id) {
     return NextResponse.json({ error: 'result_id and league_id required' }, { status: 400 })
@@ -197,6 +258,14 @@ export async function PUT(req: NextRequest) {
   const patch = Object.fromEntries(
     Object.entries(updates).filter(([k]) => allowed.includes(k))
   )
+
+  if (Object.keys(patch).length === 0) {
+    return NextResponse.json({ error: 'No editable fields supplied' }, { status: 400 })
+  }
+  const patchError = checkResultRow(patch, true)
+  if (patchError) {
+    return NextResponse.json({ error: patchError }, { status: 400 })
+  }
 
   const { data, error } = await supabase
     .schema('pitboss')
