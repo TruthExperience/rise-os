@@ -52,18 +52,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { certification_id, answers } = body
-  if (!certification_id || !answers || typeof answers !== 'object') {
+  const { certification_id, answers } = body ?? ({} as typeof body)
+  if (
+    !certification_id ||
+    typeof certification_id !== 'string' ||
+    !answers ||
+    typeof answers !== 'object' ||
+    Array.isArray(answers)
+  ) {
     return NextResponse.json(
       { error: 'certification_id and answers are required' },
       { status: 400 }
     )
   }
+  if (Object.keys(answers).length > 200) {
+    return NextResponse.json({ error: 'Too many answers' }, { status: 400 })
+  }
 
   const { data: cert, error: certError } = await supabase
     .schema('pitboss')
     .from('certifications')
-    .select('id, driver_id, league_id, role_code, status, started_at, pass_mark, attempt_number')
+    .select('id, driver_id, league_id, role_code, status, started_at, pass_mark, attempt_number, question_ids')
     .eq('id', certification_id)
     .maybeSingle()
 
@@ -93,11 +102,21 @@ export async function POST(req: NextRequest) {
   if (elapsed > CERT_WINDOW_MS) {
     const lockedUntil = new Date(now.getTime() + LOCKOUT_HOURS * 60 * 60 * 1000)
 
-    await supabase
+    // Claim atomically: only the request that still sees in_progress wins.
+    const { data: expiredClaim, error: expiredErr } = await supabase
       .schema('pitboss')
       .from('certifications')
       .update({ status: 'failed', score: 0, completed_at: now.toISOString(), locked_until: lockedUntil.toISOString() })
       .eq('id', certification_id)
+      .eq('status', 'in_progress')
+      .select('id')
+
+    if (expiredErr) {
+      return NextResponse.json({ error: 'Failed to record result' }, { status: 500 })
+    }
+    if (!expiredClaim?.length) {
+      return NextResponse.json({ error: 'Certification was already submitted' }, { status: 409 })
+    }
 
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
@@ -117,17 +136,27 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // Score only against the questions actually submitted (i.e. the ones the
-  // driver was shown), scoped to this cert's role+league so answer keys
-  // from another role/league can't be spoofed into the grading set.
-  const submittedIds = Object.keys(answers)
+  // Grade against the question set the server drew for this attempt
+  // (certifications.question_ids, written by cert/start), NOT the ids the
+  // client sends. Grading only the submitted ids let a driver answer one
+  // question correctly, skip the rest, and score 100%. Unanswered questions
+  // now count as wrong, and ids outside the drawn set are ignored.
+  const drawnIds: string[] = Array.isArray(cert.question_ids) ? cert.question_ids : []
+  if (drawnIds.length === 0) {
+    // Legacy attempt from before question_ids existed. cert/start tells the
+    // driver to begin a new attempt in this case; there is no trusted set to
+    // grade against, so don't fall back to the client's.
+    return NextResponse.json(
+      { error: 'This attempt predates grading support. Please start a new attempt.' },
+      { status: 410 }
+    )
+  }
+
   const { data: questions, error: questionsError } = await supabase
     .schema('pitboss')
     .from('questions')
     .select('id, correct_answer')
-    .in('id', submittedIds)
-    .eq('league_id', cert.league_id)
-    .eq('role_code', cert.role_code)
+    .in('id', drawnIds)
 
   if (questionsError || !questions) {
     console.error('[cert/submit] questions fetch', questionsError)
@@ -139,8 +168,8 @@ export async function POST(req: NextRequest) {
   const breakdown: Record<string, { correct: boolean; correct_answer: string }> = {}
 
   for (const q of questions) {
-    const submitted = answers[q.id] ?? null
-    const isCorrect = submitted === q.correct_answer
+    const submitted = typeof answers[q.id] === 'string' ? answers[q.id] : null
+    const isCorrect = submitted !== null && submitted === q.correct_answer
     if (isCorrect) correct++
     breakdown[q.id] = { correct: isCorrect, correct_answer: q.correct_answer }
   }
@@ -151,9 +180,19 @@ export async function POST(req: NextRequest) {
   if (passed) {
     const token = crypto.randomUUID()
 
-    await supabase.schema('pitboss').from('certifications')
+    // Claim atomically so a double-submit can't mint two tokens/licences.
+    const { data: passClaim, error: passErr } = await supabase.schema('pitboss').from('certifications')
       .update({ status: 'passed', score, completed_at: now.toISOString(), token })
       .eq('id', certification_id)
+      .eq('status', 'in_progress')
+      .select('id')
+
+    if (passErr) {
+      return NextResponse.json({ error: 'Failed to record result' }, { status: 500 })
+    }
+    if (!passClaim?.length) {
+      return NextResponse.json({ error: 'Certification was already submitted' }, { status: 409 })
+    }
 
     await supabase.schema('pitboss').from('driver_leagues')
       .update({ certified: true, certified_at: now.toISOString() })
@@ -254,9 +293,18 @@ export async function POST(req: NextRequest) {
   } else {
     const lockedUntil = new Date(now.getTime() + LOCKOUT_HOURS * 60 * 60 * 1000)
 
-    await supabase.schema('pitboss').from('certifications')
+    const { data: failClaim, error: failErr } = await supabase.schema('pitboss').from('certifications')
       .update({ status: 'failed', score, completed_at: now.toISOString(), locked_until: lockedUntil.toISOString() })
       .eq('id', certification_id)
+      .eq('status', 'in_progress')
+      .select('id')
+
+    if (failErr) {
+      return NextResponse.json({ error: 'Failed to record result' }, { status: 500 })
+    }
+    if (!failClaim?.length) {
+      return NextResponse.json({ error: 'Certification was already submitted' }, { status: 409 })
+    }
 
     await maybeTriggerRegen(supabase, cert.league_id, cert.role_code)
 
