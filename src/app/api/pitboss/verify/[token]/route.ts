@@ -173,16 +173,20 @@ export async function POST(
     const submitted = answers[q.id]
     const isCorrect = typeof submitted === 'string' && submitted === q.correct_answer
     if (isCorrect) correct++
-    return {
-      question_id: q.id,
-      correct: isCorrect,
-      correct_answer: q.correct_answer,
-      explanation: q.explanation,
-    }
+    return { question_id: q.id, isCorrect, correct_answer: q.correct_answer, explanation: q.explanation }
   })
 
   const score = (correct / questions.length) * 100
   const passed = score >= Number(cert.pass_mark)
+
+  // Only a passing attempt gets the answer key and explanations back. A failed
+  // attempt gets right/wrong per question, so it can't be used to learn the
+  // answers for the retake.
+  const clientBreakdown = breakdown.map((b) =>
+    passed
+      ? { question_id: b.question_id, correct: b.isCorrect, correct_answer: b.correct_answer, explanation: b.explanation }
+      : { question_id: b.question_id, correct: b.isCorrect }
+  )
   const now = new Date().toISOString()
 
   // Lock on failure: 24h per attempt, capped at 72h
@@ -234,7 +238,7 @@ export async function POST(
     pass_mark: cert.pass_mark,
     correct,
     total: questions.length,
-    breakdown,
+    breakdown: clientBreakdown,
     ...(passed ? {} : { locked_until, next_attempt: cert.attempt_number + 1 }),
   })
 }

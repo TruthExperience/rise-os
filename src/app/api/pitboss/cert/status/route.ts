@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { createAdminClient } from '@/lib/supabase/server'
+import { CERT_WINDOW_MS } from '@/lib/pitboss/certTiming'
 
 export const dynamic = 'force-dynamic'
 
-const CERT_WINDOW_MS = 60 * 60 * 1000
 
 function effectiveStatus(cert: any, now: Date): string {
   if (

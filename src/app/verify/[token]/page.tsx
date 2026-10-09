@@ -25,8 +25,8 @@ type CertMeta = {
 type BreakdownItem = {
   question_id: string
   correct: boolean
-  correct_answer: string
-  explanation: string | null
+  correct_answer?: string
+  explanation?: string | null
 }
 
 type SubmitResult = {
@@ -349,7 +349,7 @@ function ResultsScreen({
                           {yourKey} — {q.options[yourKey]}
                         </span>
                       </p>
-                      {!correct && item && (
+                      {!correct && item?.correct_answer && (
                         <p className="font-mono text-[10px] text-[#6B6B7A]">
                           Correct:{' '}
                           <span className="text-[#30D158]">

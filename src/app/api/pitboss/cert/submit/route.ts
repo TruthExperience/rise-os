@@ -3,8 +3,8 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { regenerateQuestionPool } from '@/lib/pitboss/question-pool-regen'
 import { syncCertScoreToSheet } from '@/lib/pitboss/sheets-sync'
+import { CERT_WINDOW_MS } from '@/lib/pitboss/certTiming'
 
-const CERT_WINDOW_MS = 60 * 60 * 1000
 const LOCKOUT_HOURS = 24
 const REGEN_EVERY_N = 4
 
@@ -326,7 +326,12 @@ export async function POST(req: NextRequest) {
       total,
       missed_by: Math.round((Number(cert.pass_mark) - score) * 100) / 100,
       locked_until: lockedUntil.toISOString(),
-      breakdown,
+      // Failed attempt: report only right/wrong per question. Sending
+      // correct_answer here would let a driver read the answer key and pass
+      // the retake once the lockout ends.
+      breakdown: Object.fromEntries(
+        Object.entries(breakdown).map(([id, b]) => [id, { correct: b.correct }])
+      ),
     })
   }
 }

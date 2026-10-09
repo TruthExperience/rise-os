@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useRouter, useParams } from 'next/navigation'
+import { EXAM_TIME_LIMIT_SECONDS } from '@/lib/pitboss/certTiming'
 
 interface Question {
   id: string
@@ -21,7 +22,7 @@ interface CertSession {
   questions: Question[]
 }
 
-const TIME_LIMIT_SECONDS = 45 * 60 // 45 minutes
+const TIME_LIMIT_SECONDS = EXAM_TIME_LIMIT_SECONDS
 
 export default function CertExamPage() {
   const router                        = useRouter()
