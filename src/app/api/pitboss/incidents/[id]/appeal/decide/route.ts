@@ -1,7 +1,87 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
-import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
+
+const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
+const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward', 'bsac_chief']
+
+async function getRequestingDriver(supabase: any, session: any) {
+  const user = session.user as any
+  const discordId: string | undefined = user.discordId ?? user.discord_id ?? user.id
+  const email: string | undefined = user.email ?? undefined
+
+  let driver = null
+
+  if (discordId) {
+    const { data } = await supabase
+      .schema('pitboss')
+      .from('drivers')
+      .select('id')
+      .eq('discord_id', discordId)
+      .maybeSingle()
+    driver = data
+  }
+
+  if (!driver && email) {
+    const { data } = await supabase
+      .schema('pitboss')
+      .from('drivers')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle()
+    driver = data
+  }
+
+  return driver
+}
+
+async function hasStewardAccess(
+  supabase: any,
+  driverId: string,
+  leagueId: string
+): Promise<boolean> {
+  const { data: licence } = await supabase
+    .schema('pitboss')
+    .from('licences')
+    .select('id')
+    .eq('driver_id', driverId)
+    .eq('league_id', leagueId)
+    .eq('status', 'active')
+    .in('role_code', STEWARD_ROLES)
+    .maybeSingle()
+
+  if (licence) return true
+
+  const { data: anyLicence } = await supabase
+    .schema('pitboss')
+    .from('licences')
+    .select('id')
+    .eq('driver_id', driverId)
+    .eq('status', 'active')
+    .in('role_code', STEWARD_ROLES)
+    .maybeSingle()
+
+  if (anyLicence) return true
+
+  const { data: memberships } = await supabase
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('role, league_id')
+    .eq('driver_id', driverId)
+
+  if (!memberships) return false
+
+  for (const m of memberships) {
+    const roles = (m.role as string)
+      .split(',')
+      .map((r: string) => r.trim().toLowerCase())
+    if (roles.some((r: string) => STEWARD_LEAGUE_ROLES.includes(r))) {
+      return true
+    }
+  }
+
+  return false
+}
 
 export async function POST(
   req: NextRequest,
@@ -49,7 +129,7 @@ export async function POST(
     return NextResponse.json({ error: 'No open appeal found for this incident' }, { status: 404 })
   }
 
-  const isSteward = await hasStewwardAccess(supabase, requestingDriver.id, incident.league_id)
+  const isSteward = await hasStewardAccess(supabase, requestingDriver.id, incident.league_id)
   if (!isSteward) {
     return NextResponse.json({ error: 'Forbidden — steward access required' }, { status: 403 })
   }
@@ -81,54 +161,14 @@ export async function POST(
     )
   }
 
-  let body: any
-  try {
-    body = await req.json()
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
-  }
-  const { action, new_verdict, new_penalty, new_penalty_points, review_notes = null } = body ?? {}
+  const body = await req.json()
+  const { action, new_verdict, new_penalty, new_penalty_points, review_notes = null } = body
 
   if (!['uphold', 'overturn', 'dismiss'].includes(action)) {
     return NextResponse.json({ error: 'action must be "uphold", "overturn", or "dismiss"' }, { status: 400 })
   }
-  if (
-    new_penalty_points != null &&
-    (typeof new_penalty_points !== 'number' || !Number.isFinite(new_penalty_points) || new_penalty_points < 0 || new_penalty_points > 1000)
-  ) {
-    return NextResponse.json({ error: 'new_penalty_points must be a number between 0 and 1000' }, { status: 400 })
-  }
-  if (typeof review_notes === 'string' && review_notes.length > 4000) {
-    return NextResponse.json({ error: 'review_notes is too long (max 4000 characters)' }, { status: 400 })
-  }
 
   const now = new Date().toISOString()
-
-  // Claim the appeal atomically. Only the request that finds it still open and
-  // not yet reviewed gets to decide it, so a double-click or two stewards at
-  // once can't both run an overturn (which would remove and re-issue the
-  // penalty twice). If a later step fails the claim is released so the appeal
-  // can be retried. (No new status value: incident_appeals_status_check only
-  // allows open / upheld / overturned / dismissed.)
-  const { data: claimed } = await supabase
-    .schema('pitboss')
-    .from('incident_appeals')
-    .update({ reviewed_by: requestingDriver.id, reviewed_at: now })
-    .eq('id', appeal.id)
-    .eq('status', 'open')
-    .is('reviewed_at', null)
-    .select('id')
-    .maybeSingle()
-
-  if (!claimed) {
-    return NextResponse.json({ error: 'This appeal is already being decided' }, { status: 409 })
-  }
-  const releaseClaim = async () => {
-    await supabase.schema('pitboss').from('incident_appeals')
-      .update({ reviewed_by: null, reviewed_at: null })
-      .eq('id', appeal.id)
-      .eq('status', 'open')
-  }
 
   if (action === 'uphold' || action === 'dismiss') {
     // Original verdict/penalty stand unchanged. Just close out the appeal
@@ -146,7 +186,6 @@ export async function POST(
 
     if (appealUpdateError) {
       console.error('[appeal/decide POST] uphold/dismiss', appealUpdateError)
-      await releaseClaim()
       return NextResponse.json({ error: appealUpdateError.message }, { status: 500 })
     }
 
@@ -158,7 +197,6 @@ export async function POST(
 
     if (incidentUpdateError) {
       console.error('[appeal/decide POST] incident status reset', incidentUpdateError)
-      await releaseClaim()
       return NextResponse.json({ error: incidentUpdateError.message }, { status: 500 })
     }
 
@@ -166,8 +204,7 @@ export async function POST(
   }
 
   // ── action === 'overturn' ────────────────────────────────────────────────
-  if (!new_verdict || typeof new_verdict !== 'string') {
-    await releaseClaim()
+  if (!new_verdict) {
     return NextResponse.json({ error: 'new_verdict is required to overturn' }, { status: 400 })
   }
 
@@ -184,7 +221,6 @@ export async function POST(
 
   if (removeOldLedgerError) {
     console.error('[appeal/decide POST] remove old ledger row', removeOldLedgerError)
-    await releaseClaim()
     return NextResponse.json({ error: removeOldLedgerError.message }, { status: 500 })
   }
 
@@ -206,7 +242,6 @@ export async function POST(
 
     if (newLedgerError) {
       console.error('[appeal/decide POST] new ledger row', newLedgerError)
-      await releaseClaim()
       return NextResponse.json({ error: newLedgerError.message }, { status: 500 })
     }
   }
@@ -224,7 +259,6 @@ export async function POST(
 
   if (incidentUpdateError) {
     console.error('[appeal/decide POST] incident overturn update', incidentUpdateError)
-    await releaseClaim()
     return NextResponse.json({ error: incidentUpdateError.message }, { status: 500 })
   }
 
