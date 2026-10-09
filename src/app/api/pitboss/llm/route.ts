@@ -25,25 +25,116 @@ function hasValidInternalKey(req: NextRequest): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+// Best-effort per-user limit (in memory, so it is per server instance, not
+// global). It stops a tight loop from one signed-in user; it is not a hard cap.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_CALLS = 20;
+const rateHits = new Map<string, number[]>();
+
+function rateLimited(userKey: string): boolean {
+  const now = Date.now();
+  const hits = (rateHits.get(userKey) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (hits.length >= RATE_MAX_CALLS) {
+    rateHits.set(userKey, hits);
+    return true;
+  }
+  hits.push(now);
+  rateHits.set(userKey, hits);
+  if (rateHits.size > 5000) {
+    for (const [k, v] of rateHits) {
+      if (v.every((t) => now - t >= RATE_WINDOW_MS)) rateHits.delete(k);
+    }
+  }
+  return false;
+}
+
+// Actions a signed-in browser user may call. certgen and steward are
+// server-to-server only (Discord steward command, rulebook tooling) and need
+// the internal key; no page calls them directly.
+const USER_ACTIONS = new Set(['infer', 'reg_qa', 'comparison_bias']);
+const USER_MODES = new Set(['fast', 'primary', 'quick', 'vision']);
+const MAX_USER_TOKENS = 1024;
+const MAX_TEXT = 8000;
+
 export async function POST(req: NextRequest) {
-  if (!hasValidInternalKey(req)) {
+  const internal = hasValidInternalKey(req);
+  let userKey: string | null = null;
+  if (!internal) {
     const session = await getSession();
     if (!session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    userKey = session.user.userId;
+    if (rateLimited(userKey)) {
+      return NextResponse.json({ error: 'Too many requests. Please wait a minute.' }, { status: 429 });
+    }
+  }
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
   try {
     const supabase = getSupabase();
-    const body = await req.json();
-    const { action, ...payload } = body;
+    const { action, ...payload } = body ?? {};
 
     if (!action) {
       return NextResponse.json({ error: 'action required' }, { status: 400 });
     }
 
+    if (!internal && !USER_ACTIONS.has(action)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     if (action === 'infer') {
-      const result = await pbInfer(payload);
+      if (internal) {
+        const result = await pbInfer(payload);
+        return NextResponse.json(result);
+      }
+      // Signed-in users get a bounded pass-through: only these fields, an
+      // allowed model mode, a token ceiling, and capped text. Without this the
+      // route was an open general-purpose LLM proxy billed to the app.
+      const { prompt, system, messages, mode, max_tokens, temperature } = payload;
+      if (mode != null && !USER_MODES.has(mode)) {
+        return NextResponse.json({ error: 'mode not allowed' }, { status: 400 });
+      }
+      if (prompt != null && (typeof prompt !== 'string' || prompt.length > MAX_TEXT)) {
+        return NextResponse.json({ error: 'prompt too long' }, { status: 400 });
+      }
+      if (system != null && (typeof system !== 'string' || system.length > MAX_TEXT)) {
+        return NextResponse.json({ error: 'system too long' }, { status: 400 });
+      }
+      if (messages != null) {
+        if (!Array.isArray(messages) || messages.length > 30) {
+          return NextResponse.json({ error: 'messages must be an array of at most 30' }, { status: 400 });
+        }
+        let textChars = 0;
+        for (const m of messages) {
+          if (!m || (m.role !== 'user' && m.role !== 'assistant')) {
+            return NextResponse.json({ error: 'invalid message role' }, { status: 400 });
+          }
+          if (typeof m.content === 'string') textChars += m.content.length;
+          else if (Array.isArray(m.content)) {
+            for (const part of m.content) {
+              if (part?.type === 'text' && typeof part.text === 'string') textChars += part.text.length;
+            }
+          }
+        }
+        if (textChars > MAX_TEXT * 4) {
+          return NextResponse.json({ error: 'messages too long' }, { status: 400 });
+        }
+      }
+      const result = await pbInfer({
+        prompt,
+        system,
+        messages,
+        mode,
+        max_tokens: Math.min(Number.isFinite(Number(max_tokens)) ? Number(max_tokens) : MAX_USER_TOKENS, MAX_USER_TOKENS),
+        temperature: Number.isFinite(Number(temperature)) ? Math.min(Math.max(Number(temperature), 0), 1) : undefined,
+      });
       return NextResponse.json(result);
     }
 
@@ -92,8 +183,15 @@ export async function POST(req: NextRequest) {
     if (action === 'reg_qa') {
       const { question, league = 'AWC', league_id } = payload;
 
-      if (!question) {
+      if (!question || typeof question !== 'string') {
         return NextResponse.json({ error: 'question required' }, { status: 400 });
+      }
+      if (question.length > 1000) {
+        return NextResponse.json({ error: 'question too long (max 1000 characters)' }, { status: 400 });
+      }
+      // Without a league_id the lookup falls back to every league's rules.
+      if (!internal && !league_id) {
+        return NextResponse.json({ error: 'league_id required' }, { status: 400 });
       }
 
       let articlesQuery = supabase
@@ -200,6 +298,19 @@ Format: [{ "question": "...", "options": { "A": "...", "B": "...", "C": "...", "
       }
       if (!Array.isArray(known_param_keys) || known_param_keys.length === 0) {
         return NextResponse.json({ error: 'known_param_keys required' }, { status: 400 });
+      }
+      // known_param_keys is pasted into the system prompt, so keep it to plain
+      // identifiers, and cap the free-text fields.
+      if (
+        known_param_keys.length > 100 ||
+        !known_param_keys.every((k: unknown) => typeof k === 'string' && /^[A-Za-z0-9_]{1,60}$/.test(k))
+      ) {
+        return NextResponse.json({ error: 'known_param_keys must be up to 100 plain identifiers' }, { status: 400 });
+      }
+      for (const v of [comparison_drivers, car_feel_notes, notes, car_feel_preference]) {
+        if (v != null && (typeof v !== 'string' || v.length > 2000)) {
+          return NextResponse.json({ error: 'text fields must be strings under 2000 characters' }, { status: 400 });
+        }
       }
 
       // Translates a driver's freeform "I drive like X, defend like Y"
