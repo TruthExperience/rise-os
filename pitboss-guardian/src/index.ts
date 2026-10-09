@@ -155,6 +155,19 @@ function guardianDurableObjectId(env) {
   return env.GUARDIAN.idFromName(`guardian-singleton-${versionId.slice(0, 8)}`);
 }
 
+// Constant-time string compare. Both sides are hashed first so lengths
+// always match (timingSafeEqual throws on unequal lengths) and the
+// comparison time does not leak how much of the key was correct.
+async function safeEqual(a: string | null | undefined, b: string | null | undefined): Promise<boolean> {
+  if (!a || !b) return false;
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b))
+  ]);
+  return crypto.subtle.timingSafeEqual(ha, hb);
+}
+
 var src_default = {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -164,7 +177,7 @@ var src_default = {
     const guardedPaths = ["/start", "/status", "/lockdown", "/endlockdown", "/guilds", "/reload-config"];
     if (guardedPaths.includes(url.pathname)) {
       const provided = req.headers.get("X-Guardian-Key")?.trim();
-      if (provided !== env.DISCORD_BOT_TOKEN?.trim()) {
+      if (!(await safeEqual(provided, env.DISCORD_BOT_TOKEN?.trim()))) {
         return new Response("Unauthorized", { status: 401 });
       }
       return stub.fetch(req);
