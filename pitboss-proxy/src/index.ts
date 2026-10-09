@@ -24,11 +24,31 @@
 // which is why a countdown for a race >90 min away only ever moved on a
 // check-in button click (embed rebuild), never from the cron itself.
 
+// PATCH (2026-10-08): model refresh, checked against OpenRouter's live free
+// list as of 2026-10-06.
+//   - REMOVED (no longer listed, every call was a wasted 404 hop):
+//     minimax/minimax-m3:free, z-ai/glm-5.2:free
+//   - ADDED: google/gemma-4-31b-it:free (text+image, now also the third
+//     vision fallback), poolside/laguna-xs-2.1:free (coding), and
+//     nemotron-3-ultra now leads the general pool.
+//   - dots-3-note-preview:free is STILL listed past its stated 2026-09-30
+//     expiry, but it is a preview — kept first in vision, with two
+//     non-preview fallbacks behind it so its removal can't break vision.
+//   - Paid fallback: claude-sonnet-4-6 -> claude-sonnet-5-5.
+//   - thinkingmachines/inkling* stay excluded (agentic-harness-only 403).
+//   - Paid fallback to Anthropic now accepts image evidence (image_url parts
+//     converted to Anthropic image blocks) instead of being skipped.
+//   - GROQ tier added (GROQ_API_KEY): runs first, then OpenRouter free, then
+//     paid. Budgets retuned (groq 5s, free 10s, paid 6s) to stay under 25s.
+//   - AUTO-UPDATE: free waterfalls now reconcile each pool against
+//     OpenRouter's live free-model list (see "Live free-model check").
+
 interface Env {
   OPENROUTER_API_KEY: string;
   PITBOSS_INTERNAL_KEY: string;
   ANTHROPIC_KEY?: string;
   OPENAI_KEY?: string;
+  GROQ_API_KEY?: string;
   // Added for the checkin-countdown cron (scheduled handler only).
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
@@ -53,35 +73,41 @@ type InferError = { error: string; tried?: string[] };
 
 const MODELS = {
   general: [
-    "minimax/minimax-m3:free",
-    // multimodal, 1M context, strong general-purpose default
     "nvidia/nemotron-3-ultra-550b-a55b:free",
-    // frontier reasoning/orchestration fallback
+    // 1M context, frontier reasoning/orchestration, top free model by usage
+    "google/gemma-4-31b-it:free",
+    // multimodal, 262K context, solid general-purpose second choice
     "nvidia/nemotron-3.5-lightning:free"
     // last resort — fast but weaker
   ],
 
   reasoning: [
-    "z-ai/glm-5.2:free",
-    // large-scale reasoning model, high/xhigh reasoning effort supported
-    "nvidia/nemotron-3-super-120b-a12b:free"
+    "nvidia/nemotron-3-super-120b-a12b:free",
     // 120B hybrid MoE, strong on multi-step reasoning benchmarks
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    // larger, slower-to-first-token fallback
+    "google/gemma-4-31b-it:free"
+    // last resort
   ],
 
   coding: [
     "poolside/laguna-s-2.1:free",
-    // purpose-built coding agent model, 70.2% Terminal-Bench 2.1 — no
-    // reported failures in production logs, keeping as-is
-    "cohere/north-mini-code:free"
+    // purpose-built coding agent model, no reported production failures
+    "cohere/north-mini-code:free",
     // dedicated agentic coding model, JSON-schema tool use, low latency
+    "poolside/laguna-xs-2.1:free"
+    // smaller sibling of laguna-s, last resort
   ],
 
-  // Vision — dots-3-note-preview has a hard expiration_date of 2026-09-30.
-  // TODO: re-check before then, this model disappears.
+  // Vision — dots-3-note-preview is a preview model with a stated
+  // 2026-09-30 expiry that is still listed as of 2026-10-06. Keep the two
+  // non-preview models behind it.
   vision: [
     "dots-studio/dots-3-note-preview:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     // multimodal (text/image/video/audio), no known expiration
+    "google/gemma-4-31b-it:free"
+    // multimodal (text/image/video)
   ],
 
   fast: [
@@ -94,7 +120,7 @@ const MODELS = {
 // Each entry names its OWN provider's native API (not routed through
 // OpenRouter) and the env var holding that provider's key.
 const PAID_FALLBACK = [
-  { model: "anthropic/claude-sonnet-4-6", key: "ANTHROPIC_KEY" },
+  { model: "anthropic/claude-sonnet-5-5", key: "ANTHROPIC_KEY" },
   { model: "openai/gpt-4o-mini", key: "OPENAI_KEY" }
 ];
 
@@ -151,7 +177,8 @@ function poolForMode(mode: string, hasImage: boolean): string[] {
 // client-side timeout in pitboss-llm.ts.
 
 const PER_MODEL_TIMEOUT_MS = 10_000;
-const FREE_WATERFALL_BUDGET_MS = 12_000;
+const FREE_WATERFALL_BUDGET_MS = 10_000;
+const GROQ_BUDGET_MS = 5_000;
 const PAID_FALLBACK_BUDGET_MS = 6_000;
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
@@ -175,20 +202,64 @@ function hasImageContent(body: any): boolean {
   );
 }
 
+// Converts OpenAI-style chat messages (what the rest of this Worker speaks)
+// into Anthropic Messages API shape: system turns are lifted into the
+// top-level `system` field, and image_url parts become image blocks (URL
+// source for http(s) links, base64 source for data: URIs).
+function toAnthropicPayload(messages: any[]): { system?: string; messages: any[] } {
+  const systemParts: string[] = [];
+  const out: any[] = [];
+
+  for (const m of messages ?? []) {
+    if (m.role === "system") {
+      systemParts.push(
+        typeof m.content === "string"
+          ? m.content
+          : (m.content ?? []).map((p: any) => p.text ?? "").join("")
+      );
+      continue;
+    }
+
+    if (typeof m.content === "string") {
+      out.push({ role: m.role, content: m.content });
+      continue;
+    }
+
+    const parts: any[] = [];
+    for (const p of m.content ?? []) {
+      if (p.type === "text") {
+        parts.push({ type: "text", text: p.text ?? "" });
+      } else if (p.type === "image_url") {
+        const url: string = typeof p.image_url === "string" ? p.image_url : p.image_url?.url;
+        if (!url) continue;
+        const dataMatch = /^data:([^;]+);base64,(.+)$/s.exec(url);
+        parts.push(
+          dataMatch
+            ? { type: "image", source: { type: "base64", media_type: dataMatch[1], data: dataMatch[2] } }
+            : { type: "image", source: { type: "url", url } }
+        );
+      }
+    }
+    out.push({ role: m.role, content: parts });
+  }
+
+  return systemParts.length
+    ? { system: systemParts.join("\n\n"), messages: out }
+    : { messages: out };
+}
+
 // ─── Paid fallback ───────────────────────────────────────────────────────────
 // Tries each configured paid provider natively (not via OpenRouter) in
-// order, skipping any provider whose key isn't set in env, and skipping
-// Anthropic specifically when the request carries image content (that
-// path isn't wired up for multimodal here). Returns null if none succeed.
+// order, skipping any provider whose key isn't set in env. Anthropic gets
+// image content via toAnthropicPayload; gpt-4o-mini takes image_url parts
+// as-is. Returns null if none succeed.
 
 async function callPaidFallback(body: any, env: any): Promise<InferResult | null> {
   const deadline = Date.now() + PAID_FALLBACK_BUDGET_MS;
-  const skipAnthropic = hasImageContent(body);
 
   for (const { model, key } of PAID_FALLBACK) {
     const apiKey = env[key];
     if (!apiKey) continue;
-    if (skipAnthropic && model.startsWith("anthropic/")) continue;
 
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
@@ -206,7 +277,7 @@ async function callPaidFallback(body: any, env: any): Promise<InferResult | null
           body: JSON.stringify({
             model: model.replace("anthropic/", ""),
             max_tokens: body.max_tokens ?? 1024,
-            messages: body.messages
+            ...toAnthropicPayload(body.messages)
           })
         }, timeout);
 
@@ -247,11 +318,98 @@ async function callPaidFallback(body: any, env: any): Promise<InferResult | null
   return null;
 }
 
+// ─── Live free-model check ───────────────────────────────────────────────────
+// OpenRouter's free list churns weekly. Instead of hand-editing MODELS, each
+// free waterfall is first reconciled against OpenRouter's public model list
+// (no key needed), cached per isolate for an hour:
+//   1. Models in the pool that are no longer listed, no longer $0, or expire
+//      within 48h are dropped, so a dead model never costs a hop.
+//   2. If fewer than 2 survive, the pool is topped up with other live free
+//      text models (needs image input when the request has an image).
+// Fails open: if the list can't be fetched (or looks implausibly small), the
+// static pool is used exactly as written. The static MODELS stay the curated
+// preference order — this only removes and backfills, it never reorders.
+
+type LiveModel = { id: string; image: boolean; ctx: number };
+
+const LIVE_TTL_MS = 60 * 60 * 1000;
+const LIVE_FETCH_TIMEOUT_MS = 3_000;
+const EXPIRY_GUARD_MS = 48 * 60 * 60 * 1000;
+const MIN_LIVE_MODELS = 5; // sanity floor — fewer than this means a bad response
+const MIN_POOL_SIZE = 2;
+const MAX_BACKFILL = 2;
+// Never auto-pick these: agentic-harness-only, safety classifiers, audio,
+// routers/stealth (nondeterministic), embeddings.
+const BACKFILL_EXCLUDE = /inkling|content-safety|guard|lyria|tts|embed|^openrouter\/|^stealth\//i;
+
+let liveCache: { at: number; models: Map<string, LiveModel> } | null = null;
+
+async function getLiveFreeModels(): Promise<Map<string, LiveModel> | null> {
+  if (liveCache && Date.now() - liveCache.at < LIVE_TTL_MS) return liveCache.models;
+  try {
+    const res = await fetchWithTimeout(
+      "https://openrouter.ai/api/v1/models",
+      { headers: { "Accept": "application/json" } },
+      LIVE_FETCH_TIMEOUT_MS
+    );
+    if (!res.ok) return liveCache?.models ?? null;
+    const json: any = await res.json();
+    const out = new Map<string, LiveModel>();
+    for (const m of json?.data ?? []) {
+      if (!m?.id) continue;
+      const free = Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0;
+      if (!free) continue;
+      const outputs: string[] = m.architecture?.output_modalities ?? ["text"];
+      if (!outputs.includes("text")) continue;
+      if (m.expiration_date) {
+        const exp = Date.parse(m.expiration_date);
+        if (!Number.isNaN(exp) && exp - Date.now() < EXPIRY_GUARD_MS) continue;
+      }
+      const inputs: string[] = m.architecture?.input_modalities ?? ["text"];
+      out.set(m.id, {
+        id: m.id,
+        image: inputs.includes("image"),
+        ctx: Number(m.context_length) || 0
+      });
+    }
+    if (out.size < MIN_LIVE_MODELS) return liveCache?.models ?? null;
+    liveCache = { at: Date.now(), models: out };
+    return out;
+  } catch {
+    return liveCache?.models ?? null;
+  }
+}
+
+async function reconcilePool(pool: string[], needImage: boolean): Promise<string[]> {
+  const live = await getLiveFreeModels();
+  if (!live) return pool;
+
+  const kept = pool.filter((id) => live.has(id));
+  if (kept.length === 0 && pool.length > 0) {
+    // Nothing from the curated pool is live. Backfill below; if that also
+    // finds nothing, fall through to the original pool.
+  }
+
+  if (kept.length < MIN_POOL_SIZE) {
+    const extras = [...live.values()]
+      .filter((m) => !kept.includes(m.id))
+      .filter((m) => !BACKFILL_EXCLUDE.test(m.id))
+      .filter((m) => !needImage || m.image)
+      .sort((a, b) => b.ctx - a.ctx)
+      .slice(0, MAX_BACKFILL)
+      .map((m) => m.id);
+    kept.push(...extras);
+  }
+
+  return kept.length > 0 ? kept : pool;
+}
+
 // ─── Free waterfall ──────────────────────────────────────────────────────────
 
 async function freeWaterfall(pool: string[], body: any, env: any): Promise<InferResult | InferError> {
   const openrouterKey = env.OPENROUTER_API_KEY;
   const errors: string[] = [];
+  pool = await reconcilePool(pool, hasImageContent(body));
   const deadline = Date.now() + FREE_WATERFALL_BUDGET_MS;
 
   for (const model of pool) {
@@ -304,6 +462,113 @@ async function freeWaterfall(pool: string[], body: any, env: any): Promise<Infer
   return { error: "all_free_models_failed", tried: errors };
 }
 
+// ─── Groq tier ───────────────────────────────────────────────────────────────
+// Groq's free tier is fast (usually 1–2s) but rate-limited, so it runs first
+// and anything it can't serve (429, model gone, no key) falls through to the
+// OpenRouter free waterfall, then the paid fallback. Worst-case budget:
+// 3s live-list lookups (cached) + 5s Groq + 10s OpenRouter free + 6s paid,
+// under the 25s client timeout in pitboss-llm.ts.
+// Model IDs verified against console.groq.com/docs/models on 2026-10-08;
+// the list is also pruned against Groq's live /models endpoint (1h cache),
+// failing open if that lookup fails. llama-4-scout is a Groq "preview"
+// model, so qwen3.6-27b sits behind it for vision.
+
+const GROQ_MODELS: Record<string, string[]> = {
+  general:   ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
+  reasoning: ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+  coding:    ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
+  vision:    ["meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3.6-27b"],
+  fast:      ["llama-3.1-8b-instant", "openai/gpt-oss-20b"]
+};
+
+let groqLiveCache: { at: number; ids: Set<string> } | null = null;
+
+async function getLiveGroqIds(apiKey: string): Promise<Set<string> | null> {
+  if (groqLiveCache && Date.now() - groqLiveCache.at < LIVE_TTL_MS) return groqLiveCache.ids;
+  try {
+    const res = await fetchWithTimeout(
+      "https://api.groq.com/openai/v1/models",
+      { headers: { "Authorization": `Bearer ${apiKey}` } },
+      LIVE_FETCH_TIMEOUT_MS
+    );
+    if (!res.ok) return groqLiveCache?.ids ?? null;
+    const json: any = await res.json();
+    const ids = new Set<string>((json?.data ?? []).map((m: any) => m.id));
+    if (ids.size < 3) return groqLiveCache?.ids ?? null;
+    groqLiveCache = { at: Date.now(), ids };
+    return ids;
+  } catch {
+    return groqLiveCache?.ids ?? null;
+  }
+}
+
+// Maps an OpenRouter pool (by identity) to the matching Groq pool.
+function groqPoolFor(pool: string[], hasImage: boolean): string[] {
+  if (hasImage) return GROQ_MODELS.vision;
+  for (const key of Object.keys(MODELS) as (keyof typeof MODELS)[]) {
+    if (MODELS[key] === pool) return GROQ_MODELS[key];
+  }
+  return GROQ_MODELS.general;
+}
+
+async function groqWaterfall(pool: string[], body: any, env: any): Promise<InferResult | InferError> {
+  const apiKey = env.GROQ_API_KEY;
+  if (!apiKey) return { error: "groq_not_configured" };
+
+  const errors: string[] = [];
+  let models = groqPoolFor(pool, hasImageContent(body));
+  const live = await getLiveGroqIds(apiKey);
+  if (live) {
+    const pruned = models.filter((id) => live.has(id));
+    if (pruned.length > 0) models = pruned;
+  }
+
+  const deadline = Date.now() + GROQ_BUDGET_MS;
+  for (const model of models) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      errors.push(`groq ${model}: skipped, groq budget exhausted`);
+      break;
+    }
+    try {
+      const res = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({ ...body, model })
+      }, Math.min(PER_MODEL_TIMEOUT_MS, remaining));
+
+      if (!res.ok) {
+        const err = await res.text();
+        errors.push(`groq ${model}: ${res.status} ${err.slice(0, 100)}`);
+        continue;
+      }
+      const data: any = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+      if (!text) {
+        errors.push(`groq ${model}: empty response`);
+        continue;
+      }
+      return {
+        response: text,
+        model: data.model ?? model,
+        provider: "groq",
+        free: true,
+        usage: data.usage ?? null
+      };
+    } catch (err: any) {
+      errors.push(
+        err && err.name === "AbortError"
+          ? `groq ${model}: timed out`
+          : `groq ${model}: ${String(err)}`
+      );
+    }
+  }
+  return { error: "all_groq_models_failed", tried: errors };
+}
+
 // ─── Core inference with waterfall ───────────────────────────────────────────
 // Free models first, paid fallback only if every free model fails (unless
 // options.preferPaid is set, which flips the order).
@@ -314,20 +579,28 @@ async function inferWithWaterfall(
   env: any,
   options: { preferPaid?: boolean } = {}
 ): Promise<InferResult | InferError> {
-  if (options.preferPaid) {
-    if (hasPaidKeyConfigured(env)) {
-      const paidResult = await callPaidFallback(body, env);
-      if (paidResult) return paidResult;
-    }
-    return await freeWaterfall(pool, body, env);
+  const tried: string[] = [];
+  const note = (r: InferResult | InferError) => {
+    if ("error" in r) tried.push(...(r.tried ?? [r.error]));
+  };
+
+  // preferPaid: paid -> groq -> openrouter free.
+  // default:    groq -> openrouter free -> paid.
+  const tiers: Array<() => Promise<InferResult | InferError | null>> = [];
+  const paidTier = async () => (hasPaidKeyConfigured(env) ? await callPaidFallback(body, env) : null);
+  const groqTier = async () => (env.GROQ_API_KEY ? await groqWaterfall(pool, body, env) : null);
+  const freeTier = () => freeWaterfall(pool, body, env);
+
+  if (options.preferPaid) tiers.push(paidTier, groqTier, freeTier);
+  else tiers.push(groqTier, freeTier, paidTier);
+
+  for (const tier of tiers) {
+    const r = await tier();
+    if (!r) continue;
+    if (!("error" in r)) return r;
+    note(r);
   }
-  const freeResult = await freeWaterfall(pool, body, env);
-  if (!("error" in freeResult)) return freeResult;
-  if (hasPaidKeyConfigured(env)) {
-    const paidResult = await callPaidFallback(body, env);
-    if (paidResult) return paidResult;
-  }
-  return freeResult;
+  return { error: "all_free_models_failed", tried };
 }
 
 // ─── Image-description pass (used by /steward) ───────────────────────────────

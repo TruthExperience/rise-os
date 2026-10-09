@@ -140,6 +140,13 @@
 // so that fallback picks up the real reason instead. Doesn't fix whatever
 // throws; makes the next occurrence self-diagnosing.
 
+// PATCH (2026-10-09): provisionGuild()'s save to guardian_guild_config and
+// logEvent()'s insert into security_events ignored non-2xx responses, so a
+// rejected write (wrong/missing service-role key, RLS, missing column)
+// was completely silent — the Guardian ran from in-memory config while the
+// database never got the guild's row. Both now log status + body on
+// failure, and /status reports lastPersist (guild, ok, status, body, time).
+
 var CONFIG_REFRESH_INTERVAL_MS = 30_000;
 var VERSION_WATCHDOG_INTERVAL_MS = 30_000;
 
@@ -240,6 +247,8 @@ var GuildGuardian = class {
   resumeGatewayUrl = null;
   heartbeatAckReceived = true;
   consecutiveAuthFailures = 0;
+  // Result of the most recent guardian_guild_config save (see PATCH 2026-10-09).
+  lastPersist = null;
 
   // This instance's own deploy version, used for the self-retirement
   // check below. Stable for the lifetime of this isolate.
@@ -302,6 +311,7 @@ var GuildGuardian = class {
           guildsProvisioned: this.guildConfigs.size,
           consecutiveAuthFailures: this.consecutiveAuthFailures,
           configLastLoadedAt: this.configsLoadedAt ? new Date(this.configsLoadedAt).toISOString() : null,
+          lastPersist: this.lastPersist,
           tokenDiagnostic: {
             length: token.length,
             startsWithBotPrefix: token.startsWith("Bot "),
@@ -552,7 +562,7 @@ var GuildGuardian = class {
     };
     this.guildConfigs.set(guild.id, config);
 
-    await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_guild_config`, {
+    const persistRes = await fetch(`${this.env.SUPABASE_URL}/rest/v1/guardian_guild_config`, {
       method: "POST",
       headers: {
         apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -571,7 +581,24 @@ var GuildGuardian = class {
         alerts_channel_auto_created: !existingAlertsChannel,
         updated_at: new Date().toISOString()
       })
-    }).catch((err) => console.error("[guardian] failed to persist guild config:", err));
+    }).catch((err) => {
+      console.error("[guardian] failed to persist guild config:", err);
+      return null;
+    });
+
+    // PATCH (2026-10-09): a non-2xx here used to be silent (.catch only
+    // covers thrown network errors). Record and log the outcome so a
+    // rejected save (bad key, RLS, missing column) is visible, and expose
+    // it on /status as lastPersist.
+    if (!persistRes) {
+      this.lastPersist = { guildId: guild.id, ok: false, status: null, body: "network error", at: new Date().toISOString() };
+    } else if (!persistRes.ok) {
+      const body = (await persistRes.text()).slice(0, 300);
+      console.error(`[guardian] guild config save REJECTED for ${guild.id}:`, persistRes.status, body);
+      this.lastPersist = { guildId: guild.id, ok: false, status: persistRes.status, body, at: new Date().toISOString() };
+    } else {
+      this.lastPersist = { guildId: guild.id, ok: true, status: persistRes.status, body: null, at: new Date().toISOString() };
+    }
 
     console.log(
       `[guardian] provisioned guild ${guild.id} (${guild.name}) — steward role: ${stewardRoleId ?? "none found"}, alerts channel: ${alertsChannelId ?? "FAILED"}`
@@ -1197,7 +1224,7 @@ var GuildGuardian = class {
   }
 
   async logEvent(guildId, type, ctx) {
-    await fetch(`${this.env.SUPABASE_URL}/rest/v1/security_events`, {
+    const res = await fetch(`${this.env.SUPABASE_URL}/rest/v1/security_events`, {
       method: "POST",
       headers: {
         apikey: this.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -1216,6 +1243,7 @@ var GuildGuardian = class {
         detail: { actorIds: ctx.actorIds, ...ctx.detail }
       })
     });
+    if (!res.ok) console.error("[guardian] logEvent failed:", res.status, (await res.text()).slice(0, 300));
   }
 
   async recordBannedId(guildId, discordId, triggerType, reason) {
