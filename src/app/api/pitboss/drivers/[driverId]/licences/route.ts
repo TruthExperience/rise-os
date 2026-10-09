@@ -1,6 +1,10 @@
 // src/app/api/pitboss/drivers/[driverId]/licences/route.ts
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+import { isPitbossLeagueAdmin } from '@/lib/pitboss/leagueAdminAccess'
+
+export const dynamic = 'force-dynamic'
 
 // Lazy singleton — constructed on first use inside a handler, not at
 // module load. Avoids "supabaseUrl is required" during Next.js's
@@ -127,15 +131,35 @@ export async function GET(req: NextRequest, { params }: Params) {
 
 // POST — issue a new licence for this driver
 export async function POST(req: NextRequest, { params }: Params) {
+  const actor = await getAuthedDriver()
+  if (!actor) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const supabase = getSupabase()
   const { driverId } = params
-  const body = await req.json()
-  const { league_id, role_code, title, tier, era_endorsements, expires_at, photo_url } = body
+
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const { league_id, role_code, title, tier, era_endorsements, expires_at, photo_url } = body ?? {}
 
   if (!league_id || !role_code || !title) {
     return NextResponse.json(
       { error: 'league_id, role_code, and title are required' },
       { status: 400 }
+    )
+  }
+
+  // Only a commissioner, owner or co-owner of this league can issue its licences.
+  const canIssue = await isPitbossLeagueAdmin(actor.id, league_id)
+  if (!canIssue) {
+    return NextResponse.json(
+      { error: 'Only league commissioners and owners can issue licences' },
+      { status: 403 }
     )
   }
 
