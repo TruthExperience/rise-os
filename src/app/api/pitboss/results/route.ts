@@ -155,7 +155,7 @@ export async function POST(req: NextRequest) {
   if (rows.length > 100) {
     return NextResponse.json({ error: 'At most 100 rows per request' }, { status: 400 })
   }
-  const rowError = rows.map(checkResultRow).find(Boolean)
+  const rowError = rows.map((row: any) => checkResultRow(row)).find(Boolean)
   if (rowError) {
     return NextResponse.json({ error: rowError }, { status: 400 })
   }
