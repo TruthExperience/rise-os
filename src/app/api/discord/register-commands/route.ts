@@ -774,6 +774,14 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      name: "exam",
+      description: "Get the link to take a certification exam",
+    },
+    {
+      name: "cert",
+      description: "View your active certifications in this league",
+    },
+    {
       name: "appeal",
       description: "File or review an appeal on a resolved incident",
       options: [
