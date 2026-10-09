@@ -263,7 +263,15 @@ Generate the bias weight array now. Output JSON array only.`,
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // Same gate as POST: internal key or a signed-in session.
+  if (!hasValidInternalKey(req)) {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+  }
+
   try {
     const { pbHealth } = await import('@/lib/pitboss-llm');
     const health = await pbHealth();

@@ -295,7 +295,10 @@ async function callPaidFallback(body: any, env: any): Promise<InferResult | null
           })
         }, timeout);
 
-        if (!res.ok) continue;
+        if (!res.ok) {
+          console.error(`[paid-fallback] ${model} failed:`, res.status, (await res.text()).slice(0, 200));
+          continue;
+        }
         const data: any = await res.json();
         const text = (data.content ?? []).map((b: any) => b.text ?? "").join("");
         return {
@@ -316,7 +319,10 @@ async function callPaidFallback(body: any, env: any): Promise<InferResult | null
         body: JSON.stringify({ ...body, model: model.replace("openai/", "") })
       }, timeout);
 
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.error(`[paid-fallback] ${model} failed:`, res.status, (await res.text()).slice(0, 200));
+        continue;
+      }
       const data: any = await res.json();
       return {
         response: data.choices[0].message.content,
@@ -325,7 +331,8 @@ async function callPaidFallback(body: any, env: any): Promise<InferResult | null
         free: false,
         usage: data.usage ?? null
       };
-    } catch {
+    } catch (err) {
+      console.error(`[paid-fallback] ${model} threw:`, String(err));
       continue;
     }
   }
@@ -917,6 +924,18 @@ DRIVER FEEDBACK: "${feedback_text}"`;
 }
 
 async function handleHealth(request: Request, env: Env): Promise<Response> {
+  // Probing fires one live OpenRouter call per model pool, so it only runs on
+  // an explicit /health?probe=1. A plain /health just confirms the Worker is
+  // up and auth works, and costs nothing.
+  if (new URL(request.url).searchParams.get("probe") !== "1") {
+    return jsonResponse({
+      status: "ok",
+      source: "pitboss-proxy",
+      probed: false,
+      models: MODELS
+    });
+  }
+
   const probes = await Promise.allSettled(
     Object.entries(MODELS).map(async ([pool, models]) => {
       const start = Date.now();
@@ -939,6 +958,7 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
   return jsonResponse({
     status: "ok",
     source: "pitboss-proxy",
+    probed: true,
     pools: probes.map((p) => (p.status === "fulfilled" ? p.value : { error: String(p.reason) })),
     models: MODELS
   });

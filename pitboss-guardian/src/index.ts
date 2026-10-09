@@ -328,8 +328,7 @@ var GuildGuardian = class {
           tokenDiagnostic: {
             length: token.length,
             startsWithBotPrefix: token.startsWith("Bot "),
-            hasLeadingOrTrailingWhitespace: token !== token.trim(),
-            preview: token.length > 10 ? `${token.slice(0, 6)}...${token.slice(-4)}` : "(too short to preview)"
+            hasLeadingOrTrailingWhitespace: token !== token.trim()
           }
         });
       }
