@@ -128,9 +128,42 @@ export async function POST(req: NextRequest) {
   const league_id = cert.league_id
   const role_code = cert.role_code
 
+  // If the driver already has a live session for this certification, hand it
+  // back instead of drawing a new set. Before, calling POST again threw the
+  // session away and drew fresh questions, so anyone could re-roll the draw
+  // as often as they liked and read through the whole question pool.
+  const { data: liveSession } = await supabase
+    .from('exam_sessions')
+    .select('*')
+    .eq('certification_id', certification_id)
+    .eq('driver_id', driver.id)
+    .eq('status', 'active')
+    .gt('expires_at', new Date().toISOString())
+    .maybeSingle()
+
+  if (liveSession) {
+    const { data: liveQs } = await supabase
+      .from('questions')
+      .select('id, question, options, category, difficulty')
+      .in('id', liveSession.question_ids)
+    const byId = Object.fromEntries((liveQs ?? []).map((q: any) => [q.id, q]))
+    return NextResponse.json({
+      session: {
+        ...liveSession,
+        // no per-answer correctness mid-exam
+        answers: (liveSession.answers ?? []).map((a: any) => ({
+          question_id: a.question_id,
+          selected_answer: a.selected_answer,
+        })),
+        questions: liveSession.question_ids.map((id: string) => byId[id]).filter(Boolean),
+      },
+    })
+  }
+
+  // Anything still marked active here is past its expiry.
   await supabase
     .from('exam_sessions')
-    .update({ status: 'abandoned' })
+    .update({ status: 'expired' })
     .eq('certification_id', certification_id)
     .eq('status', 'active')
 
@@ -156,7 +189,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No questions available' }, { status: 404 })
   }
 
-  const shuffled = allQuestions.sort(() => Math.random() - 0.5)
+  // Fisher-Yates. sort(() => Math.random() - 0.5) is a biased shuffle.
+  const shuffled = [...allQuestions]
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+  }
   const drawn = shuffled.slice(0, roleReq.question_count)
   const questionIds = drawn.map((q: any) => q.id)
 
