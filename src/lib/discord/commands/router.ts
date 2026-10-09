@@ -260,3 +260,5 @@ import "./standings";
 import "./setup";
 // Side-effect import: registers the results command.
 import "./results";
+// Side-effect import: registers the exam and cert commands.
+import "./cert";
