@@ -1,257 +1,155 @@
-// src/app/api/pitboss/drivers/[driverId]/route.ts
-import { createClient } from '@supabase/supabase-js'
-import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from "@supabase/supabase-js";
+import { NextResponse } from "next/server";
+import { getLeagueAccess } from "@/lib/leagueAdmin";
 
-export const dynamic = 'force-dynamic'
+export const dynamic = "force-dynamic";
 
-function getSupabase() {
-  return createClient(
+const MAX_LOGO_BYTES = 5 * 1024 * 1024;
+
+// Lazy singleton — constructed on first use inside a handler, not at
+// module load. Avoids "supabaseUrl is required" during Next.js's
+// build-time page-data collection.
+// Typed `any` deliberately: SupabaseClient's schema generic defaults to
+// "public", so annotating this with the plain SupabaseClient type rejects
+// a client built with `{ db: { schema: "rise_os" } }` at compile time.
+let _supabaseAdmin: any = null;
+function getSupabaseAdmin() {
+  if (!_supabaseAdmin) {
+    _supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      { db: { schema: "rise_os" } }
+    );
+  }
+  return _supabaseAdmin;
+}
+
+export async function GET(_req: Request, { params }: { params: { leagueId: string; franchiseId: string } }) {
+  const supabaseAdmin = getSupabaseAdmin();
+
+  const { data, error } = await supabaseAdmin
+    .from("franchises")
+    .select("*, league:leagues(sport)")
+    .eq("id", params.franchiseId)
+    .eq("league_id", params.leagueId)
+    .maybeSingle();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json(data);
+}
+
+// Fields a league admin may change through PATCH. gm_id, espn_team_id,
+// cap figures and the like are not editable here.
+const PATCHABLE_FIELDS = ["name", "abbreviation", "primary_color", "secondary_color"];
+
+export async function PATCH(req: Request, { params }: { params: { leagueId: string; franchiseId: string } }) {
+  const access = await getLeagueAccess(params.leagueId);
+  if (!access.userId) {
+    return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
+  }
+  if (!access.isAdmin) {
+    return NextResponse.json({ error: "Only league admins can edit franchises" }, { status: 403 });
+  }
+
+  const supabaseAdmin = getSupabaseAdmin();
+
+  let body: Record<string, unknown>;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+  }
+  const rejected = Object.keys(body).filter((k) => !PATCHABLE_FIELDS.includes(k));
+  if (rejected.length > 0) {
+    return NextResponse.json({ error: `Fields not editable: ${rejected.join(", ")}` }, { status: 400 });
+  }
+  if (Object.keys(body).length === 0) {
+    return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("franchises")
+    .update(body)
+    .eq("id", params.franchiseId)
+    .eq("league_id", params.leagueId)
+    .select()
+    .maybeSingle();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json(data);
+}
+
+export async function PUT(req: Request, { params }: { params: { leagueId: string; franchiseId: string } }) {
+  // The logo can be changed by a league admin or by this franchise's GM.
+  const access = await getLeagueAccess(params.leagueId);
+  if (!access.userId) {
+    return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
+  }
+
+  const supabaseAdmin = getSupabaseAdmin();
+
+  if (!access.isAdmin) {
+    const { data: franchise } = await supabaseAdmin
+      .from("franchises")
+      .select("gm_id")
+      .eq("id", params.franchiseId)
+      .eq("league_id", params.leagueId)
+      .maybeSingle();
+    if (!franchise || franchise.gm_id !== access.userId) {
+      return NextResponse.json(
+        { error: "Only league admins or this franchise's GM can change the logo" },
+        { status: 403 }
+      );
+    }
+  }
+
+  const formData = await req.formData();
+  const file = formData.get("file") as File | null;
+  if (!file) return NextResponse.json({ error: "No file" }, { status: 400 });
+  if (!file.type.startsWith("image/")) {
+    return NextResponse.json({ error: "Logo must be an image" }, { status: 400 });
+  }
+  if (file.size > MAX_LOGO_BYTES) {
+    return NextResponse.json({ error: "File too large (max 5MB)" }, { status: 400 });
+  }
+
+  // Letters and digits only, so the file name can't add path segments.
+  const ext = (file.name.split(".").pop() ?? "png").toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+  const path = `${params.franchiseId}/logo.${ext}`;
+  const buffer = Buffer.from(await file.arrayBuffer());
+
+  // Separate client for storage — no schema restriction needed here since
+  // this only touches the storage API, not postgrest tables. Already
+  // constructed inside the handler, so this one was never part of the bug.
+  const storageClient = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+  );
 
-type Params = { params: { driverId: string } }
+  const { error: uploadError } = await storageClient.storage
+    .from("franchise-logos")
+    .upload(path, buffer, { upsert: true, contentType: file.type });
 
-const VALID_TIERS          = ['academy', 'apex', 'apex_pro', 'elite'] as const
-const VALID_SUPER_STATUSES = ['active', 'review', 'suspended', 'revoked'] as const
+  if (uploadError) return NextResponse.json({ error: uploadError.message }, { status: 500 });
 
-// ─── GET — full driver profile ────────────────────────────────────────────────
+  const { data: { publicUrl } } = storageClient.storage
+    .from("franchise-logos")
+    .getPublicUrl(path);
 
-export async function GET(_req: NextRequest, { params }: Params) {
-  const supabase = getSupabase()
-  const { driverId } = params
-
-  // Verify driver exists before running parallel queries
-  const { data: driver, error: driverError } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('*')
-    .eq('id', driverId)
-    .single()
-
-  if (driverError || !driver) {
-    return NextResponse.json({ error: 'Driver not found' }, { status: 404 })
-  }
-
-  // Parallel fetch all domains
-  const [
-    { data: gamertags },
-    { data: driverLeagues },
-    { data: licences },
-    { data: certifications },
-    { data: penalties },
-    { data: incidentsAs },      // incidents where driver is the accused party
-    { data: incidentsReported }, // incidents the driver filed
-    { data: contracts },
-    { data: results },
-  ] = await Promise.all([
-    supabase
-      .schema('pitboss')
-      .from('driver_gamertags')
-      .select('*')
-      .eq('driver_id', driverId)
-      .order('is_primary', { ascending: false }),
-
-    supabase
-      .schema('pitboss')
-      .from('driver_leagues')
-      .select('*')
-      .eq('driver_id', driverId),
-
-    supabase
-      .schema('pitboss')
-      .from('licences')
-      .select('id, licence_number, role_code, title, tier, era_endorsements, status, issued_at, expires_at, league_id')
-      .eq('driver_id', driverId)
-      .order('issued_at', { ascending: false }),
-
-    supabase
-      .schema('pitboss')
-      .from('certifications')
-      .select('id, league_id, status, score, pass_mark, attempt_number, started_at, completed_at, locked_until')
-      .eq('driver_id', driverId)
-      .order('created_at', { ascending: false }),
-
-    supabase
-      .schema('pitboss')
-      .from('penalty_ledger')
-      .select('id, league_id, points, reason, issued_at, expires_at, incident_id')
-      .eq('driver_id', driverId)
-      .order('issued_at', { ascending: false }),
-
-    // FIX: incidents has no `driver_id` column — the accused party is
-    // tracked in `accused_driver_id`.
-    supabase
-      .schema('pitboss')
-      .from('incidents')
-      .select('id, league_id, status, incident_type, description, created_at, resolved_at')
-      .eq('accused_driver_id', driverId)
-      .order('created_at', { ascending: false }),
-
-    // FIX: incidents has no `reporting_driver_id` column — the reporter is
-    // tracked in `reported_by`.
-    supabase
-      .schema('pitboss')
-      .from('incidents')
-      .select('id, league_id, status, incident_type, description, created_at, resolved_at')
-      .eq('reported_by', driverId)
-      .order('created_at', { ascending: false }),
-
-    supabase
-      .schema('pitboss')
-      .from('driver_contracts')
-      .select('*')
-      .eq('driver_id', driverId)
-      .order('created_at', { ascending: false }),
-
-    supabase
-      .schema('pitboss')
-      .from('results')
-      .select('id, league_id, race_name, season, round, quali_pos, finish_pos, dnf, fastest_lap, points, created_at')
-      .eq('driver_id', driverId)
-      .order('created_at', { ascending: false }),
-  ])
-
-  // ── Enrich driver_leagues with rise_os.leagues (cross-schema fallback) ──────
-  const leagueIds = [...new Set([
-    ...(driverLeagues ?? []).map((dl: any) => dl.league_id),
-    ...(licences ?? []).map((l: any) => l.league_id),
-    ...(certifications ?? []).map((c: any) => c.league_id),
-  ].filter(Boolean))]
-
-  let leagueMap: Record<string, any> = {}
-
-  if (leagueIds.length) {
-    const { data: leagues } = await supabase
-      .schema('rise_os')
-      .from('leagues')
-      .select('id, name, slug, sport, logo_url, discord_server_id')
-      .in('id', leagueIds)
-
-    for (const league of leagues ?? []) {
-      leagueMap[league.id] = league
-    }
-  }
-
-  const enrichedLeagues = (driverLeagues ?? []).map((dl: any) => ({
-    ...dl,
-    league: leagueMap[dl.league_id] ?? null,
-  }))
-
-  const enrichedLicences = (licences ?? []).map((l: any) => ({
-    ...l,
-    league: leagueMap[l.league_id] ?? null,
-  }))
-
-  const enrichedCerts = (certifications ?? []).map((c: any) => ({
-    ...c,
-    league: leagueMap[c.league_id] ?? null,
-  }))
-
-  // ── Penalty summary ──────────────────────────────────────────────────────────
-  const now = new Date().toISOString()
-  const allPenalties = penalties ?? []
-  const activePenalties = allPenalties.filter(
-    (p: any) => !p.expires_at || p.expires_at > now
-  )
-  const active_pp = activePenalties.reduce((sum: number, p: any) => sum + (p.points ?? 0), 0)
-
-  // ── Results summary ──────────────────────────────────────────────────────────
-  const allResults = results ?? []
-  const resultsSummary = {
-    starts:       allResults.length,
-    wins:         allResults.filter((r: any) => r.finish_pos === 1).length,
-    podiums:      allResults.filter((r: any) => r.finish_pos != null && r.finish_pos <= 3).length,
-    dnfs:         allResults.filter((r: any) => r.dnf).length,
-    fastest_laps: allResults.filter((r: any) => r.fastest_lap).length,
-    points_total: allResults.reduce((sum: number, r: any) => sum + (r.points ?? 0), 0),
-  }
-
-  // ── Certification summary ────────────────────────────────────────────────────
-  const certSummary = {
-    total:       enrichedCerts.length,
-    passed:      enrichedCerts.filter((c: any) => c.status === 'passed').length,
-    in_progress: enrichedCerts.filter((c: any) => c.status === 'in_progress').length,
-    failed:      enrichedCerts.filter((c: any) => c.status === 'failed').length,
-    locked:      enrichedCerts.filter((c: any) => c.locked_until && c.locked_until > now).length,
-  }
-
-  return NextResponse.json({
-    driver,
-    gamertags:     gamertags ?? [],
-    leagues:       enrichedLeagues,
-    licences:      enrichedLicences,
-    certifications: {
-      summary: certSummary,
-      list:    enrichedCerts,
-    },
-    penalties: {
-      active:    activePenalties,
-      active_pp,
-      history:   allPenalties,
-    },
-    incidents: {
-      as_subject:   incidentsAs ?? [],
-      as_reporter:  incidentsReported ?? [],
-      total:        (incidentsAs?.length ?? 0) + (incidentsReported?.length ?? 0),
-    },
-    contracts:     contracts ?? [],
-    results: {
-      summary: resultsSummary,
-      recent:  allResults.slice(0, 10),
-    },
-  })
-}
-
-// ─── PATCH — update driver fields ─────────────────────────────────────────────
-
-export async function PATCH(req: NextRequest, { params }: Params) {
-  const supabase = getSupabase()
-  const { driverId } = params
-  const body = await req.json()
-  const { display_name, tier, super_licence_status, era_endorsements, pp_total } = body
-
-  if (tier !== undefined && !VALID_TIERS.includes(tier)) {
-    return NextResponse.json(
-      { error: `tier must be one of: ${VALID_TIERS.join(', ')}` },
-      { status: 400 }
-    )
-  }
-
-  if (super_licence_status !== undefined && !VALID_SUPER_STATUSES.includes(super_licence_status)) {
-    return NextResponse.json(
-      { error: `super_licence_status must be one of: ${VALID_SUPER_STATUSES.join(', ')}` },
-      { status: 400 }
-    )
-  }
-
-  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() }
-  if (display_name       !== undefined) updates.display_name       = display_name
-  if (tier               !== undefined) updates.tier               = tier
-  if (super_licence_status !== undefined) updates.super_licence_status = super_licence_status
-  if (era_endorsements   !== undefined) updates.era_endorsements   = era_endorsements
-  if (pp_total           !== undefined) updates.pp_total           = pp_total
-
-  if (Object.keys(updates).length === 1) {
-    return NextResponse.json({ error: 'No updatable fields provided' }, { status: 400 })
-  }
-
-  const { data, error } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .update(updates)
-    .eq('id', driverId)
+  const { data, error } = await supabaseAdmin
+    .from("franchises")
+    .update({ logo_url: publicUrl })
+    .eq("id", params.franchiseId)
+    .eq("league_id", params.leagueId)
     .select()
-    .single()
+    .maybeSingle();
 
-  if (error) {
-    if (error.code === 'PGRST116') {
-      return NextResponse.json({ error: 'Driver not found' }, { status: 404 })
-    }
-    console.error('[drivers/[driverId]:PATCH]', error)
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json({ data })
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json(data);
 }
