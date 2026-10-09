@@ -1,6 +1,6 @@
 name = "pitboss-guardian"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+compatibility_date = "2026-09-30"
 
 [[durable_objects.bindings]]
 name = "GUARDIAN"
