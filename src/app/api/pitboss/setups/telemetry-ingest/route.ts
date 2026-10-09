@@ -395,15 +395,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `Unrecognized session_type in payload: ${lap.sessionType}` }, { status: 400 });
   }
 
-  const session_uid = String(lap.sessionUID);
+  if (lap.sessionUID == null || String(lap.sessionUID).trim() === '') {
+    return NextResponse.json({ error: 'Payload is missing sessionUID' }, { status: 400 });
+  }
+  const rawSessionUid = String(lap.sessionUID);
+
+  // The game's session UID is the same for every player in a multiplayer
+  // session, but this table is unique on (session_uid, lap_num) and the
+  // telemetry pages treat one session_uid as one driver's laps. So two
+  // drivers in the same lobby collided: the second upload overwrote the
+  // first, and dashboards mixed their laps. Storing the UID namespaced by
+  // driver keeps each driver's laps separate with no schema change. Rows
+  // saved before this change keep the plain UID and are still found below.
+  const session_uid = `${driver.id}:${rawSessionUid}`;
 
   // IDEMPOTENCY CHECK — must happen before any insert.
   const { data: existingUpload, error: existingUploadError } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_telemetry_uploads')
     .select('id, submission_id, driver_id')
-    .eq('session_uid', session_uid)
+    .in('session_uid', [session_uid, rawSessionUid])
     .eq('lap_num', lap.lapNum)
+    .eq('driver_id', driver.id)
+    .limit(1)
     .maybeSingle();
 
   if (existingUploadError) {
@@ -413,15 +427,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // A retry is only a retry if it comes from the driver who uploaded the lap.
-  // Before, anyone who sent the same (session_uid, lap_num) rewrote the owner's
-  // stored lap time, tyre data and raw payload.
-  if (existingUpload && existingUpload.driver_id !== driver.id) {
-    return NextResponse.json(
-      { error: 'This lap has already been uploaded by another driver' },
-      { status: 409 }
-    );
-  }
+  // The lookup above is limited to this driver's own rows, so a retry can
+  // only ever refresh the uploader's own lap. Before, anyone who sent the same
+  // (session_uid, lap_num) rewrote the owner's lap time, tyre data and payload.
 
   const trackName = lap.track.name.trim().toLowerCase();
   const { data: alias } = await supabaseAdmin
