@@ -38,6 +38,8 @@
 //   - thinkingmachines/inkling* stay excluded (agentic-harness-only 403).
 //   - Paid fallback to Anthropic now accepts image evidence (image_url parts
 //     converted to Anthropic image blocks) instead of being skipped.
+//   - GROQ tier added (GROQ_API_KEY): runs first, then OpenRouter free, then
+//     paid. Budgets retuned (groq 5s, free 10s, paid 6s) to stay under 25s.
 //   - AUTO-UPDATE: free waterfalls now reconcile each pool against
 //     OpenRouter's live free-model list (see "Live free-model check").
 
@@ -46,6 +48,7 @@ interface Env {
   PITBOSS_INTERNAL_KEY: string;
   ANTHROPIC_KEY?: string;
   OPENAI_KEY?: string;
+  GROQ_API_KEY?: string;
   // Added for the checkin-countdown cron (scheduled handler only).
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
@@ -174,7 +177,8 @@ function poolForMode(mode: string, hasImage: boolean): string[] {
 // client-side timeout in pitboss-llm.ts.
 
 const PER_MODEL_TIMEOUT_MS = 10_000;
-const FREE_WATERFALL_BUDGET_MS = 12_000;
+const FREE_WATERFALL_BUDGET_MS = 10_000;
+const GROQ_BUDGET_MS = 5_000;
 const PAID_FALLBACK_BUDGET_MS = 6_000;
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
@@ -458,6 +462,113 @@ async function freeWaterfall(pool: string[], body: any, env: any): Promise<Infer
   return { error: "all_free_models_failed", tried: errors };
 }
 
+// ─── Groq tier ───────────────────────────────────────────────────────────────
+// Groq's free tier is fast (usually 1–2s) but rate-limited, so it runs first
+// and anything it can't serve (429, model gone, no key) falls through to the
+// OpenRouter free waterfall, then the paid fallback. Worst-case budget:
+// 3s live-list lookups (cached) + 5s Groq + 10s OpenRouter free + 6s paid,
+// under the 25s client timeout in pitboss-llm.ts.
+// Model IDs verified against console.groq.com/docs/models on 2026-10-08;
+// the list is also pruned against Groq's live /models endpoint (1h cache),
+// failing open if that lookup fails. llama-4-scout is a Groq "preview"
+// model, so qwen3.6-27b sits behind it for vision.
+
+const GROQ_MODELS: Record<string, string[]> = {
+  general:   ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
+  reasoning: ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+  coding:    ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
+  vision:    ["meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3.6-27b"],
+  fast:      ["llama-3.1-8b-instant", "openai/gpt-oss-20b"]
+};
+
+let groqLiveCache: { at: number; ids: Set<string> } | null = null;
+
+async function getLiveGroqIds(apiKey: string): Promise<Set<string> | null> {
+  if (groqLiveCache && Date.now() - groqLiveCache.at < LIVE_TTL_MS) return groqLiveCache.ids;
+  try {
+    const res = await fetchWithTimeout(
+      "https://api.groq.com/openai/v1/models",
+      { headers: { "Authorization": `Bearer ${apiKey}` } },
+      LIVE_FETCH_TIMEOUT_MS
+    );
+    if (!res.ok) return groqLiveCache?.ids ?? null;
+    const json: any = await res.json();
+    const ids = new Set<string>((json?.data ?? []).map((m: any) => m.id));
+    if (ids.size < 3) return groqLiveCache?.ids ?? null;
+    groqLiveCache = { at: Date.now(), ids };
+    return ids;
+  } catch {
+    return groqLiveCache?.ids ?? null;
+  }
+}
+
+// Maps an OpenRouter pool (by identity) to the matching Groq pool.
+function groqPoolFor(pool: string[], hasImage: boolean): string[] {
+  if (hasImage) return GROQ_MODELS.vision;
+  for (const key of Object.keys(MODELS) as (keyof typeof MODELS)[]) {
+    if (MODELS[key] === pool) return GROQ_MODELS[key];
+  }
+  return GROQ_MODELS.general;
+}
+
+async function groqWaterfall(pool: string[], body: any, env: any): Promise<InferResult | InferError> {
+  const apiKey = env.GROQ_API_KEY;
+  if (!apiKey) return { error: "groq_not_configured" };
+
+  const errors: string[] = [];
+  let models = groqPoolFor(pool, hasImageContent(body));
+  const live = await getLiveGroqIds(apiKey);
+  if (live) {
+    const pruned = models.filter((id) => live.has(id));
+    if (pruned.length > 0) models = pruned;
+  }
+
+  const deadline = Date.now() + GROQ_BUDGET_MS;
+  for (const model of models) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      errors.push(`groq ${model}: skipped, groq budget exhausted`);
+      break;
+    }
+    try {
+      const res = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({ ...body, model })
+      }, Math.min(PER_MODEL_TIMEOUT_MS, remaining));
+
+      if (!res.ok) {
+        const err = await res.text();
+        errors.push(`groq ${model}: ${res.status} ${err.slice(0, 100)}`);
+        continue;
+      }
+      const data: any = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+      if (!text) {
+        errors.push(`groq ${model}: empty response`);
+        continue;
+      }
+      return {
+        response: text,
+        model: data.model ?? model,
+        provider: "groq",
+        free: true,
+        usage: data.usage ?? null
+      };
+    } catch (err: any) {
+      errors.push(
+        err && err.name === "AbortError"
+          ? `groq ${model}: timed out`
+          : `groq ${model}: ${String(err)}`
+      );
+    }
+  }
+  return { error: "all_groq_models_failed", tried: errors };
+}
+
 // ─── Core inference with waterfall ───────────────────────────────────────────
 // Free models first, paid fallback only if every free model fails (unless
 // options.preferPaid is set, which flips the order).
@@ -468,20 +579,28 @@ async function inferWithWaterfall(
   env: any,
   options: { preferPaid?: boolean } = {}
 ): Promise<InferResult | InferError> {
-  if (options.preferPaid) {
-    if (hasPaidKeyConfigured(env)) {
-      const paidResult = await callPaidFallback(body, env);
-      if (paidResult) return paidResult;
-    }
-    return await freeWaterfall(pool, body, env);
+  const tried: string[] = [];
+  const note = (r: InferResult | InferError) => {
+    if ("error" in r) tried.push(...(r.tried ?? [r.error]));
+  };
+
+  // preferPaid: paid -> groq -> openrouter free.
+  // default:    groq -> openrouter free -> paid.
+  const tiers: Array<() => Promise<InferResult | InferError | null>> = [];
+  const paidTier = async () => (hasPaidKeyConfigured(env) ? await callPaidFallback(body, env) : null);
+  const groqTier = async () => (env.GROQ_API_KEY ? await groqWaterfall(pool, body, env) : null);
+  const freeTier = () => freeWaterfall(pool, body, env);
+
+  if (options.preferPaid) tiers.push(paidTier, groqTier, freeTier);
+  else tiers.push(groqTier, freeTier, paidTier);
+
+  for (const tier of tiers) {
+    const r = await tier();
+    if (!r) continue;
+    if (!("error" in r)) return r;
+    note(r);
   }
-  const freeResult = await freeWaterfall(pool, body, env);
-  if (!("error" in freeResult)) return freeResult;
-  if (hasPaidKeyConfigured(env)) {
-    const paidResult = await callPaidFallback(body, env);
-    if (paidResult) return paidResult;
-  }
-  return freeResult;
+  return { error: "all_free_models_failed", tried };
 }
 
 // ─── Image-description pass (used by /steward) ───────────────────────────────
