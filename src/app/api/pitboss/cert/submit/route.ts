@@ -326,7 +326,12 @@ export async function POST(req: NextRequest) {
       total,
       missed_by: Math.round((Number(cert.pass_mark) - score) * 100) / 100,
       locked_until: lockedUntil.toISOString(),
-      breakdown,
+      // Failed attempt: report only right/wrong per question. Sending
+      // correct_answer here would let a driver read the answer key and pass
+      // the retake once the lockout ends.
+      breakdown: Object.fromEntries(
+        Object.entries(breakdown).map(([id, b]) => [id, { correct: b.correct }])
+      ),
     })
   }
 }
