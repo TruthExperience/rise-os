@@ -55,7 +55,10 @@ export async function POST(
 
     const llmRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/pitboss/llm`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-PitBoss-Key': process.env.PITBOSS_INTERNAL_KEY ?? '',
+      },
       body: JSON.stringify({
         action: 'steward',
         league: incident.league_id,

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { timingSafeEqual } from 'crypto';
 import { pbInfer, pbSteward, type RuleArticle } from '@/lib/pitboss-llm';
+import { getSession } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,7 +13,26 @@ function getSupabase() {
   );
 }
 
+// Server-to-server callers (steward route, Discord steward command) have no
+// browser session, so they authenticate with the shared PITBOSS_INTERNAL_KEY
+// sent as X-PitBoss-Key. Everyone else must be signed in.
+function hasValidInternalKey(req: NextRequest): boolean {
+  const expected = process.env.PITBOSS_INTERNAL_KEY;
+  const provided = req.headers.get('x-pitboss-key');
+  if (!expected || !provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 export async function POST(req: NextRequest) {
+  if (!hasValidInternalKey(req)) {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+  }
+
   try {
     const supabase = getSupabase();
     const body = await req.json();

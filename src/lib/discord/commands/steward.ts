@@ -1092,7 +1092,10 @@ registerCommand("steward_analyse", async (ctx) => {
 
       const llmRes = await fetch(`${appBaseUrl}/api/pitboss/llm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-PitBoss-Key": process.env.PITBOSS_INTERNAL_KEY ?? "",
+        },
         body: JSON.stringify({
           action: "steward",
           league: fullIncident.league_id,
