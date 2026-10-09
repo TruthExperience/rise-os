@@ -20,6 +20,27 @@ function getSupabase() {
 const TRL_LEAGUE_ID  = '3a005e8d-c35f-4a57-aa27-c59c0c3812e2'
 const TRL_PRIVILEGED = ['team_principal', 'sporting_director', 'commissioner', 'head_steward']
 
+
+const MAX_URLS = 10
+// Returns a cleaned string[] (or null when none), or 'invalid' if any entry is
+// not an http(s) URL — keeps javascript:/data: links out of the incident record.
+function cleanUrls(input: unknown): string[] | null | 'invalid' {
+  if (input == null) return null
+  if (!Array.isArray(input) || input.length > MAX_URLS) return 'invalid'
+  const out: string[] = []
+  for (const u of input) {
+    if (typeof u !== 'string' || u.length > 2000) return 'invalid'
+    try {
+      const p = new URL(u.trim())
+      if (p.protocol !== 'http:' && p.protocol !== 'https:') return 'invalid'
+      out.push(p.toString())
+    } catch {
+      return 'invalid'
+    }
+  }
+  return out.length ? out : null
+}
+
 export async function GET(req: NextRequest) {
   const session = await getSession()
   if (!session?.user?.discordId) {
@@ -62,7 +83,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
-  const body = await req.json()
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
   const {
     league_id,
     incident_type,
@@ -70,16 +96,31 @@ export async function POST(req: NextRequest) {
     season,
     round,
     lap,
-    evidence_urls,
+    evidence_urls: rawEvidenceUrls,
     accused_driver_id,
     accused_discord_username, // manual fallback
-  } = body
+  } = body ?? {}
 
   if (!league_id || !incident_type || !description) {
     return NextResponse.json(
       { error: 'league_id, incident_type, and description are required' },
       { status: 400 }
     )
+  }
+  if (
+    typeof league_id !== 'string' || typeof incident_type !== 'string' || typeof description !== 'string' ||
+    incident_type.length > 100 || description.length > 5000
+  ) {
+    return NextResponse.json({ error: 'Invalid incident fields (description max 5000 characters)' }, { status: 400 })
+  }
+  for (const [k, v] of [['round', round], ['lap', lap]] as const) {
+    if (v != null && v !== '' && !Number.isFinite(Number(v))) {
+      return NextResponse.json({ error: `${k} must be a number` }, { status: 400 })
+    }
+  }
+  const evidence_urls = cleanUrls(rawEvidenceUrls)
+  if (evidence_urls === 'invalid') {
+    return NextResponse.json({ error: 'Evidence links must be http(s) URLs (max 10)' }, { status: 400 })
   }
 
   const supabase = getSupabase()
@@ -112,7 +153,7 @@ export async function POST(req: NextRequest) {
 
   // TRL: only privileged roles can submit
   if (league_id === TRL_LEAGUE_ID) {
-    const roles = membership.role.split(',').map((r: string) => r.trim().toLowerCase())
+    const roles = String(membership.role ?? '').split(',').map((r: string) => r.trim().toLowerCase())
     const hasAccess = roles.some((r: string) => TRL_PRIVILEGED.includes(r))
     if (!hasAccess) {
       return NextResponse.json(
@@ -133,6 +174,18 @@ export async function POST(req: NextRequest) {
     resolvedAccusedId = accused?.id ?? null
   }
 
+  if (resolvedAccusedId) {
+    const { data: accusedMember } = await supabase
+      .from('driver_leagues')
+      .select('driver_id')
+      .eq('driver_id', resolvedAccusedId)
+      .eq('league_id', league_id)
+      .limit(1)
+    if (!accusedMember?.length) {
+      return NextResponse.json({ error: 'The accused driver is not a member of this league' }, { status: 400 })
+    }
+  }
+
   const { data: incident, error } = await supabase
     .from('incidents')
     .insert({
@@ -144,7 +197,7 @@ export async function POST(req: NextRequest) {
       season: season ?? null,
       round: round ? Number(round) : null,
       lap: lap ? Number(lap) : null,
-      evidence_urls: evidence_urls?.length ? evidence_urls : null,
+      evidence_urls: evidence_urls,
       status: 'open',
     })
     .select()

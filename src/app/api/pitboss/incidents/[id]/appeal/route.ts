@@ -1,87 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
-
-const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
-const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward', 'bsac_chief']
-
-async function getRequestingDriver(supabase: any, session: any) {
-  const user = session.user as any
-  const discordId: string | undefined = user.discordId ?? user.discord_id ?? user.id
-  const email: string | undefined = user.email ?? undefined
-
-  let driver = null
-
-  if (discordId) {
-    const { data } = await supabase
-      .schema('pitboss')
-      .from('drivers')
-      .select('id')
-      .eq('discord_id', discordId)
-      .maybeSingle()
-    driver = data
-  }
-
-  if (!driver && email) {
-    const { data } = await supabase
-      .schema('pitboss')
-      .from('drivers')
-      .select('id')
-      .eq('email', email)
-      .maybeSingle()
-    driver = data
-  }
-
-  return driver
-}
-
-async function hasStewardAccess(
-  supabase: any,
-  driverId: string,
-  leagueId: string
-): Promise<boolean> {
-  const { data: licence } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id')
-    .eq('driver_id', driverId)
-    .eq('league_id', leagueId)
-    .eq('status', 'active')
-    .in('role_code', STEWARD_ROLES)
-    .maybeSingle()
-
-  if (licence) return true
-
-  const { data: anyLicence } = await supabase
-    .schema('pitboss')
-    .from('licences')
-    .select('id')
-    .eq('driver_id', driverId)
-    .eq('status', 'active')
-    .in('role_code', STEWARD_ROLES)
-    .maybeSingle()
-
-  if (anyLicence) return true
-
-  const { data: memberships } = await supabase
-    .schema('pitboss')
-    .from('driver_leagues')
-    .select('role, league_id')
-    .eq('driver_id', driverId)
-
-  if (!memberships) return false
-
-  for (const m of memberships) {
-    const roles = (m.role as string)
-      .split(',')
-      .map((r: string) => r.trim().toLowerCase())
-    if (roles.some((r: string) => STEWARD_LEAGUE_ROLES.includes(r))) {
-      return true
-    }
-  }
-
-  return false
-}
+import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
 
 export async function POST(
   req: NextRequest,
@@ -135,7 +55,7 @@ export async function POST(
     }
   }
 
-  const isSteward  = await hasStewardAccess(supabase, requestingDriver.id, incident.league_id)
+  const isSteward  = await hasStewwardAccess(supabase, requestingDriver.id, incident.league_id)
   const isAccused  = incident.accused_driver_id === requestingDriver.id
   const isReporter = incident.reported_by === requestingDriver.id
 
@@ -146,11 +66,19 @@ export async function POST(
     )
   }
 
-  const body = await req.json()
-  const { reason } = body
+  let body: any
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  const reason = typeof body?.reason === 'string' ? body.reason : ''
 
-  if (!reason?.trim()) {
+  if (!reason.trim()) {
     return NextResponse.json({ error: 'Appeal reason is required' }, { status: 400 })
+  }
+  if (reason.length > 4000) {
+    return NextResponse.json({ error: 'Appeal reason is too long (max 4000 characters)' }, { status: 400 })
   }
 
   // One appeal per incident, ever — regardless of outcome
@@ -184,6 +112,13 @@ export async function POST(
     .single()
 
   if (appealError) {
+    // 23505 = unique violation: a parallel request filed the appeal first.
+    if ((appealError as any).code === '23505') {
+      return NextResponse.json(
+        { error: 'This incident has already been appealed and cannot be appealed again' },
+        { status: 409 }
+      )
+    }
     console.error('[incidents/id/appeal POST]', appealError)
     return NextResponse.json({ error: appealError.message }, { status: 500 })
   }
