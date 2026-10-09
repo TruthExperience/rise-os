@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
+import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 
 export const dynamic = 'force-dynamic';
+
+const MAX_NAME_LENGTH = 80;
 
 // Pace weighted heaviest, mirroring EA's F1 25 Driver Career overall calc.
 // Focus added at .1, matching the weighting previously used client-side in
@@ -18,6 +21,7 @@ function computeOverall(
   return Math.round(weighted);
 }
 
+// GET stays public: it is a read-only, searchable library of ratings.
 export async function GET(req: NextRequest) {
   const supabaseAdmin = createAdminClient();
   const search = req.nextUrl.searchParams.get('q')?.trim() ?? '';
@@ -28,7 +32,10 @@ export async function GET(req: NextRequest) {
     .order('driver_name', { ascending: true })
     .limit(50);
   if (search) {
-    query = query.ilike('driver_name', `%${search}%`);
+    // Strip characters that have meaning in LIKE patterns so a search for
+    // "%" or "_" can't turn into a wildcard scan.
+    const safe = search.slice(0, MAX_NAME_LENGTH).replace(/[%_\\]/g, ' ').trim();
+    if (safe) query = query.ilike('driver_name', `%${safe}%`);
   }
   const { data, error } = await query;
   if (error) {
@@ -46,7 +53,14 @@ interface CreateBody {
   focus: number;
 }
 
+// POST needs a signed-in driver. Any signed-in driver can add an entry to the
+// shared library, which is what the setups page does today.
 export async function POST(req: NextRequest) {
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   const supabaseAdmin = createAdminClient();
   let body: CreateBody;
   try {
@@ -54,12 +68,18 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
-  const { driver_name, pace, racecraft, awareness, experience, focus } = body;
-  if (!driver_name?.trim()) {
+  const { driver_name, pace, racecraft, awareness, experience, focus } = body ?? ({} as CreateBody);
+  if (typeof driver_name !== 'string' || !driver_name.trim()) {
     return NextResponse.json({ error: 'driver_name is required' }, { status: 400 });
   }
+  if (driver_name.trim().length > MAX_NAME_LENGTH) {
+    return NextResponse.json(
+      { error: `driver_name must be ${MAX_NAME_LENGTH} characters or fewer` },
+      { status: 400 }
+    );
+  }
   for (const [label, val] of Object.entries({ pace, racecraft, awareness, experience, focus })) {
-    if (typeof val !== 'number' || val < 0 || val > 99) {
+    if (typeof val !== 'number' || !Number.isFinite(val) || val < 0 || val > 99) {
       return NextResponse.json({ error: `${label} must be a number between 0 and 99` }, { status: 400 });
     }
   }
