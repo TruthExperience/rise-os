@@ -256,6 +256,30 @@ interface ExtractedBody {
   formLeagueId?: string;
 }
 
+// A single-lap export is a few MB at most. Cap uploads and frame counts so one
+// account can't push huge payloads into the database.
+const MAX_UPLOAD_BYTES = 6 * 1024 * 1024;
+const MAX_FRAMES = 20000;
+
+// Best-effort per-driver limit (in memory, per server instance). Every new lap
+// also triggers an LLM coaching pass, so unlimited uploads meant unlimited
+// LLM calls; session_uid can be any number, so the (session_uid, lap_num)
+// duplicate check does not bound this.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_UPLOADS = 20;
+const uploadHits = new Map<string, number[]>();
+function uploadRateLimited(key: string): boolean {
+  const now = Date.now();
+  const recent = (uploadHits.get(key) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_MAX_UPLOADS) {
+    uploadHits.set(key, recent);
+    return true;
+  }
+  recent.push(now);
+  uploadHits.set(key, recent);
+  return false;
+}
+
 async function extractBody(req: NextRequest): Promise<ExtractedBody> {
   const contentType = req.headers.get('content-type') || '';
 
@@ -270,6 +294,9 @@ async function extractBody(req: NextRequest): Promise<ExtractedBody> {
     }
     if (!file) {
       throw new Error('No file found in the uploaded form data');
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      throw new Error('Uploaded file is too large');
     }
     const text = await file.text();
     let json: any;
@@ -292,6 +319,16 @@ async function extractBody(req: NextRequest): Promise<ExtractedBody> {
 }
 
 export async function POST(req: NextRequest) {
+  // Sign-in check first, so a signed-out caller never gets as far as having a
+  // large body parsed.
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json({ error: 'Could not resolve driver identity for this session' }, { status: 401 });
+  }
+  if (uploadRateLimited(driver.id)) {
+    return NextResponse.json({ error: 'Too many uploads. Please wait a minute.' }, { status: 429 });
+  }
+
   const supabaseAdmin = createAdminClient();
 
   let extracted: ExtractedBody;
@@ -334,9 +371,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Telemetry frame array is empty' }, { status: 422 });
   }
 
-  const driver = await getAuthedDriver();
-  if (!driver) {
-    return NextResponse.json({ error: 'Could not resolve driver identity for this session' }, { status: 401 });
+  if (lap.telemetry.length > MAX_FRAMES) {
+    return NextResponse.json({ error: 'Telemetry frame array is too large' }, { status: 413 });
+  }
+
+  // league_id comes from the request. Without a membership check, anyone could
+  // file "verified" setup data into any league and skew its recommendations.
+  if (league_id) {
+    const { data: leagueMember } = await supabaseAdmin
+      .schema('pitboss')
+      .from('driver_leagues')
+      .select('driver_id')
+      .eq('driver_id', driver.id)
+      .eq('league_id', league_id)
+      .maybeSingle();
+    if (!leagueMember) {
+      return NextResponse.json({ error: 'You are not a member of that league' }, { status: 403 });
+    }
   }
 
   const sessionType = resolveSessionType(lap.sessionType, lap.tyres?.tyreCompound);
@@ -350,7 +401,7 @@ export async function POST(req: NextRequest) {
   const { data: existingUpload, error: existingUploadError } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_telemetry_uploads')
-    .select('id, submission_id')
+    .select('id, submission_id, driver_id')
     .eq('session_uid', session_uid)
     .eq('lap_num', lap.lapNum)
     .maybeSingle();
@@ -359,6 +410,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       { error: `Failed to check for existing telemetry upload: ${existingUploadError.message}` },
       { status: 500 }
+    );
+  }
+
+  // A retry is only a retry if it comes from the driver who uploaded the lap.
+  // Before, anyone who sent the same (session_uid, lap_num) rewrote the owner's
+  // stored lap time, tyre data and raw payload.
+  if (existingUpload && existingUpload.driver_id !== driver.id) {
+    return NextResponse.json(
+      { error: 'This lap has already been uploaded by another driver' },
+      { status: 409 }
     );
   }
 
