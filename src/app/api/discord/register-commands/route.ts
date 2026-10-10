@@ -6,6 +6,9 @@ export const dynamic = "force-dynamic";
  * One-time-use endpoint to register Discord slash commands.
  * Protected by REGISTER_COMMANDS_SECRET — pass it as ?secret=... in the URL.
  * DELETE THIS FILE after confirming it worked.
+ *
+ * NOTE: this does a bulk PUT, which REPLACES every global command with the
+ * list below. Any command missing from this list gets removed from Discord.
  */
 export async function GET(req: NextRequest) {
   const secret = req.nextUrl.searchParams.get("secret");
@@ -728,6 +731,146 @@ export async function GET(req: NextRequest) {
           name: "flag",
           description: "Manual flag emoji override (e.g. 🇯🇵) — needed for the flag image to render with a manual track",
           required: false,
+        },
+      ],
+    },
+    {
+      name: "division",
+      description: "Manage league divisions (owner/co-owner/commissioner)",
+      options: [
+        {
+          type: 1,
+          name: "create",
+          description: "Create a division with its Discord role and check-in channel",
+          options: [
+            {
+              type: 3,
+              name: "code",
+              description: "Short code, e.g. D1 or F2",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "name",
+              description: "Display name (defaults to the code)",
+              required: false,
+            },
+            {
+              type: 4,
+              name: "max_drivers",
+              description: "Maximum drivers in this division",
+              required: false,
+              min_value: 1,
+            },
+            {
+              type: 4,
+              name: "tier_order",
+              description: "Sort order, 1 = top division",
+              required: false,
+              min_value: 1,
+            },
+            {
+              type: 5,
+              name: "create_discord",
+              description: "Create role, category and check-in channel (default: yes)",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "list",
+          description: "List this league's divisions",
+        },
+        {
+          type: 1,
+          name: "assign",
+          description: "Put a driver in a division (moves them if already in another)",
+          options: [
+            {
+              type: 6,
+              name: "driver",
+              description: "The driver",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "division",
+              description: "Division code, e.g. D1",
+              required: true,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "remove",
+          description: "Take a driver out of their division",
+          options: [
+            {
+              type: 6,
+              name: "driver",
+              description: "The driver",
+              required: true,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "link",
+          description: "Attach a channel or role to an existing division, or edit its cap or name",
+          options: [
+            {
+              type: 3,
+              name: "code",
+              description: "Division code, e.g. F2",
+              required: true,
+            },
+            {
+              type: 7,
+              name: "checkin_channel",
+              description: "Check-in channel for this division",
+              required: false,
+              channel_types: [0],
+            },
+            {
+              type: 8,
+              name: "role",
+              description: "Discord role for this division",
+              required: false,
+            },
+            {
+              type: 4,
+              name: "max_drivers",
+              description: "Maximum drivers",
+              required: false,
+              min_value: 1,
+            },
+            {
+              type: 3,
+              name: "name",
+              description: "Display name",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "delete",
+          description: "Delete a division (blocked if it has rounds or check-ins)",
+          options: [
+            {
+              type: 3,
+              name: "code",
+              description: "Division code, e.g. D2",
+              required: true,
+            },
+            {
+              type: 5,
+              name: "delete_discord",
+              description: "Also delete its Discord role, category and channel (default: no)",
+              required: false,
+            },
+          ],
         },
       ],
     },
