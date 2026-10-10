@@ -1183,7 +1183,180 @@ function buildDeterministicNarrative(input: NarrativeInput): CoachingNarrative {
   };
 }
 
+// -----------------------------------------------------------------------
+// Claude-first narrative.
+//
+// Why this exists: the free-model path in pitboss-proxy has a hard ~10s budget
+// for the whole free waterfall, which a long structured reasoning answer
+// cannot meet, so every stored report fell back to the deterministic template.
+// Here the narrative is written by Claude directly (server-side, key never
+// reaches the client), split into three PARALLEL calls so the slowest one sets
+// the latency instead of the sum. If a call fails, only that part falls back
+// per item to the deterministic text; if all three fail, the old pbInfer path
+// below still runs, then the template.
+//
+// Needs ANTHROPIC_API_KEY (server env). COACH_MODEL optionally overrides the
+// model id. The coach route must allow >30s (see maxDuration in its route.ts).
+// -----------------------------------------------------------------------
+
+const COACH_MODEL = process.env.COACH_MODEL || 'claude-sonnet-5-5';
+const COACH_CALL_TIMEOUT_MS = 40_000;
+
+const COACH_QUALITY_ADDENDUM = `
+
+Coaching standards (apply to every note and tip you write):
+- Rank by lap time. Put the biggest time losses first, using the comparison zones, sector deltas and per-straight deltas when they are given. Say roughly how much time is at stake only when a number in the data supports it.
+- Explain cause and effect: what the driver did, why it costs time, and what the effect is on the next phase of the corner or the straight that follows.
+- Make every tip specific and testable on the next lap (a brake marker, a throttle point, a trail-brake release, a minimum-speed target). Prefer targets taken from the reference lap numbers when one is provided.
+- Name what was done well when execution is clean, so the driver knows what to keep.
+- Be a coach, not a report: direct, encouraging, never generic, and never repeat the same sentence shape across corners.
+- If the data shows a sensor gap or a missing value, say it cannot be judged rather than guessing.`;
+
+type NarrativePart = 'overview' | 'corners' | 'straights';
+
+const PART_INSTRUCTION: Record<NarrativePart, string> = {
+  overview:
+    '\n\nFor THIS request return ONLY a JSON object with exactly these two keys: "summary" and "suggestions". Omit every other key.',
+  corners:
+    '\n\nFor THIS request return ONLY a JSON object with exactly these two keys: "cornerNotes" and "cornerSuggestions". Omit every other key.',
+  straights:
+    '\n\nFor THIS request return ONLY a JSON object with exactly these two keys: "straightNotes" and "straightSuggestions". Omit every other key.',
+};
+
+async function callClaudeForCoach(system: string, payload: object, maxTokens: number): Promise<string | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COACH_CALL_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: COACH_MODEL,
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: 'user', content: JSON.stringify(payload) }],
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.error('[telemetry-coach] Claude call failed:', res.status, (await res.text()).slice(0, 500));
+      return null;
+    }
+    const data: any = await res.json();
+    const text = Array.isArray(data?.content)
+      ? data.content
+          .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+          .map((b: any) => b.text)
+          .join('')
+      : '';
+    return text.trim() ? text : null;
+  } catch (err) {
+    console.error('[telemetry-coach] Claude call threw:', err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseJsonObjectLoose(raw: string | null): any | null {
+  if (!raw) return null;
+  const cleaned = stripJsonFences(raw);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // fall through to extraction
+  }
+  const extracted = extractTrailingJsonObject(cleaned);
+  if (!extracted) return null;
+  try {
+    return JSON.parse(extracted);
+  } catch {
+    return null;
+  }
+}
+
+function recordToNumberMap(rec: Record<string, string>): Map<number, string> {
+  const m = new Map<number, string>();
+  for (const [key, note] of Object.entries(rec)) {
+    const id = Number(key);
+    if (Number.isFinite(id)) m.set(id, note);
+  }
+  return m;
+}
+
+async function generateNarrativeWithClaude(input: NarrativeInput): Promise<CoachingNarrative | null> {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+
+  const system = buildCoachSystemPrompt(input.speedUnit) + COACH_QUALITY_ADDENDUM;
+  const lapContext = {
+    lapNum: input.lapNum,
+    lapTime: input.lapTime,
+    lapValid: input.lapValid,
+    referenceLapNum: input.referenceLapNum,
+    speedUnit: input.speedUnit,
+    comparison: input.comparison,
+    generalIssues: input.generalIssues,
+  };
+
+  const [overviewRaw, cornersRaw, straightsRaw] = await Promise.all([
+    callClaudeForCoach(system + PART_INSTRUCTION.overview, input, 1200),
+    input.corners.length > 0
+      ? callClaudeForCoach(system + PART_INSTRUCTION.corners, { ...lapContext, corners: input.corners }, 2500)
+      : Promise.resolve(null),
+    input.straights.length > 0
+      ? callClaudeForCoach(system + PART_INSTRUCTION.straights, { ...lapContext, straights: input.straights }, 1500)
+      : Promise.resolve(null),
+  ]);
+
+  const overview = parseJsonObjectLoose(overviewRaw);
+  const cornersParsed = parseJsonObjectLoose(cornersRaw);
+  const straightsParsed = parseJsonObjectLoose(straightsRaw);
+
+  const overviewOk =
+    !!overview &&
+    typeof overview.summary === 'string' &&
+    Array.isArray(overview.suggestions) &&
+    overview.suggestions.length > 0 &&
+    overview.suggestions.every((x: unknown) => typeof x === 'string');
+  const cornersOk =
+    !!cornersParsed && isStringRecord(cornersParsed.cornerNotes) && isStringRecord(cornersParsed.cornerSuggestions);
+  const straightsOk =
+    !!straightsParsed && isStringRecord(straightsParsed.straightNotes) && isStringRecord(straightsParsed.straightSuggestions);
+
+  if (!overviewOk && !cornersOk && !straightsOk) {
+    console.error('[telemetry-coach] all Claude narrative parts failed or were unparseable');
+    return null;
+  }
+
+  // Anything a failed part leaves out is filled per item by the existing
+  // deterministic fallback in buildCoachingReport.
+  const det = buildDeterministicNarrative(input);
+  return {
+    summaryText: overviewOk ? overview.summary : det.summaryText,
+    suggestions: overviewOk ? overview.suggestions : det.suggestions,
+    cornerNotes: cornersOk ? recordToNumberMap(cornersParsed.cornerNotes) : new Map(),
+    cornerSuggestions: cornersOk ? recordToNumberMap(cornersParsed.cornerSuggestions) : new Map(),
+    straightNotes: straightsOk ? recordToNumberMap(straightsParsed.straightNotes) : new Map(),
+    straightSuggestions: straightsOk ? recordToNumberMap(straightsParsed.straightSuggestions) : new Map(),
+    source: 'llm',
+  };
+}
+
 async function generateCoachingNarrative(input: NarrativeInput): Promise<CoachingNarrative> {
+  // Preferred path: Claude directly (see the block above). Falls through to the
+  // free-model path, then the deterministic template, if it is unavailable.
+  if (process.env.ANTHROPIC_API_KEY) {
+    const viaClaude = await generateNarrativeWithClaude(input);
+    if (viaClaude) return viaClaude;
+  }
+
   try {
     const result = await pbInfer({
       mode: 'reasoning',
