@@ -11,15 +11,15 @@
 // and can't be attributed as a party to an incident.
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession } from '@/lib/session'
+import { getAuthedDriver } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/server'
 
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const requester = await getAuthedDriver()
+  if (!requester) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -28,6 +28,19 @@ export async function GET(
   const includeRetired = req.nextUrl.searchParams.get('include_retired') === 'true'
 
   const supabase = createAdminClient()
+
+  // Only members of the league can see its roster. Before, any signed-in user
+  // could list any league's drivers, teams and car numbers by id.
+  const { data: membership } = await supabase
+    .schema('pitboss')
+    .from('driver_leagues')
+    .select('driver_id')
+    .eq('driver_id', requester.id)
+    .eq('league_id', leagueId)
+    .maybeSingle()
+  if (!membership) {
+    return NextResponse.json({ error: 'Not a member of this league' }, { status: 403 })
+  }
 
   let query = supabase
     .schema('pitboss')

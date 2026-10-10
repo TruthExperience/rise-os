@@ -41,7 +41,7 @@ export async function PATCH(req: NextRequest) {
   // is_correct and next_index in the body are ignored on purpose.
   const { session_id, question_id, selected_answer } = body ?? {}
 
-  if (!session_id || !question_id || typeof selected_answer !== 'string') {
+  if (!session_id || !question_id || typeof selected_answer !== 'string' || selected_answer.length > 500) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
@@ -188,14 +188,34 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: true, score, passed, correct, total })
   }
 
+  // Don't let this flow overwrite a result that is already final. If the
+  // certification was already passed or failed (for example through
+  // /api/pitboss/cert/submit, which locks the driver out for 24 hours), a
+  // leftover active exam session could otherwise flip it, undoing the lockout.
+  if (!cert || (cert.status !== 'pending' && cert.status !== 'in_progress')) {
+    return NextResponse.json(
+      { error: `Certification is already ${cert?.status ?? 'closed'}` },
+      { status: 409 }
+    )
+  }
+
   const now = new Date().toISOString()
 
-  await supabase
+  // Only one request gets to grade the session. A double submit or two
+  // parallel PUTs both used to write the result.
+  const { data: claimed } = await supabase
     .from('exam_sessions')
     .update({ status: 'completed', completed_at: now, last_active_at: now })
     .eq('id', session_id)
+    .eq('status', 'active')
+    .select('id')
+    .maybeSingle()
 
-  await supabase
+  if (!claimed) {
+    return NextResponse.json({ ok: true, score, passed, correct, total })
+  }
+
+  const { error: certErr } = await supabase
     .from('certifications')
     .update({
       status: passed ? 'passed' : 'failed',
@@ -206,6 +226,11 @@ export async function PUT(req: NextRequest) {
         : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     })
     .eq('id', session.certification_id)
+    .in('status', ['pending', 'in_progress'])
+
+  if (certErr) {
+    console.error('[exam-session/progress PUT] certification update', certErr)
+  }
 
   return NextResponse.json({ ok: true, score, passed, correct, total })
 }

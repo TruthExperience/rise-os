@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
+import { checkPersonnelFields } from '@/lib/pitboss/personnelValidation'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,7 +17,13 @@ interface PersonnelCreateBody {
   discord_id?: string | null // whoever is adding this custom entry
 }
 
+
 export async function GET(req: NextRequest) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
   const supabase = createAdminClient()
   const { searchParams } = new URL(req.url)
 
@@ -41,7 +48,28 @@ export async function GET(req: NextRequest) {
   // Game-canon rows have no league_id; custom rows are scoped to a league.
   // Requesting a league_id returns that league's custom roster plus every
   // game-canon row, so the UI can show both in one list.
-  if (leagueId) query = query.or(`league_id.eq.${leagueId},league_id.is.null`)
+  //
+  // Custom rows belong to a league, so they are only returned to its members.
+  // With no league_id you get game-canon rows only; before, that call
+  // returned every league's custom entries to anyone, signed in or not.
+  if (leagueId) {
+    if (!/^[0-9a-fA-F-]{36}$/.test(leagueId)) {
+      return NextResponse.json({ error: 'Invalid league_id' }, { status: 400 })
+    }
+    const { data: membership } = await supabase
+      .schema('pitboss')
+      .from('driver_leagues')
+      .select('driver_id')
+      .eq('driver_id', driver.id)
+      .eq('league_id', leagueId)
+      .maybeSingle()
+    if (!membership) {
+      return NextResponse.json({ error: 'You are not a member of this league' }, { status: 403 })
+    }
+    query = query.or(`league_id.eq.${leagueId},league_id.is.null`)
+  } else {
+    query = query.is('league_id', null)
+  }
 
   const { data, error } = await query
 
@@ -82,6 +110,13 @@ export async function POST(req: NextRequest) {
       { error: 'full_name, position_category, and position are required' },
       { status: 400 },
     )
+  }
+  const fieldError = checkPersonnelFields({ full_name, team_name, position, notes, driver_number, attributes })
+  if (fieldError) {
+    return NextResponse.json({ error: fieldError }, { status: 400 })
+  }
+  if (typeof league_id !== 'string' && league_id != null) {
+    return NextResponse.json({ error: 'Invalid league_id' }, { status: 400 })
   }
   if (position_category !== 'driver' && position_category !== 'staff') {
     return NextResponse.json(
