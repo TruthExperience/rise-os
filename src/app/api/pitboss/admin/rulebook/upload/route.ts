@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { pbInfer } from '@/lib/pitboss-llm'
 
 const DEFAULT_QUESTION_COUNT = 30
@@ -90,22 +91,13 @@ export async function POST(req: NextRequest) {
   const supabase = await createClient()
 
   // ── Auth: must be commissioner ────────────────────────────────────────────
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-  if (authError || !user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const discordId = user.user_metadata?.provider_id ?? user.user_metadata?.sub ?? ''
-
-  const { data: driver } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .maybeSingle()
-
+  // getAuthedDriver() resolves the pitboss.drivers row from the Supabase
+  // session (by discord_id OR user_id). The old code read the Discord id out
+  // of user_metadata, which users can edit themselves, and 404'd any account
+  // without a Discord identity.
+  const driver = await getAuthedDriver()
   if (!driver) {
-    return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   // ── Parse multipart form ──────────────────────────────────────────────────
