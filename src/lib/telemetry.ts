@@ -6,8 +6,12 @@ import {
   type TelemetrySession,
 } from "@/lib/telemetry-types";
 
+// F1 UDP telemetry orders every four-wheel array as [RL, RR, FL, FR] (rears
+// first), NOT [FL, FR, RL, RR]. Confirmed against stored data: a car setup with
+// 25 psi front / 21 psi rear shows hot pressures ~21.8 on array indexes 2-3 and
+// ~18.2 on indexes 0-1, and the fronts' brake temps (~510) sit on indexes 2-3.
 function toCornerRecord(arr: number[] | null | undefined): Record<Corner, number> {
-  const [fl, fr, rl, rr] = arr ?? [0, 0, 0, 0];
+  const [rl, rr, fl, fr] = arr ?? [0, 0, 0, 0];
   return { FL: fl, FR: fr, RL: rl, RR: rr };
 }
 
