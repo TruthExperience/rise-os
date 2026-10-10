@@ -250,6 +250,9 @@ import "./contract";
 // Side-effect import: registers the checkin/checkin-status/checkin-remind/
 // checkin-create/generate-grid commands.
 import "./checkin";
+// Side-effect import: registers the division_* commands (create, list,
+// assign, remove, link, delete).
+import "./division";
 // Side-effect import: registers the cap_* commands.
 import "./cap";
 // Side-effect import: registers the ddv_* and tp_view commands.
