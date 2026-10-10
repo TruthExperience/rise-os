@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/server";
+import { createClient, createAdminClient } from "@/lib/supabase/server";
+import { getAuthedDriver } from "@/lib/getSupabaseUserId";
 
 const STEWARD_ROLES = ["STW", "HEAD_STW", "BSAC_CHIEF", "COMMISSIONER", "ADMIN"];
 
@@ -16,40 +16,23 @@ export async function GET(
 
   const admin = createAdminClient();
 
-  const { data: profile } = await admin
-    .from("users")
-    .select("discord_id, email")
-    .eq("auth_user_id", authUser.id)
-    .maybeSingle();
+  // Primary path: the driver linked to this account by discord_id OR user_id
+  // (so email sign-ups with a linked driver row work).
+  let driverId: string | null = (await getAuthedDriver())?.id ?? null;
 
-  const discordId = profile?.discord_id ?? undefined;
-  const email = profile?.email ?? authUser.email ?? undefined;
-
-  if (!discordId && !email) return NextResponse.json({ hasAccess: false });
-
-  let driver: { id: string } | null = null;
-
-  if (discordId) {
+  // Fallback for drivers matched only by email on pitboss.drivers. Only
+  // trusted once the account's email is confirmed.
+  if (!driverId && authUser.email && authUser.email_confirmed_at) {
     const { data } = await admin
       .schema("pitboss")
       .from("drivers")
       .select("id")
-      .eq("discord_id", discordId)
+      .eq("email", authUser.email)
       .maybeSingle();
-    driver = data;
+    driverId = data?.id ?? null;
   }
 
-  if (!driver && email) {
-    const { data } = await admin
-      .schema("pitboss")
-      .from("drivers")
-      .select("id")
-      .eq("email", email)
-      .maybeSingle();
-    driver = data;
-  }
-
-  if (!driver) return NextResponse.json({ hasAccess: false });
+  if (!driverId) return NextResponse.json({ hasAccess: false });
 
   // Owners and head stewards govern the league itself — they shouldn't
   // need to pass a certification exam to access their own steward panel.
@@ -58,7 +41,7 @@ export async function GET(
     .schema("pitboss")
     .from("driver_leagues")
     .select("is_owner, is_co_owner, is_head_steward")
-    .eq("driver_id", driver.id)
+    .eq("driver_id", driverId)
     .eq("league_id", params.id)
     .maybeSingle();
 
@@ -70,7 +53,7 @@ export async function GET(
     .schema("pitboss")
     .from("licences")
     .select("id")
-    .eq("driver_id", driver.id)
+    .eq("driver_id", driverId)
     .eq("league_id", params.id)
     .eq("status", "active")
     .in("role_code", STEWARD_ROLES)
