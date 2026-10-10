@@ -7,6 +7,7 @@ import {
 } from "recharts";
 import { CORNERS, cornerAvg, type Corner, type TelemetrySession } from "@/lib/telemetry-types";
 import CoachingPanel from "@/components/pitboss/CoachingPanel";
+import TelemetryReplay from "@/components/pitboss/TelemetryReplay";
 import CoachingTrendsPanel from "@/components/pitboss/CoachingTrendsPanel";
 
 const LAP_COLORS: Record<number, string> = {
@@ -117,6 +118,10 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
 
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [refLap, setRefLap] = useState<number | null>(null);
+  // Coaching lap/reference are chosen independently of the track-map lap.
+  // null = automatic (follow the track-map lap, compare to the fastest lap).
+  const [coachLap, setCoachLap] = useState<number | null>(null);
+  const [coachRef, setCoachRef] = useState<number | "none" | null>(null);
 
   useEffect(() => {
     if (session && selected.size === 0) {
@@ -252,6 +257,9 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
           BEST LAP {fmtTime(bestLapTime)} — L{fastest}
         </div>
       </div>
+
+      {/* Lap replay: playhead-driven track map, live gauges and every channel */}
+      <TelemetryReplay session={session} defaultLap={refLap} />
 
       {/* Timing tower */}
       <Panel title="Timing Tower" style={{ marginBottom: 18, overflowX: "auto" }}>
@@ -420,14 +428,78 @@ export default function TelemetryDashboard({ sessionUid }: { sessionUid: string 
         </ResponsiveContainer>
       </Panel>
 
-      {/* Coaching — analyzes the currently-selected track-map/G-G lap
-          (refLap), compared against the fastest lap unless refLap already
-          is the fastest lap (comparing a lap to itself is a no-op). */}
-      <CoachingPanel
-        sessionUid={session.sessionUid}
-        lapNum={refLap}
-        referenceLapNum={refLap !== fastest ? fastest : undefined}
-      />
+      {/* Coaching — pick any lap and any comparison lap. Defaults: the
+          track-map lap, compared against the fastest lap (a lap is never
+          compared against itself). Reports are cached per lap + reference. */}
+      {(() => {
+        const lapForCoach = coachLap ?? refLap;
+        const autoRef = lapForCoach !== fastest ? fastest : undefined;
+        const refForCoach: number | undefined =
+          coachRef === null ? autoRef
+          : coachRef === "none" ? undefined
+          : coachRef !== lapForCoach ? coachRef : undefined;
+        const selStyle: React.CSSProperties = {
+          background: "#0B0E11", color: "#E7EAEE", border: "1px solid #262B33",
+          borderRadius: 4, padding: "6px 8px", fontFamily: "'JetBrains Mono', monospace", fontSize: 12,
+        };
+        return (
+          <>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontFamily: "'Titillium Web', sans-serif", fontWeight: 700, fontSize: 13, letterSpacing: "0.08em", textTransform: "uppercase", color: "#9AA3AF" }}>
+                Coaching
+              </div>
+              <label style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#5B6572" }}>
+                Lap{" "}
+                <select value={lapForCoach} onChange={(e) => setCoachLap(Number(e.target.value))} style={selStyle}>
+                  {session.laps.map((l) => (
+                    <option key={l.lapNum} value={l.lapNum}>
+                      L{l.lapNum} · {fmtTime(l.lapTime)}{l.lapNum === fastest ? " (fastest)" : ""}{l.lapValid ? "" : " · invalid"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#5B6572" }}>
+                Compare to{" "}
+                <select
+                  value={coachRef === null ? "auto" : String(coachRef)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setCoachRef(v === "auto" ? null : v === "none" ? "none" : Number(v));
+                  }}
+                  style={selStyle}
+                >
+                  <option value="auto">Fastest lap (auto)</option>
+                  <option value="none">No comparison</option>
+                  {session.laps.filter((l) => l.lapNum !== lapForCoach).map((l) => (
+                    <option key={l.lapNum} value={l.lapNum}>L{l.lapNum} · {fmtTime(l.lapTime)}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+              {session.laps.map((l) => (
+                <button
+                  key={l.lapNum}
+                  onClick={() => setCoachLap(l.lapNum)}
+                  style={{
+                    ...selStyle, cursor: "pointer",
+                    borderColor: l.lapNum === lapForCoach ? "#00B8D9" : "#262B33",
+                    color: l.lapNum === lapForCoach ? "#00B8D9" : "#9AA3AF",
+                  }}
+                >
+                  L{l.lapNum}
+                </button>
+              ))}
+            </div>
+            <CoachingPanel
+              key={`${lapForCoach}-${refForCoach ?? "none"}`}
+              sessionUid={session.sessionUid}
+              lapNum={lapForCoach}
+              referenceLapNum={refForCoach}
+            />
+          </>
+        );
+      })()}
 
       {/* Season-long trends — aggregates every coached lap this driver
           has on record (not just this session). Corner-level consistency
