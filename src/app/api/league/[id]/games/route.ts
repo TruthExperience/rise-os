@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 
 export const dynamic = 'force-dynamic'
@@ -37,42 +37,14 @@ function getPitboss() {
 }
 
 async function requireUploadAccess(leagueId: string) {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  if (!user) {
+  // getAuthedDriver() resolves the pitboss.drivers row from the Supabase
+  // session (by discord_id OR user_id), so email sign-ups work too.
+  const driver = await getAuthedDriver()
+  if (!driver) {
     return { error: NextResponse.json({ error: 'Unauthenticated' }, { status: 401 }) }
   }
 
-  // pitboss.drivers is keyed by discord_id, not the Supabase auth user id —
-  // resolve through public.users the same way getSupabaseUserId does.
-  const { data: profile } = await supabase
-    .from('users')
-    .select('discord_id')
-    .eq('auth_user_id', user.id)
-    .maybeSingle()
-
-  if (!profile?.discord_id) {
-    return {
-      error: NextResponse.json(
-        { error: 'Account not linked to a driver profile' },
-        { status: 403 }
-      ),
-    }
-  }
-
   const pitboss = getPitboss()
-  const { data: driver } = await pitboss
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', profile.discord_id)
-    .single()
-
-  if (!driver) {
-    return { error: NextResponse.json({ error: 'Driver not found' }, { status: 403 }) }
-  }
 
   const { data: membership } = await pitboss
     .from('driver_leagues')
@@ -96,7 +68,7 @@ async function requireUploadAccess(leagueId: string) {
     }
   }
 
-  return { discordUserId: profile.discord_id }
+  return { driverId: driver.id }
 }
 
 // GET — games for a league, filterable by season_id/week, plus computed
