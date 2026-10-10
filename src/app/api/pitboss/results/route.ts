@@ -1,20 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession } from '@/lib/session'
+import { getAuthedDriver, getSupabaseUserId } from '@/lib/getSupabaseUserId'
 import { createAdminClient } from '@/lib/supabase/server'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
 
-async function resolveDriverAndCheckSteward(discordId: string, leagueId: string) {
+async function resolveDriverAndCheckSteward(driverId: string, leagueId: string) {
   const supabase = createAdminClient()
-
-  const { data: driver } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .single()
-
-  if (!driver) return { supabase, driver: null, licence: null }
+  const driver = { id: driverId }
 
   const { data: licence } = await supabase
     .schema('pitboss')
@@ -59,8 +51,9 @@ function checkResultRow(r: any, partial = false): string | null {
 
 // GET — results for a league, filterable by season/round
 export async function GET(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  // Any signed-in account may read results (email sign-ups included).
+  const userId = await getSupabaseUserId()
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -136,8 +129,8 @@ export async function GET(req: NextRequest) {
 
 // POST — bulk insert results for a round (steward only)
 export async function POST(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const authed = await getAuthedDriver()
+  if (!authed) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -161,7 +154,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { supabase, driver, licence } = await resolveDriverAndCheckSteward(
-    session.user.discordId,
+    authed.id,
     league_id
   )
 
@@ -224,8 +217,8 @@ export async function POST(req: NextRequest) {
 
 // PUT — edit a single result
 export async function PUT(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const authed = await getAuthedDriver()
+  if (!authed) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -242,7 +235,7 @@ export async function PUT(req: NextRequest) {
   }
 
   const { supabase, driver, licence } = await resolveDriverAndCheckSteward(
-    session.user.discordId,
+    authed.id,
     league_id
   )
 
