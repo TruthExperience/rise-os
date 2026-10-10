@@ -4,11 +4,12 @@
 // pitboss.driver_style_profiles. Unlike career_mode_drivers (a searchable
 // library, no ownership), this table has a real 1:1 tie to a driver via the
 // unique driver_id column, so it's resolved from the session the same way
-// the rest of the app treats "my own record" — session.user.discordId ->
-// pitboss.drivers.id — not a route param.
+// the rest of the app treats "my own record" — the signed-in user's
+// pitboss.drivers row via getAuthedDriver() (linked by discord_id OR
+// user_id, so email sign-ups work too) — not a route param.
 
 import { NextResponse } from "next/server";
-import { getSession } from "@/lib/session";
+import { getAuthedDriver } from "@/lib/getSupabaseUserId";
 import { createAdminClient } from "@/lib/supabase/server";
 
 const CAR_FEEL_OPTIONS = [
@@ -27,30 +28,12 @@ const RACE_LENGTH_OPTIONS = [
   "100_percent",
 ] as const;
 
-async function resolveDriverId(discordId: string) {
-  const supabase = createAdminClient();
-  const { data, error } = await supabase
-    .schema("pitboss")
-    .from("drivers")
-    .select("id")
-    .eq("discord_id", discordId)
-    .maybeSingle();
-
-  if (error) throw new Error(`Failed to resolve driver: ${error.message}`);
-  return data?.id ?? null;
-}
-
 export async function GET() {
-  const session = await getSession();
-  const discordId = session?.user?.discordId;
-  if (!discordId) {
+  const authed = await getAuthedDriver();
+  if (!authed) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
-
-  const driverId = await resolveDriverId(discordId);
-  if (!driverId) {
-    return NextResponse.json({ error: "Driver record not found" }, { status: 404 });
-  }
+  const driverId = authed.id;
 
   const supabase = createAdminClient();
   const { data, error } = await supabase
@@ -79,16 +62,11 @@ interface PutBody {
 }
 
 export async function PUT(req: Request) {
-  const session = await getSession();
-  const discordId = session?.user?.discordId;
-  if (!discordId) {
+  const authed = await getAuthedDriver();
+  if (!authed) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
-
-  const driverId = await resolveDriverId(discordId);
-  if (!driverId) {
-    return NextResponse.json({ error: "Driver record not found" }, { status: 404 });
-  }
+  const driverId = authed.id;
 
   let body: PutBody;
   try {
