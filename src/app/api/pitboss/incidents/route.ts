@@ -6,7 +6,7 @@
 //   AWC  → any driver in the league
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession } from '@/lib/session'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { createClient } from '@supabase/supabase-js'
 
 function getSupabase() {
@@ -42,24 +42,13 @@ function cleanUrls(input: unknown): string[] | null | 'invalid' {
 }
 
 export async function GET(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const driver = await getAuthedDriver()
+  if (!driver) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
   const leagueId = req.nextUrl.searchParams.get('league_id')
   const supabase = getSupabase()
-
-  // Resolve driver record from Discord ID
-  const { data: driver } = await supabase
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', session.user.discordId)
-    .single()
-
-  if (!driver) {
-    return NextResponse.json({ error: 'Driver not found' }, { status: 404 })
-  }
 
   let query = supabase
     .from('incidents')
@@ -78,8 +67,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const reporter = await getAuthedDriver()
+  if (!reporter) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -124,17 +113,6 @@ export async function POST(req: NextRequest) {
   }
 
   const supabase = getSupabase()
-
-  // Resolve submitter's driver record
-  const { data: reporter } = await supabase
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', session.user.discordId)
-    .single()
-
-  if (!reporter) {
-    return NextResponse.json({ error: 'Your driver record was not found' }, { status: 403 })
-  }
 
   // Check league membership + role
   const { data: membership } = await supabase
