@@ -29,6 +29,27 @@ const fbKey = (kind: FeedbackKind, index: number) =>
 type ReportWithId = CoachingReport & { id?: string };
 
 const FEEDBACK_URL = "/api/pitboss/telemetry/coach/feedback";
+const SETUP_SUGGESTIONS_URL = "/api/pitboss/telemetry/coach/setup-suggestions";
+
+interface SetupSuggestion {
+  paramKey: string;
+  label: string;
+  current: number;
+  suggested: number;
+  direction: "increase" | "decrease";
+  supportCount: number;
+  benchmarkCount: number;
+}
+
+interface SetupSuggestionsResponse {
+  status: "ok" | "insufficient_data" | "lap_invalid" | "no_setup";
+  minRequired: number;
+  benchmarkLaps: number;
+  medianGapSeconds: number | null;
+  suggestions: SetupSuggestion[];
+}
+
+const fmtSetup = (n: number) => String(Number(n.toFixed(3)));
 
 function Panel({ title, subtitle, children, style }: { title: string; subtitle?: string; children: React.ReactNode; style?: React.CSSProperties }) {
   return (
@@ -250,6 +271,72 @@ function StraightCard({
   );
 }
 
+function SetupSuggestionsBlock({ data }: { data: SetupSuggestionsResponse }) {
+  // Nothing useful to say for an invalid lap or one with no stored setup.
+  if (data.status === "lap_invalid" || data.status === "no_setup") return null;
+
+  const box: React.CSSProperties = {
+    background: "#0E1116", border: "1px solid #1D2229", borderRadius: 6,
+    padding: "12px 14px", marginBottom: 16,
+  };
+  const heading: React.CSSProperties = {
+    fontFamily: "'Titillium Web', sans-serif", fontWeight: 700, fontSize: 11.5,
+    letterSpacing: "0.06em", textTransform: "uppercase", color: "#5DA9E9", marginBottom: 8,
+  };
+  const muted: React.CSSProperties = {
+    fontFamily: "'Inter', sans-serif", fontSize: 12, color: "#5B6572", lineHeight: 1.5,
+  };
+
+  if (data.status === "insufficient_data") {
+    return (
+      <div style={box}>
+        <div style={heading}>Setup changes</div>
+        <div style={muted}>
+          Suggestions need at least {data.minRequired} faster laps at this track in the same conditions.
+          Import more laps to unlock them.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={box}>
+      <div style={heading}>Setup changes</div>
+
+      {data.suggestions.length === 0 ? (
+        <div style={muted}>
+          Your setup matches what the faster laps ran. Nothing to change.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {data.suggestions.map((s) => (
+            <div key={s.paramKey} style={{
+              display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12,
+              fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#B7BFC9",
+            }}>
+              <span style={{ color: "#E7EAEE" }}>{s.label}</span>
+              <span style={{ whiteSpace: "nowrap" }}>
+                {fmtSetup(s.current)}
+                <span style={{ color: "#5B6572" }}> → </span>
+                <span style={{ color: s.direction === "increase" ? "#00C853" : "#FFC400", fontWeight: 700 }}>
+                  {fmtSetup(s.suggested)}
+                </span>
+                <span style={{ color: "#5B6572" }}> · {s.supportCount}/{s.benchmarkCount} laps</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ ...muted, marginTop: 10, fontSize: 11.5 }}>
+        Based on {data.benchmarkLaps} faster lap{data.benchmarkLaps === 1 ? "" : "s"}
+        {data.medianGapSeconds != null ? ` (median ${data.medianGapSeconds.toFixed(2)}s quicker)` : ""} at this
+        track and conditions. Differences can come from driving style, so change one or two at a time.
+      </div>
+    </div>
+  );
+}
+
 // `index` is the item's position in report.corners / report.straights, which
 // is what the feedback route expects (render order is sorted by startDist).
 type TrackSegment =
@@ -270,6 +357,7 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
   const [ratings, setRatings] = useState<RatingMap>({});
   const [canRate, setCanRate] = useState(true);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [setupSuggestions, setSetupSuggestions] = useState<SetupSuggestionsResponse | null>(null);
 
   const reportId = report ? (report as ReportWithId).id : undefined;
 
@@ -320,6 +408,21 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
 
     return () => { cancelled = true; };
   }, [reportId]);
+
+  // Suggested setup changes for this lap. Independent of the coaching report,
+  // and non-fatal: if it fails the block just doesn't render.
+  useEffect(() => {
+    let cancelled = false;
+    setSetupSuggestions(null);
+
+    const params = new URLSearchParams({ session_uid: sessionUid, lap: String(lapNum) });
+    fetch(`${SETUP_SUGGESTIONS_URL}?${params.toString()}`)
+      .then(async (res) => (res.ok ? res.json() : null))
+      .then((data: SetupSuggestionsResponse | null) => { if (!cancelled) setSetupSuggestions(data); })
+      .catch(() => { /* non-fatal */ });
+
+    return () => { cancelled = true; };
+  }, [sessionUid, lapNum]);
 
   const rate = useCallback(
     async (kind: FeedbackKind, index: number, value: Rating) => {
@@ -452,6 +555,8 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
           </ol>
         </div>
       )}
+
+      {setupSuggestions && <SetupSuggestionsBlock data={setupSuggestions} />}
 
       {cmp && (
         <div style={{
