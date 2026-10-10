@@ -1,84 +1,175 @@
+// app/api/pitboss/telemetry/coach/backfill/route.ts
+//
+// One-off (repeatable) backfill for pitboss.coaching_reports. The dynamic
+// coaching pass added to telemetry-ingest/route.ts only runs on laps
+// ingested AFTER that change shipped — this route runs the same
+// buildCoachingReport + persistCoachingReport pipeline against every
+// existing valid lap in setup_telemetry_uploads that doesn't have a
+// coaching_reports row yet, so season-long trends aren't blind to
+// everything uploaded before this feature existed.
+//
+// BATCHED, NOT ONE-SHOT: each call processes up to `limit` laps (default
+// 10) and returns how many are still missing. Call it repeatedly (a
+// browser refresh, curl loop, or a temporary Vercel Cron entry) until
+// `done: true`. This is deliberate, not a shortcut — each lap's coaching
+// narrative is an LLM call through pitboss-proxy's waterfall, which can
+// legitimately take up to ~25s in the worst case (see DEFAULT_TIMEOUT_MS
+// in lib/pitboss-llm.ts); a handful of unlucky laps in one batch could
+// otherwise approach the function's maxDuration.
+//
+// AUTH: same CRON_SECRET gate (Bearer header, or ?secret= to run it from a browser) as the other admin/cron routes
+// in this repo (see api/cron/ea-ratings-all for the original pattern) —
+// reuses the existing env var rather than introducing a new secret.
+//
+// vercel.json:
+//   "src/app/api/pitboss/telemetry/coach/backfill/route.ts": { "maxDuration": 300 }
+
 import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/session';
+import { createAdminClient } from '@/lib/supabase/server';
+import { getTelemetrySession } from '@/lib/telemetry';
+import { buildCoachingReport } from '@/lib/pitboss/telemetry-coach';
+import { persistCoachingReport } from '@/lib/pitboss/coaching-history';
 
-const GROQ_TRANSCRIBE_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
+export const dynamic = 'force-dynamic';
 
-// A short spoken command is a few hundred KB at most. Cap uploads so a
-// signed-in account can't push huge files through the Groq key.
-const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
+const DEFAULT_LIMIT = 5;
+const MAX_LIMIT = 25;
 
-// Best-effort per-user limit (in memory, so per server instance). Stops a loop
-// from one signed-in account running up the Groq bill; not a hard cap.
-const RATE_WINDOW_MS = 60_000;
-const RATE_MAX_CALLS = 15;
-const hits = new Map<string, number[]>();
-function rateLimited(key: string): boolean {
-  const now = Date.now();
-  const recent = (hits.get(key) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
-  if (recent.length >= RATE_MAX_CALLS) {
-    hits.set(key, recent);
-    return true;
-  }
-  recent.push(now);
-  hits.set(key, recent);
-  return false;
+// Stop starting new laps after this long so one call stays inside maxDuration (300s).
+const TIME_BUDGET_MS = 240_000;
+
+interface PendingLap {
+  session_uid: string;
+  lap_num: number;
+  driver_id: string;
+  track_id: string | null;
+  car_class_id: string | null;
+  lap_time_seconds: number | null;
 }
 
-export async function POST(req: NextRequest) {
-  // Require a signed-in user. Without this the route was open to anyone and
-  // billed every request to GROQ_API_KEY.
-  const session = await getSession();
-  if (!session) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+export async function GET(request: NextRequest) {
+  // An unset CRON_SECRET must not turn this into the string "Bearer undefined".
+  const secret = process.env.CRON_SECRET;
+  const authorized =
+    !!secret &&
+    (request.headers.get('authorization') === `Bearer ${secret}` ||
+      request.nextUrl.searchParams.get('secret') === secret);
+  if (!authorized) {
+    return new Response('Unauthorized', { status: 401 });
   }
 
-  if (rateLimited(session.user.userId)) {
-    return NextResponse.json({ error: 'Too many requests. Please wait a minute.' }, { status: 429 });
+  const limitParam = request.nextUrl.searchParams.get('limit');
+  let limit = DEFAULT_LIMIT;
+  if (limitParam != null) {
+    const parsed = Number(limitParam);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return NextResponse.json({ error: 'limit must be a positive integer' }, { status: 400 });
+    }
+    limit = Math.min(parsed, MAX_LIMIT);
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: 'GROQ_API_KEY is not configured on the server' },
-      { status: 500 }
-    );
+  const admin = createAdminClient();
+
+  // Every valid uploaded lap, oldest first — so a backfill that spans
+  // multiple calls fills in chronological order, matching what the
+  // trends endpoint's "recent half vs earlier half" comparison assumes.
+  const { data: uploads, error: uploadsError } = await admin
+    .schema('pitboss')
+    .from('setup_telemetry_uploads')
+    .select('session_uid, lap_num, driver_id, track_id, car_class_id, lap_time_seconds')
+    .eq('lap_valid', true)
+    .not('driver_id', 'is', null)
+    .order('created_at', { ascending: true });
+
+  if (uploadsError) {
+    return NextResponse.json({ error: `Failed to list telemetry uploads: ${uploadsError.message}` }, { status: 500 });
   }
 
-  let formData: FormData;
-  try {
-    formData = await req.formData();
-  } catch {
-    return NextResponse.json({ error: 'Invalid form data' }, { status: 400 });
+  const { data: existingReports, error: reportsError } = await admin
+    .schema('pitboss')
+    .from('coaching_reports')
+    .select('session_uid, lap_num');
+
+  if (reportsError) {
+    return NextResponse.json({ error: `Failed to list existing coaching reports: ${reportsError.message}` }, { status: 500 });
   }
 
-  const audio = formData.get('audio') as File | null;
-  if (!audio) {
-    return NextResponse.json({ error: 'audio file is required' }, { status: 400 });
-  }
-  if (audio.size > MAX_AUDIO_BYTES) {
-    return NextResponse.json({ error: 'audio file too large' }, { status: 413 });
+  const alreadyDone = new Set((existingReports ?? []).map((r) => `${r.session_uid}:${r.lap_num}`));
+  const pending: PendingLap[] = (uploads ?? [])
+    .filter((u) => !alreadyDone.has(`${u.session_uid}:${u.lap_num}`))
+    .map((u) => ({
+      session_uid: u.session_uid,
+      lap_num: u.lap_num,
+      driver_id: u.driver_id as string,
+      track_id: u.track_id,
+      car_class_id: u.car_class_id,
+      lap_time_seconds: u.lap_time_seconds != null ? Number(u.lap_time_seconds) : null,
+    }));
+
+  const batch = pending.slice(0, limit);
+  const results: { session_uid: string; lap_num: number; status: 'ok' | 'error'; error?: string }[] = [];
+
+  // Cache getTelemetrySession per session_uid within this batch — a
+  // session with multiple pending laps shouldn't re-fetch/re-parse the
+  // same archived telemetry frames once per lap.
+  const sessionCache = new Map<string, Awaited<ReturnType<typeof getTelemetrySession>>>();
+
+  const deadline = Date.now() + TIME_BUDGET_MS;
+
+  for (const item of batch) {
+    if (Date.now() > deadline) break; // the rest stays pending for the next call
+    try {
+      let session = sessionCache.get(item.session_uid);
+      if (session === undefined) {
+        session = await getTelemetrySession(item.session_uid);
+        sessionCache.set(item.session_uid, session);
+      }
+      if (!session) {
+        results.push({ session_uid: item.session_uid, lap_num: item.lap_num, status: 'error', error: 'session not found' });
+        continue;
+      }
+
+      const otherValidLaps = session.laps.filter((l) => l.lapNum !== item.lap_num && l.lapValid);
+      const bestOther = otherValidLaps.reduce<typeof otherValidLaps[number] | null>(
+        (best, candidate) => (!best || candidate.lapTime < best.lapTime ? candidate : best),
+        null
+      );
+      const referenceLapNum = bestOther?.lapNum ?? undefined;
+
+      const report = await buildCoachingReport(session, item.lap_num, referenceLapNum);
+      await persistCoachingReport({
+        driverId: item.driver_id,
+        trackId: item.track_id,
+        carClassId: item.car_class_id,
+        sessionUid: item.session_uid,
+        lapNum: item.lap_num,
+        referenceLapNum: referenceLapNum ?? null,
+        lapTimeSeconds: item.lap_time_seconds,
+        lapValid: true,
+        report,
+      });
+
+      results.push({ session_uid: item.session_uid, lap_num: item.lap_num, status: 'ok' });
+    } catch (err) {
+      // One bad lap (missing frames, LLM timeout, whatever) must not stop
+      // the rest of the batch — log and move on, it'll just stay pending
+      // for the next call to retry.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[coach/backfill] failed for ${item.session_uid} lap ${item.lap_num}:`, message);
+      results.push({ session_uid: item.session_uid, lap_num: item.lap_num, status: 'error', error: message });
+    }
   }
 
-  const groqForm = new FormData();
-  groqForm.append('file', audio, audio.name || 'command.webm');
-  groqForm.append('model', 'whisper-large-v3-turbo');
-  groqForm.append('response_format', 'json');
+  const succeeded = results.filter((r) => r.status === 'ok').length;
+  const failed = results.filter((r) => r.status === 'error').length;
+  const remaining = pending.length - results.length;
 
-  const res = await fetch(GROQ_TRANSCRIBE_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: groqForm,
+  return NextResponse.json({
+    processed: results.length,
+    succeeded,
+    failed,
+    remaining,
+    done: remaining === 0,
+    results,
   });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error('[voice/transcribe]', res.status, errText);
-    return NextResponse.json(
-      { error: `Transcription failed (${res.status})` },
-      { status: 502 }
-    );
-  }
-
-  const data = await res.json();
-  return NextResponse.json({ text: data.text ?? '' });
 }
