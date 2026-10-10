@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/session";
+import { getSupabaseUserId } from "@/lib/getSupabaseUserId";
 import { createAdminClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const session = await getSession();
-  if (!session?.user?.discordId) {
+  // Any signed-in account may read standings (email sign-ups included).
+  const userId = await getSupabaseUserId();
+  if (!userId) {
     return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
   }
 
