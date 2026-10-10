@@ -9,7 +9,7 @@
 // of the app uses — NOT pitboss.licences, which is unused/legacy).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession } from '@/lib/session'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { createAdminClient } from '@/lib/supabase/server'
 
 // role is stored as free text, sometimes a comma-separated list
@@ -49,15 +49,8 @@ function cleanUrls(input: unknown): string[] | null | 'invalid' {
   return out.length ? out : null
 }
 
-async function resolveStewardDriver(supabase: ReturnType<typeof createAdminClient>, discordId: string, leagueId: string) {
-  const { data: driver } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .single()
-
-  if (!driver) return { driver: null, isSteward: false }
+async function resolveStewardDriver(supabase: ReturnType<typeof createAdminClient>, driverId: string, leagueId: string) {
+  const driver = { id: driverId }
 
   const { data: driverLeague } = await supabase
     .schema('pitboss')
@@ -71,8 +64,8 @@ async function resolveStewardDriver(supabase: ReturnType<typeof createAdminClien
 }
 
 export async function GET(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const authed = await getAuthedDriver()
+  if (!authed) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -85,7 +78,7 @@ export async function GET(req: NextRequest) {
 
   const supabase = createAdminClient()
 
-  const { driver, isSteward } = await resolveStewardDriver(supabase, session.user.discordId, leagueId)
+  const { driver, isSteward } = await resolveStewardDriver(supabase, authed.id, leagueId)
 
   if (!driver) {
     return NextResponse.json({ error: 'Driver record not found' }, { status: 403 })
@@ -127,8 +120,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const authed = await getAuthedDriver()
+  if (!authed) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -176,7 +169,7 @@ export async function POST(req: NextRequest) {
 
   const { driver: stewardDriver, isSteward } = await resolveStewardDriver(
     supabase,
-    session.user.discordId,
+    authed.id,
     league_id
   )
 
