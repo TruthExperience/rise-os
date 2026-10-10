@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession } from '@/lib/session'
+import { getSupabaseUserId } from '@/lib/getSupabaseUserId'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -18,28 +18,18 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const session = await getSession()
-  if (!session?.user) {
+  // getSupabaseUserId() resolves public.users.id straight from the Supabase
+  // session, so email sign-ups (no discord_id) can join too. This route must
+  // NOT use getAuthedDriver(): a first-time joiner has no pitboss.drivers
+  // row yet — rise_os.join_league creates it.
+  const userId = await getSupabaseUserId()
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-
-  const discordId = session.user.discordId
-  if (!discordId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const { data: userRow, error: userError } = await supabase
-    .from('users')
-    .select('id')
-    .eq('discord_id', discordId)
-    .maybeSingle()
-
-  if (userError) return NextResponse.json({ error: userError.message }, { status: 500 })
-  if (!userRow) return NextResponse.json({ error: 'User profile not found' }, { status: 404 })
 
   const { data, error } = await supabase
     .schema('rise_os')
-    .rpc('join_league', { p_user_id: userRow.id, p_league_id: params.id })
+    .rpc('join_league', { p_user_id: userId, p_league_id: params.id })
 
   if (error) {
     const status = error.code === '42501' ? 403 : error.code === 'P0002' ? 404 : 500
