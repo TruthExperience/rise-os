@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import BulkTelemetryImport from "./BulkTelemetryImport";
 
 const CAR_CLASSES = [
   { value: "F1_2025", label: "F1 2025" },
@@ -67,14 +68,16 @@ export default function TelemetryUploadPage() {
   const [autoDetected, setAutoDetected] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  async function handleUploadResponse(res: Response) {
+  // Returns true when the upload succeeded, so callers can act on the result
+  // directly (reading `status` after an await sees a stale value).
+  async function handleUploadResponse(res: Response): Promise<boolean> {
     const body = await res.json().catch(() => null);
 
     if (!res.ok) {
       setStatus("error");
       setMessage(body?.error ?? `Upload failed (${res.status}).`);
       setDetail(null);
-      return;
+      return false;
     }
 
     setStatus("success");
@@ -90,6 +93,7 @@ export default function TelemetryUploadPage() {
         .filter(Boolean)
         .join(" — ")
     );
+    return true;
   }
 
   // Paste path — sends the wrapped JSON shape.
@@ -124,8 +128,10 @@ export default function TelemetryUploadPage() {
           telemetry: parsedLap,
         }),
       });
-      await handleUploadResponse(res);
-      if (status !== "error") setRaw("");
+      // Only clear the pasted JSON when the upload worked, so a failed upload
+      // doesn't throw away what the driver pasted.
+      const ok = await handleUploadResponse(res);
+      if (ok) setRaw("");
     } catch {
       setStatus("error");
       setMessage("Couldn't reach the server.");
@@ -262,6 +268,13 @@ export default function TelemetryUploadPage() {
           <p className="text-xs text-white/40">{selectedFileName}</p>
         )}
       </section>
+
+      <BulkTelemetryImport
+        carClassCode={carClassCode}
+        leagueId={leagueId}
+        inferCarClass={inferCarClassCode}
+        disabled={isSubmitting}
+      />
 
       <div className="flex items-center gap-3">
         <div className="h-px flex-1 bg-white/10" />
