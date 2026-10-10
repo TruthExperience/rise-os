@@ -1,20 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession } from '@/lib/session'
+import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { createAdminClient } from '@/lib/supabase/server'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
 
-async function resolveDriverAndCheckSteward(discordId: string, leagueId: string) {
+async function resolveDriverAndCheckSteward(driverId: string, leagueId: string) {
   const supabase = createAdminClient()
-
-  const { data: driver } = await supabase
-    .schema('pitboss')
-    .from('drivers')
-    .select('id')
-    .eq('discord_id', discordId)
-    .single()
-
-  if (!driver) return { supabase, driver: null, licence: null }
+  const driver = { id: driverId }
 
   const { data: licence } = await supabase
     .schema('pitboss')
@@ -44,8 +36,8 @@ function validPenaltyText(reason: unknown, expires_at: unknown): string | null {
 
 // GET — all penalties in a league (steward view)
 export async function GET(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const authed = await getAuthedDriver()
+  if (!authed) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -58,7 +50,7 @@ export async function GET(req: NextRequest) {
   }
 
   const { supabase, driver, licence } = await resolveDriverAndCheckSteward(
-    session.user.discordId,
+    authed.id,
     leagueId
   )
 
@@ -106,8 +98,8 @@ export async function GET(req: NextRequest) {
 
 // POST — issue manual penalty (steward only)
 export async function POST(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const authed = await getAuthedDriver()
+  if (!authed) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -131,7 +123,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { supabase, driver, licence } = await resolveDriverAndCheckSteward(
-    session.user.discordId,
+    authed.id,
     league_id
   )
 
@@ -184,8 +176,8 @@ export async function POST(req: NextRequest) {
 
 // DELETE — remove a manual penalty (steward only)
 export async function DELETE(req: NextRequest) {
-  const session = await getSession()
-  if (!session?.user?.discordId) {
+  const authed = await getAuthedDriver()
+  if (!authed) {
     return NextResponse.json({ error: 'Unauthenticated' }, { status: 401 })
   }
 
@@ -202,7 +194,7 @@ export async function DELETE(req: NextRequest) {
   }
 
   const { supabase, driver, licence } = await resolveDriverAndCheckSteward(
-    session.user.discordId,
+    authed.id,
     league_id
   )
 
