@@ -1190,9 +1190,16 @@ function buildDeterministicNarrative(input: NarrativeInput): CoachingNarrative {
 const COACH_MODEL = process.env.COACH_MODEL || 'claude-sonnet-5-5';
 const COACH_CALL_TIMEOUT_MS = 40_000;
 
-const GROQ_MODEL = process.env.GROQ_COACH_MODEL || 'llama-3.3-70b-versatile';
+// llama-3.3-70b-versatile was retired on Groq (404 model_not_found).
+// openai/gpt-oss-120b is the replacement; openai/gpt-oss-20b is the
+// faster/cheaper alternative via GROQ_COACH_MODEL.
+const GROQ_MODEL = process.env.GROQ_COACH_MODEL || 'openai/gpt-oss-120b';
 const GROQ_CALL_TIMEOUT_MS = 30_000;
 const GROQ_MAX_RETRY_WAIT_SECONDS = 20;
+// gpt-oss models reason before answering, and reasoning tokens count against
+// max_completion_tokens. This headroom is added on top of each part's answer
+// budget so a long think can't truncate the JSON mid-object.
+const GROQ_REASONING_HEADROOM_TOKENS = 2000;
 
 const COACH_QUALITY_ADDENDUM = `
 
@@ -1262,11 +1269,17 @@ async function callClaudeForCoach(system: string, payload: object, maxTokens: nu
 // Groq exposes an OpenAI-compatible chat completions endpoint. JSON mode
 // (response_format json_object) keeps the model from wrapping the answer in
 // prose; the system prompt already says "JSON", which JSON mode requires.
-// llama-3.3-70b-versatile is not a reasoning model, so it doesn't spend
-// output budget on hidden thinking tokens. One retry after a 429 (free-tier
-// rate limit), waiting for the server's retry-after (capped).
+//
+// The default model (openai/gpt-oss-120b) IS a reasoning model: it spends
+// hidden reasoning tokens before the answer, and those count against
+// max_completion_tokens. So we (1) ask for low reasoning effort and (2) add
+// GROQ_REASONING_HEADROOM_TOKENS on top of the answer budget. Without this,
+// a long think truncates the JSON and the part comes back unparseable.
+//
+// One retry after a 429 (free-tier rate limit), waiting for the server's
+// retry-after (capped).
 async function callGroqForCoach(system: string, payload: object, maxTokens: number): Promise<string | null> {
-  const apiKey = process.env.GROQ_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY?.trim();
   if (!apiKey) return null;
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -1281,8 +1294,9 @@ async function callGroqForCoach(system: string, payload: object, maxTokens: numb
         },
         body: JSON.stringify({
           model: GROQ_MODEL,
-          max_tokens: maxTokens,
+          max_completion_tokens: maxTokens + GROQ_REASONING_HEADROOM_TOKENS,
           temperature: 0.4,
+          reasoning_effort: 'low',
           response_format: { type: 'json_object' },
           messages: [
             { role: 'system', content: system },
@@ -1305,7 +1319,11 @@ async function callGroqForCoach(system: string, payload: object, maxTokens: numb
         return null;
       }
       const data: any = await res.json();
-      const text = data?.choices?.[0]?.message?.content;
+      const choice = data?.choices?.[0];
+      if (choice?.finish_reason === 'length') {
+        console.error('[telemetry-coach] Groq response hit the token limit (truncated) — raise GROQ_REASONING_HEADROOM_TOKENS');
+      }
+      const text = choice?.message?.content;
       return typeof text === 'string' && text.trim() ? text : null;
     } catch (err) {
       console.error('[telemetry-coach] Groq call threw:', err);
