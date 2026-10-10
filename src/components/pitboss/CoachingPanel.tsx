@@ -1,12 +1,34 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import type {
   CoachingReport,
   CornerCoaching,
   StraightCoaching,
   DetectedIssue,
 } from "@/lib/pitboss/telemetry-coach-types";
+
+// ---------------------------------------------------------------------------
+// Feedback (thumbs) types + helpers. Contract comes from
+// /api/pitboss/telemetry/coach/feedback/route.ts
+// ---------------------------------------------------------------------------
+
+type FeedbackKind = "summary" | "corner" | "straight" | "suggestion";
+type Rating = 1 | -1;
+type RatingMap = Record<string, Rating>;
+
+// The route reads the coach's wording from the saved report by array index,
+// so `index` must be the position in report.corners / report.straights /
+// report.suggestions (NOT corner.id, and NOT the track-ordered render order).
+// "summary" has no index; the route stores it as -1.
+const fbKey = (kind: FeedbackKind, index: number) =>
+  `${kind}:${kind === "summary" ? -1 : index}`;
+
+// The saved report's id is what the feedback route keys on. Optional here so
+// this compiles whether or not CoachingReport already declares it.
+type ReportWithId = CoachingReport & { id?: string };
+
+const FEEDBACK_URL = "/api/pitboss/telemetry/coach/feedback";
 
 function Panel({ title, subtitle, children, style }: { title: string; subtitle?: string; children: React.ReactNode; style?: React.CSSProperties }) {
   return (
@@ -36,6 +58,44 @@ const badgeStyle = (color: string): React.CSSProperties => ({
 
 const severityColor = (sev: DetectedIssue["severity"]) => (sev === "major" ? "#FF5C77" : "#FFC400");
 
+function ThumbsRow({
+  rating,
+  onRate,
+  label,
+}: {
+  rating?: Rating;
+  onRate: (r: Rating) => void;
+  label: string;
+}) {
+  const btn = (value: Rating, glyph: string, activeColor: string, aria: string): React.ReactNode => {
+    const active = rating === value;
+    return (
+      <button
+        type="button"
+        aria-label={`${aria}: ${label}`}
+        aria-pressed={active}
+        onClick={() => onRate(value)}
+        style={{
+          background: active ? "#1D2229" : "transparent",
+          border: `1px solid ${active ? activeColor : "#262B33"}`,
+          color: active ? activeColor : "#5B6572",
+          borderRadius: 4, padding: "2px 8px", fontSize: 12, lineHeight: 1.4,
+          cursor: "pointer",
+        }}
+      >
+        {glyph}
+      </button>
+    );
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
+      {btn(1, "\u{1F44D}", "#00C853", "Helpful")}
+      {btn(-1, "\u{1F44E}", "#FF5C77", "Not helpful")}
+    </div>
+  );
+}
+
 function TipLine({ text, color }: { text: string; color: string }) {
   return (
     <div style={{
@@ -63,7 +123,15 @@ function IssueRow({ issue }: { issue: DetectedIssue }) {
   );
 }
 
-function CornerCard({ corner }: { corner: CornerCoaching }) {
+function CornerCard({
+  corner,
+  rating,
+  onRate,
+}: {
+  corner: CornerCoaching;
+  rating?: Rating;
+  onRate?: (r: Rating) => void;
+}) {
   const { corner: seg, braking, throttle, issues, coachingNote, suggestion } = corner;
   const hasMajorIssue = issues.some((iss: DetectedIssue) => iss.severity === "major");
 
@@ -103,6 +171,9 @@ function CornerCard({ corner }: { corner: CornerCoaching }) {
           lineHeight: 1.5, borderTop: "1px solid #1D2229", paddingTop: 10,
         }}>
           {coachingNote}
+          {onRate && (
+            <ThumbsRow rating={rating} onRate={onRate} label={`corner ${seg.id + 1} coaching note`} />
+          )}
         </div>
       )}
 
@@ -117,7 +188,15 @@ function CornerCard({ corner }: { corner: CornerCoaching }) {
   );
 }
 
-function StraightCard({ straight }: { straight: StraightCoaching }) {
+function StraightCard({
+  straight,
+  rating,
+  onRate,
+}: {
+  straight: StraightCoaching;
+  rating?: Rating;
+  onRate?: (r: Rating) => void;
+}) {
   const { straight: seg, analysis, coachingNote, suggestion } = straight;
   return (
     <div style={{
@@ -160,6 +239,9 @@ function StraightCard({ straight }: { straight: StraightCoaching }) {
           lineHeight: 1.5, borderTop: "1px solid #1D2229", paddingTop: 10,
         }}>
           {coachingNote}
+          {onRate && (
+            <ThumbsRow rating={rating} onRate={onRate} label="straight coaching note" />
+          )}
         </div>
       )}
 
@@ -168,9 +250,11 @@ function StraightCard({ straight }: { straight: StraightCoaching }) {
   );
 }
 
+// `index` is the item's position in report.corners / report.straights, which
+// is what the feedback route expects (render order is sorted by startDist).
 type TrackSegment =
-  | { kind: "corner"; startDist: number; data: CornerCoaching }
-  | { kind: "straight"; startDist: number; data: StraightCoaching };
+  | { kind: "corner"; index: number; startDist: number; data: CornerCoaching }
+  | { kind: "straight"; index: number; startDist: number; data: StraightCoaching };
 
 interface CoachingPanelProps {
   sessionUid: string;
@@ -182,6 +266,12 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
   const [report, setReport] = useState<CoachingReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const [ratings, setRatings] = useState<RatingMap>({});
+  const [canRate, setCanRate] = useState(true);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+
+  const reportId = report ? (report as ReportWithId).id : undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -202,6 +292,74 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
 
     return () => { cancelled = true; };
   }, [sessionUid, lapNum, referenceLapNum]);
+
+  // Load any ratings already saved for this report so thumbs show their state.
+  useEffect(() => {
+    let cancelled = false;
+    setRatings({});
+    setFeedbackError(null);
+    setCanRate(true);
+    if (!reportId) return;
+
+    fetch(`${FEEDBACK_URL}?report_id=${encodeURIComponent(reportId)}`)
+      .then(async (res) => {
+        if (!res.ok) return { feedback: [] };
+        return res.json();
+      })
+      .then((data: { feedback?: { target_kind: FeedbackKind; target_index: number; rating: number }[] }) => {
+        if (cancelled) return;
+        const next: RatingMap = {};
+        for (const f of data.feedback ?? []) {
+          if (f.rating === 1 || f.rating === -1) {
+            next[fbKey(f.target_kind, f.target_index)] = f.rating;
+          }
+        }
+        setRatings(next);
+      })
+      .catch(() => { /* non-fatal: thumbs just start unselected */ });
+
+    return () => { cancelled = true; };
+  }, [reportId]);
+
+  const rate = useCallback(
+    async (kind: FeedbackKind, index: number, value: Rating) => {
+      if (!reportId) return;
+      const key = fbKey(kind, index);
+      const prev = ratings[key];
+
+      // Optimistic update; reverted below if the save fails.
+      setRatings((r) => ({ ...r, [key]: value }));
+      setFeedbackError(null);
+
+      try {
+        const res = await fetch(FEEDBACK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            report_id: reportId,
+            target_kind: kind,
+            ...(kind === "summary" ? {} : { target_index: index }),
+            rating: value,
+          }),
+        });
+        if (!res.ok) {
+          // Only the report's own driver can rate it; hide thumbs for anyone else.
+          if (res.status === 403) setCanRate(false);
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? "failed to save feedback");
+        }
+      } catch (err) {
+        setRatings((r) => {
+          const next = { ...r };
+          if (prev === undefined) delete next[key];
+          else next[key] = prev;
+          return next;
+        });
+        setFeedbackError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [reportId, ratings],
+  );
 
   if (loading) {
     return (
@@ -226,13 +384,14 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
   if (!report) return null;
 
   const cmp = report.comparison;
+  const ratingEnabled = !!reportId && canRate;
 
   // Merge corners and straights into one track-ordered list for rendering,
   // so the coaching timeline reads in the same order the car actually
   // drives the lap, rather than corners-then-straights.
   const segments: TrackSegment[] = [
-    ...report.corners.map((c): TrackSegment => ({ kind: "corner", startDist: c.corner.entryDist, data: c })),
-    ...report.straights.map((s): TrackSegment => ({ kind: "straight", startDist: s.straight.startDist, data: s })),
+    ...report.corners.map((c, i): TrackSegment => ({ kind: "corner", index: i, startDist: c.corner.entryDist, data: c })),
+    ...report.straights.map((s, i): TrackSegment => ({ kind: "straight", index: i, startDist: s.straight.startDist, data: s })),
   ].sort((a, b) => a.startDist - b.startDist);
 
   return (
@@ -246,7 +405,22 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
         lineHeight: 1.55, marginBottom: 16,
       }}>
         {report.summaryText}
+        {ratingEnabled && report.summaryText && (
+          <ThumbsRow
+            rating={ratings[fbKey("summary", -1)]}
+            onRate={(v) => rate("summary", -1, v)}
+            label="lap summary"
+          />
+        )}
       </div>
+
+      {feedbackError && (
+        <div style={{
+          fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#FF5C77", marginBottom: 12,
+        }}>
+          Couldn't save feedback: {feedbackError}
+        </div>
+      )}
 
       {report.suggestions.length > 0 && (
         <div style={{
@@ -266,6 +440,13 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
                 lineHeight: 1.5, marginBottom: i < report.suggestions.length - 1 ? 6 : 0,
               }}>
                 {s}
+                {ratingEnabled && (
+                  <ThumbsRow
+                    rating={ratings[fbKey("suggestion", i)]}
+                    onRate={(v) => rate("suggestion", i, v)}
+                    label={`next lap tip ${i + 1}`}
+                  />
+                )}
               </li>
             ))}
           </ol>
@@ -308,8 +489,22 @@ export default function CoachingPanel({ sessionUid, lapNum, referenceLapNum }: C
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
           {segments.map((seg) =>
             seg.kind === "corner"
-              ? <CornerCard key={`corner-${seg.data.corner.id}`} corner={seg.data} />
-              : <StraightCard key={`straight-${seg.data.straight.id}`} straight={seg.data} />
+              ? (
+                <CornerCard
+                  key={`corner-${seg.data.corner.id}`}
+                  corner={seg.data}
+                  rating={ratings[fbKey("corner", seg.index)]}
+                  onRate={ratingEnabled ? (v) => rate("corner", seg.index, v) : undefined}
+                />
+              )
+              : (
+                <StraightCard
+                  key={`straight-${seg.data.straight.id}`}
+                  straight={seg.data}
+                  rating={ratings[fbKey("straight", seg.index)]}
+                  onRate={ratingEnabled ? (v) => rate("straight", seg.index, v) : undefined}
+                />
+              )
           )}
         </div>
       )}
