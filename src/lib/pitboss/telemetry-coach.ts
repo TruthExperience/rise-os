@@ -1362,7 +1362,12 @@ async function generateCoachingNarrative(input: NarrativeInput): Promise<Coachin
       mode: 'reasoning',
       system: buildCoachSystemPrompt(input.speedUnit),
       prompt: JSON.stringify(input),
-      max_tokens: 2000,
+      // PATCH (2026-10-10): was 2000, which cut the JSON off mid-string for
+      // laps with 8-9 corners (logs: "pbInfer returned unparseable narrative
+      // JSON"), so every report fell back to the deterministic template.
+      // Reasoning models also spend part of this budget thinking, so leave
+      // generous headroom.
+      max_tokens: 6000,
       temperature: 0.4,
     });
 
