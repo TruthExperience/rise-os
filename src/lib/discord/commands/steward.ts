@@ -214,19 +214,31 @@ registerCommand("steward_report", async (ctx) => {
     .eq("id", leagueId)
     .maybeSingle();
 
+  const ticketCategoryId = leagueConfig?.discord_ticket_category_id ?? null;
+  const stewardRoleId = leagueConfig?.discord_steward_role_id ?? null;
+
   let channelId: string | null = null;
   let ticketNote: string;
 
-  if (
-    !leagueConfig?.discord_ticket_category_id ||
-    !leagueConfig?.discord_steward_role_id
-  ) {
-    ticketNote = `Incident **${ticketLabel}** filed (${incidentType}). No ticket category is configured for this league yet, so nothing was posted to Discord — ask an admin to set one up. Check status with \`/steward status\`.`;
+  if (!ticketCategoryId || !stewardRoleId) {
+    // Both are required to open a ticket channel. Say exactly which one(s)
+    // are missing instead of always blaming the category.
+    const missing: string[] = [];
+    if (!ticketCategoryId) missing.push("ticket category");
+    if (!stewardRoleId) missing.push("steward role");
+
+    const isAdmin =
+      (BigInt(ctx.memberPermissions || "0") & (1n << 3n)) !== 0n;
+    const fix = isAdmin
+      ? "Run `/setup` — it detects them automatically, or you can pick them in the command."
+      : "Ask a server admin to run `/setup`.";
+
+    ticketNote = `Incident **${ticketLabel}** filed (${incidentType}), but no ticket channel was created because this league is missing its ${missing.join(" and ")}. ${fix} Check status with \`/steward status\`.`;
   } else {
     channelId = await createIncidentTicket({
       guildId,
-      categoryId: leagueConfig.discord_ticket_category_id,
-      stewardRoleId: leagueConfig.discord_steward_role_id,
+      categoryId: ticketCategoryId,
+      stewardRoleId,
       reporterDiscordId: ctx.discordUserId,
       accusedDiscordId,
       ticketLabel: ticketLabel,
