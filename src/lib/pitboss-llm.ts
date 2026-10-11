@@ -18,14 +18,18 @@ function validateWorkerUrl(url: string): string {
 }
 const VALIDATED_WORKER_URL = validateWorkerUrl(WORKER_URL);
 
-// Client-side ceiling on any single worker call. The worker now bounds
-// its own free-model waterfall (FREE_WATERFALL_BUDGET_MS) and paid
-// fallback (PAID_FALLBACK_BUDGET_MS) to a combined ~18s worst case.
-// 25s here sits comfortably above that, while still leaving ~5s of
-// headroom under Vercel Hobby's 30s maxDuration for the caller's own
-// try/catch fallback path to actually run before the function gets
-// killed outright.
-const DEFAULT_TIMEOUT_MS = 25_000; // CHANGED — was 20_000, too tight against the worker's worst case
+// Client-side ceiling on any single worker call. The worker bounds its own
+// free-model waterfall (FREE_WATERFALL_BUDGET_MS) and paid fallback
+// (PAID_FALLBACK_BUDGET_MS) to a combined ~18s worst case for normal calls,
+// so 25s sits comfortably above that.
+const DEFAULT_TIMEOUT_MS = 25_000;
+
+// /steward is slower: the worker now runs an image pass and a video pass in
+// parallel (video budget 12s) BEFORE the verdict pass (groq 5s + free 10s +
+// paid 6s), so a worst case is ~33s. 40s covers that. Vercel Hobby functions
+// get 300s by default with Fluid compute, so this fits; if a project ever
+// runs with the old 10/30/60s limits, lower this or set maxDuration.
+const STEWARD_TIMEOUT_MS = 40_000;
 
 export type LLMMode = 'fast' | 'primary' | 'reasoning' | 'certgen' | 'quick' | 'steward' | 'coding' | 'vision';
 
@@ -66,6 +70,14 @@ export type ImageAnalysisMeta = {
   image_count: number;
 };
 
+// Same idea for the video pre-pass. null when no video evidence was
+// submitted, or when every video failed to resolve/analyze.
+export type VideoAnalysisMeta = {
+  model:       string;
+  usage:       { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
+  video_count: number;
+};
+
 export type PbStewardResult = {
   suggestion: {
     verdict:             string;
@@ -80,6 +92,7 @@ export type PbStewardResult = {
     parse_error?:        boolean;
   };
   image_analysis: ImageAnalysisMeta | null;
+  video_analysis: VideoAnalysisMeta | null;
   model:      string;
   provider:   string;
   league:     string;
@@ -186,7 +199,7 @@ export const pbSteward = (
   incident:    Record<string, unknown>,
   regulations: RuleArticle[],
   league:      string,
-  timeoutMs?:  number
+  timeoutMs:   number = STEWARD_TIMEOUT_MS
 ): Promise<PbStewardResult | PbInferError> =>
   workerPost('/steward', { incident, regulations, league }, timeoutMs);
 
