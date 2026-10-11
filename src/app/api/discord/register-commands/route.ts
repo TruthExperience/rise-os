@@ -1003,37 +1003,54 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      // /setup: every option is now optional. Anything left out is
+      // auto-detected from the server's channels and roles (see
+      // src/lib/discord/commands/setup.ts), and anything you pick
+      // overrides the auto-detected value.
       name: "setup",
-      description: "Set up this server as a PitBoss league, linking your existing channels (admin only)",
+      description: "Set up this server as a PitBoss league — reads your channels automatically (admin only)",
       default_member_permissions: "8",
       dm_permission: false,
       options: [
         {
           type: 3,
           name: "name",
-          description: "League name",
-          required: true,
+          description: "League name (defaults to the server name)",
+          required: false,
         },
         {
           type: 7,
           name: "fia_category",
-          description: "Your existing category for FIA / race-control channels",
-          required: true,
+          description: "Category for FIA / race-control tickets (auto-detected if left out)",
+          required: false,
           channel_types: [4],
         },
         {
           type: 7,
           name: "reports_channel",
-          description: "Your existing text channel for incident reports",
-          required: true,
+          description: "Text channel for incident reports (auto-detected if left out)",
+          required: false,
           channel_types: [0],
         },
         {
           type: 7,
           name: "transcript_channel",
-          description: "Your existing text channel for ticket transcripts (optional)",
+          description: "Text channel for ticket transcripts (auto-detected if left out)",
           required: false,
           channel_types: [0],
+        },
+        {
+          type: 7,
+          name: "appeals_channel",
+          description: "Text channel for appeals (auto-detected if left out)",
+          required: false,
+          channel_types: [0],
+        },
+        {
+          type: 8,
+          name: "steward_role",
+          description: "Steward role (auto-detected if left out)",
+          required: false,
         },
         {
           type: 5,
