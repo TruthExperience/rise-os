@@ -1,285 +1,213 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createAdminClient } from "@/lib/supabase/server";
-import {
-  buildCheckinEmbed,
-  buildCheckinComponents,
-  CHECKIN_STATUSES,
-  type CheckinStatus,
-} from "@/lib/discord/commands/checkin-embed";
-
-// Called by pg_cron via pitboss.dispatch_checkin_reminders() every 5
-// minutes. Auth is a shared secret (Supabase vault: checkin_reminder_cron_secret),
-// NOT a Supabase service-role JWT — this route lives in the app, not
-// Supabase, so it doesn't verify Supabase auth.
+// src/lib/discord/commands/checkin-embed.ts
 //
-// The Postgres side has already computed which drivers are missing
-// (active franchise_rosters minus any round_checkins row for the
-// round+division — see dispatch_checkin_reminders for why status is not
-// used) and which reminder window fired. This route only has to deliver
-// the Discord message, using the same PITBOSS_DISCORD_BOT_TOKEN and
-// DISCORD_API_BASE convention as checkin.ts.
+// Shared check-in embed + button builders. Imported by:
+//   - commands/checkin.ts            (checkin-create, roundLabel in replies)
+//   - components/router.ts           (checkin_btn:<postId>:<status> clicks)
+//   - api/pitboss/checkin/reminders  (T-5m race_time_flag re-render)
 //
-// Three kinds of payload are handled:
-//   dm_reminder       — T-3h, DM each missing driver
-//   channel_reminder  — T-1h, ping missing drivers in the division channel
-//   race_time_flag    — T-5m, re-render the check-in embed (so the lights /
-//                       countdown flip to "formation lap") and ping the
-//                       division's check-in role
-//
-// dispatch_checkin_reminders stamps each *_sent_at column whether or not
-// this route succeeds, so race_time_flag always answers 200 and reports
-// per-step results in the body instead of failing the whole request.
+// Everything returned here is a plain JSON object (no discord.js builders)
+// so it can go straight into a Discord REST body or an interaction response.
 
-const DISCORD_API_BASE = "https://discord.com/api/v10";
+export const CHECKIN_STATUSES = [
+  "confirmed",
+  "tentative",
+  "declined",
+  "healer",
+  "damage",
+] as const;
 
-interface ReminderPayload {
-  kind: "dm_reminder" | "channel_reminder" | "race_time_flag";
-  post_id: string;
-  round_id: string;
-  division_id?: string | null;
-  discord_channel_id: string | null;
-  discord_message_id: string | null;
-  race_time: string;
-  driver_discord_ids?: string[];
-  role_id?: string | null;
+export type CheckinStatus = (typeof CHECKIN_STATUSES)[number];
+
+// Minimal shapes. Callers pass wider rows (extra columns are fine).
+export interface CheckinRound {
+  name: string;
+  round_number: number | null;
+  circuit: string | null;
+  country: string | null;
+  flag_emoji: string | null;
 }
 
-function discordHeaders(token: string) {
-  return {
-    Authorization: `Bot ${token}`,
-    "Content-Type": "application/json",
+export interface CheckinPost {
+  weather_text: string | null;
+  ping_delivery: string | null;
+  race_time: string | null;
+  track_override?: string | null;
+  country_override?: string | null;
+  flag_override?: string | null;
+}
+
+export type GroupedCheckins = Partial<Record<CheckinStatus, string[]>>;
+
+const STATUS_META: Record<
+  CheckinStatus,
+  { label: string; emoji: string; style: 1 | 2 | 3 | 4 }
+> = {
+  confirmed: { label: "Confirmed", emoji: "✅", style: 3 }, // success
+  tentative: { label: "Tentative", emoji: "❔", style: 1 }, // primary
+  declined: { label: "Declined", emoji: "❌", style: 4 }, // danger
+  healer: { label: "Healer", emoji: "🩹", style: 2 }, // secondary
+  damage: { label: "Damage", emoji: "💥", style: 2 }, // secondary
+};
+
+/** "Round 5 — Japanese Grand Prix" (falls back to just the name). */
+export function roundLabel(round: Pick<CheckinRound, "name" | "round_number">): string {
+  return round.round_number != null
+    ? `Round ${round.round_number} — ${round.name}`
+    : round.name;
+}
+
+// ── Flags ──────────────────────────────────────────────────────────
+
+const COUNTRY_TO_CODE: Record<string, string> = {
+  australia: "au", austria: "at", azerbaijan: "az", bahrain: "bh",
+  belgium: "be", brazil: "br", canada: "ca", china: "cn", france: "fr",
+  germany: "de", hungary: "hu", italy: "it", japan: "jp", mexico: "mx",
+  monaco: "mc", netherlands: "nl", portugal: "pt", qatar: "qa",
+  "saudi arabia": "sa", singapore: "sg", spain: "es", turkey: "tr",
+  uae: "ae", "united arab emirates": "ae", uk: "gb",
+  "united kingdom": "gb", "great britain": "gb", usa: "us",
+  "united states": "us", "united states of america": "us",
+};
+
+function codeToFlagEmoji(code: string): string {
+  return [...code.toUpperCase()]
+    .map((c) => String.fromCodePoint(0x1f1e6 + c.charCodeAt(0) - 65))
+    .join("");
+}
+
+/** 🇯🇵 -> "jp" (null if the string isn't a regional-indicator pair). */
+function flagEmojiToCode(emoji: string | null | undefined): string | null {
+  if (!emoji) return null;
+  const pts = [...emoji.trim()].map((c) => c.codePointAt(0)!);
+  if (
+    pts.length === 2 &&
+    pts.every((p) => p >= 0x1f1e6 && p <= 0x1f1ff)
+  ) {
+    return pts.map((p) => String.fromCharCode(p - 0x1f1e6 + 97)).join("");
+  }
+  return null;
+}
+
+function resolveFlag(
+  flagEmoji: string | null,
+  country: string | null
+): { emoji: string | null; code: string | null } {
+  const code =
+    flagEmojiToCode(flagEmoji) ??
+    (country ? COUNTRY_TO_CODE[country.trim().toLowerCase()] ?? null : null);
+  return { emoji: code ? codeToFlagEmoji(code) : null, code };
+}
+
+// ── Race state ─────────────────────────────────────────────────────
+
+type RaceState = "open" | "formation" | "started";
+
+function raceState(raceTimeMs: number | null, now = Date.now()): RaceState {
+  if (raceTimeMs == null) return "open";
+  if (now >= raceTimeMs) return "started";
+  if (raceTimeMs - now <= 5 * 60 * 1000) return "formation";
+  return "open";
+}
+
+const STATE_DISPLAY: Record<RaceState, { text: string; color: number }> = {
+  open: { text: "🔴 Check-in open", color: 0x5865f2 },
+  formation: { text: "🟡 Formation lap — get to the lobby", color: 0xf1c40f },
+  started: { text: "🟢 Lights out — race underway", color: 0x2ecc71 },
+};
+
+// ── Embed ──────────────────────────────────────────────────────────
+
+function mentionList(ids: string[]): string {
+  if (ids.length === 0) return "—";
+  const out: string[] = [];
+  let len = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const m = `<@${ids[i]}>`;
+    // Discord field values cap at 1024 chars; leave room for "+N more".
+    if (len + m.length + 1 > 980) {
+      out.push(`+${ids.length - i} more`);
+      break;
+    }
+    out.push(m);
+    len += m.length + 1;
+  }
+  return out.join(" ");
+}
+
+export function buildCheckinEmbed(args: {
+  round: CheckinRound;
+  divisionCode: string;
+  post: CheckinPost;
+  grouped: GroupedCheckins;
+}): Record<string, unknown> {
+  const { round, divisionCode, post, grouped } = args;
+
+  // Override precedence: manual /checkin-create values win over the calendar.
+  const track = post.track_override ?? round.circuit ?? round.name;
+  const country = post.country_override ?? round.country;
+  const flag = resolveFlag(post.flag_override ?? round.flag_emoji, country);
+
+  const raceMs = post.race_time ? Date.parse(post.race_time) : NaN;
+  const raceTimeMs = Number.isNaN(raceMs) ? null : raceMs;
+  const state = STATE_DISPLAY[raceState(raceTimeMs)];
+
+  const trackLine = [flag.emoji, `**${track}**`, country ? `· ${country}` : null]
+    .filter(Boolean)
+    .join(" ");
+
+  const fields: Record<string, unknown>[] = [
+    {
+      name: "🕒 Race time",
+      // <t:..:R> counts down client-side, so it stays live between re-renders.
+      value:
+        raceTimeMs != null
+          ? `<t:${Math.floor(raceTimeMs / 1000)}:F>\n<t:${Math.floor(raceTimeMs / 1000)}:R>`
+          : "TBC",
+      inline: true,
+    },
+    { name: "🌦️ Weather", value: post.weather_text || "TBC", inline: true },
+    { name: "📣 Pings", value: post.ping_delivery || "Channel only", inline: true },
+  ];
+
+  for (const status of CHECKIN_STATUSES) {
+    const ids = grouped[status] ?? [];
+    const meta = STATUS_META[status];
+    fields.push({
+      name: `${meta.emoji} ${meta.label} (${ids.length})`,
+      value: mentionList(ids),
+      inline: status === "confirmed" || status === "tentative" || status === "declined" ? true : false,
+    });
+  }
+
+  const embed: Record<string, unknown> = {
+    title: `${roundLabel(round)} — Division ${divisionCode}`,
+    description: `${trackLine}\n${state.text}`,
+    color: state.color,
+    fields,
+    footer: { text: "Tap a button to respond — tap it again to clear your response." },
   };
+
+  if (flag.code) {
+    embed.thumbnail = { url: `https://flagcdn.com/w160/${flag.code}.png` };
+  }
+
+  return embed;
 }
 
-async function sendDm(token: string, discordUserId: string, content: string) {
-  const dmChannelRes = await fetch(`${DISCORD_API_BASE}/users/@me/channels`, {
-    method: "POST",
-    headers: discordHeaders(token),
-    body: JSON.stringify({ recipient_id: discordUserId }),
-  });
+// ── Buttons ────────────────────────────────────────────────────────
 
-  if (!dmChannelRes.ok) {
-    return { discordUserId, ok: false, step: "open_dm", status: dmChannelRes.status };
-  }
-
-  const dmChannel = await dmChannelRes.json();
-
-  const sendRes = await fetch(`${DISCORD_API_BASE}/channels/${dmChannel.id}/messages`, {
-    method: "POST",
-    headers: discordHeaders(token),
-    body: JSON.stringify({ content }),
-  });
-
-  return { discordUserId, ok: sendRes.ok, step: "send_dm", status: sendRes.status };
-}
-
-/**
- * T-5-minute flag. Two independent steps so one failing doesn't block the
- * other: (1) rebuild the check-in embed from live data and PATCH it onto
- * the original message, (2) post a role ping in the division channel.
- */
-async function handleRaceTimeFlag(token: string, payload: ReminderPayload) {
-  const { post_id, round_id, division_id, discord_channel_id, discord_message_id, role_id } = payload;
-  const results: Record<string, unknown> = {};
-
-  // ── Step 1: refresh the embed ────────────────────────────────────
-  if (!discord_channel_id || !discord_message_id) {
-    results.embed = { ok: false, error: "missing discord_channel_id or discord_message_id" };
-  } else if (!division_id) {
-    results.embed = { ok: false, error: "missing division_id" };
-  } else {
-    try {
-      const supabase = createAdminClient();
-
-      const [postRes, roundRes, divisionRes, checkinsRes] = await Promise.all([
-        supabase
-          .schema("pitboss")
-          .from("round_checkin_posts")
-          .select("id, weather_text, ping_delivery, race_time, track_override, country_override, flag_override")
-          .eq("id", post_id)
-          .maybeSingle(),
-        supabase
-          .schema("rise_os")
-          .from("calendar_rounds")
-          .select("name, round_number, circuit, country, flag_emoji")
-          .eq("id", round_id)
-          .maybeSingle(),
-        supabase
-          .schema("rise_os")
-          .from("league_divisions")
-          .select("division_code")
-          .eq("id", division_id)
-          .maybeSingle(),
-        supabase
-          .schema("pitboss")
-          .from("round_checkins")
-          .select("status, drivers(discord_id)")
-          .eq("round_id", round_id)
-          .eq("division_id", division_id),
-      ]);
-
-      if (postRes.error || !postRes.data) {
-        throw new Error(`post lookup failed: ${postRes.error?.message ?? "not found"}`);
-      }
-      if (roundRes.error || !roundRes.data) {
-        throw new Error(`round lookup failed: ${roundRes.error?.message ?? "not found"}`);
-      }
-      if (divisionRes.error || !divisionRes.data) {
-        throw new Error(`division lookup failed: ${divisionRes.error?.message ?? "not found"}`);
-      }
-      if (checkinsRes.error) {
-        throw new Error(`check-in lookup failed: ${checkinsRes.error.message}`);
-      }
-
-      const grouped: Partial<Record<CheckinStatus, string[]>> = {};
-      for (const row of checkinsRes.data ?? []) {
-        const discordId = (row as any).drivers?.discord_id;
-        const status = row.status as CheckinStatus;
-        if (!discordId || !CHECKIN_STATUSES.includes(status)) continue;
-        grouped[status] = grouped[status] ?? [];
-        grouped[status]!.push(discordId);
-      }
-
-      const embed = buildCheckinEmbed({
-        round: roundRes.data,
-        divisionCode: divisionRes.data.division_code,
-        post: postRes.data,
-        grouped,
-      });
-
-      const patchRes = await fetch(
-        `${DISCORD_API_BASE}/channels/${discord_channel_id}/messages/${discord_message_id}`,
-        {
-          method: "PATCH",
-          headers: discordHeaders(token),
-          body: JSON.stringify({
-            embeds: [embed],
-            components: buildCheckinComponents(post_id),
-          }),
-        }
-      );
-
-      if (!patchRes.ok) {
-        const text = await patchRes.text();
-        console.error("[checkin-reminders] embed refresh failed:", patchRes.status, text);
-        results.embed = { ok: false, status: patchRes.status };
-      } else {
-        results.embed = { ok: true };
-      }
-    } catch (err) {
-      console.error("[checkin-reminders] race_time_flag embed step threw:", err);
-      results.embed = { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  }
-
-  // ── Step 2: role ping ────────────────────────────────────────────
-  if (!discord_channel_id) {
-    results.ping = { ok: false, error: "missing discord_channel_id" };
-  } else if (!role_id) {
-    // League hasn't set league_divisions.discord_checkin_role_id for this
-    // division — nothing to ping, not an error.
-    results.ping = { ok: false, skipped: "no discord_checkin_role_id set for this division" };
-  } else {
-    const body: Record<string, unknown> = {
-      content: `<@&${role_id}> 🏁 **Race starts in about 5 minutes.** Get to the lobby and be ready on the grid.`,
-      allowed_mentions: { roles: [role_id] },
-    };
-    if (discord_message_id) {
-      body.message_reference = { message_id: discord_message_id, fail_if_not_exists: false };
-    }
-
-    const pingRes = await fetch(`${DISCORD_API_BASE}/channels/${discord_channel_id}/messages`, {
-      method: "POST",
-      headers: discordHeaders(token),
-      body: JSON.stringify(body),
-    });
-
-    if (!pingRes.ok) {
-      console.error("[checkin-reminders] role ping failed:", pingRes.status, await pingRes.text());
-      results.ping = { ok: false, status: pingRes.status };
-    } else {
-      results.ping = { ok: true };
-    }
-  }
-
-  return results;
-}
-
-export async function POST(req: NextRequest) {
-  const cronSecret = process.env.PITBOSS_CHECKIN_REMINDER_CRON_SECRET;
-  if (!cronSecret) {
-    console.error("[checkin-reminders] PITBOSS_CHECKIN_REMINDER_CRON_SECRET not set");
-    return NextResponse.json({ error: "not configured" }, { status: 500 });
-  }
-
-  const authHeader = req.headers.get("authorization");
-  if (authHeader !== `Bearer ${cronSecret}`) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  }
-
-  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
-  if (!token) {
-    console.error("[checkin-reminders] PITBOSS_DISCORD_BOT_TOKEN not set");
-    return NextResponse.json({ error: "bot token not configured" }, { status: 500 });
-  }
-
-  let payload: ReminderPayload;
-  try {
-    payload = await req.json();
-  } catch {
-    return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
-  }
-
-  const { kind, discord_channel_id, discord_message_id, driver_discord_ids, race_time } = payload;
-
-  if (kind === "dm_reminder") {
-    const raceTimeLabel = new Date(race_time).toUTCString();
-    const content =
-      `⏰ **Check-in reminder** — your race starts in about 3 hours (${raceTimeLabel}). ` +
-      `Please check in via \`/checkin\` before the deadline.`;
-
-    const results = await Promise.all(
-      (driver_discord_ids ?? []).map((id) => sendDm(token, id, content))
-    );
-
-    return NextResponse.json({ kind, sent: results.length, results });
-  }
-
-  if (kind === "channel_reminder") {
-    if (!discord_channel_id) {
-      return NextResponse.json({ error: "missing discord_channel_id" }, { status: 400 });
-    }
-
-    const mentions = (driver_discord_ids ?? []).map((id) => `<@${id}>`).join(" ");
-    const raceTimeLabel = new Date(race_time).toUTCString();
-    const content = mentions
-      ? `⏰ **Final check-in call** — race starts in about 1 hour (${raceTimeLabel}). ` +
-        `Still waiting on: ${mentions}. Check in now via \`/checkin\`.`
-      : `⏰ Race starts in about 1 hour (${raceTimeLabel}). All drivers checked in — see you on track!`;
-
-    const body: Record<string, unknown> = { content };
-    if (discord_message_id) {
-      body.message_reference = { message_id: discord_message_id, fail_if_not_exists: false };
-    }
-
-    const res = await fetch(`${DISCORD_API_BASE}/channels/${discord_channel_id}/messages`, {
-      method: "POST",
-      headers: discordHeaders(token),
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      console.error("[checkin-reminders] channel post failed:", res.status, await res.text());
-      return NextResponse.json({ error: `channel post failed (${res.status})` }, { status: 502 });
-    }
-
-    return NextResponse.json({ kind, ok: true });
-  }
-
-  if (kind === "race_time_flag") {
-    const results = await handleRaceTimeFlag(token, payload);
-    return NextResponse.json({ kind, ...results });
-  }
-
-  return NextResponse.json({ error: `unknown kind: ${kind}` }, { status: 400 });
+/** custom_id format is parsed by components/router.ts: checkin_btn:<postId>:<status> */
+export function buildCheckinComponents(postId: string): Record<string, unknown>[] {
+  return [
+    {
+      type: 1, // action row (max 5 buttons)
+      components: CHECKIN_STATUSES.map((status) => ({
+        type: 2, // button
+        style: STATUS_META[status].style,
+        label: STATUS_META[status].label,
+        emoji: { name: STATUS_META[status].emoji },
+        custom_id: `checkin_btn:${postId}:${status}`,
+      })),
+    },
+  ];
 }
