@@ -965,6 +965,92 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      // Discord role -> PitBoss permission flag mapping. Dispatches to
+      // roles_map / roles_unmap / roles_list / roles_sync in
+      // src/lib/discord/commands/roles.ts. No default_member_permissions:
+      // the handler allows owner/co-owner/commissioner flags OR Discord
+      // Administrator itself.
+      name: "roles",
+      description: "Map Discord roles to PitBoss permissions and sync them (owner/co-owner/commissioner/admin)",
+      dm_permission: false,
+      options: [
+        {
+          type: 1,
+          name: "map",
+          description: "Link a Discord role to a PitBoss permission",
+          options: [
+            {
+              type: 8,
+              name: "role",
+              description: "The Discord role",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "flag",
+              description: "The permission this role grants",
+              required: true,
+              choices: [
+                { name: "Co-owner", value: "is_co_owner" },
+                { name: "Commissioner", value: "is_commissioner" },
+                { name: "Head steward", value: "is_head_steward" },
+                { name: "Steward", value: "is_steward" },
+                { name: "BSAC chief", value: "is_bsac_chief" },
+                { name: "Team principal", value: "is_team_principal" },
+                { name: "Driver", value: "is_driver" },
+              ],
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "unmap",
+          description: "Remove a role's link to a permission",
+          options: [
+            {
+              type: 8,
+              name: "role",
+              description: "The Discord role",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "flag",
+              description: "Only remove this permission (omit to remove all for the role)",
+              required: false,
+              choices: [
+                { name: "Co-owner", value: "is_co_owner" },
+                { name: "Commissioner", value: "is_commissioner" },
+                { name: "Head steward", value: "is_head_steward" },
+                { name: "Steward", value: "is_steward" },
+                { name: "BSAC chief", value: "is_bsac_chief" },
+                { name: "Team principal", value: "is_team_principal" },
+                { name: "Driver", value: "is_driver" },
+              ],
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "list",
+          description: "Show which roles are mapped to which permissions",
+        },
+        {
+          type: 1,
+          name: "sync",
+          description: "Set members' permissions from their Discord roles (preview unless apply is on)",
+          options: [
+            {
+              type: 5,
+              name: "apply",
+              description: "Actually write the changes (default: preview only, nothing is written)",
+              required: false,
+            },
+          ],
+        },
+      ],
+    },
+    {
       name: "generate-grid",
       description: "Build the team lineup grid from confirmed check-ins",
       options: [
