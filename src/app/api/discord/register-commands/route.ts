@@ -875,6 +875,51 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      // Season signups (owner/co-owner/commissioner). Dispatches to
+      // signups_open / signups_resume / signups_status / signups_close in
+      // src/lib/discord/commands/signups.ts.
+      name: "signups",
+      description: "Season signups: DM league members to sign up (owner/co-owner/commissioner)",
+      dm_permission: false,
+      options: [
+        {
+          type: 1,
+          name: "open",
+          description: "Open season signups and DM every league member",
+          options: [
+            {
+              type: 4,
+              name: "season",
+              description: "Season number (defaults to the league's upcoming season)",
+              required: false,
+              min_value: 1,
+            },
+            {
+              type: 3,
+              name: "message",
+              description: "Custom DM text (defaults to a standard signup message)",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "resume",
+          description: "Keep sending signup DMs that are still queued",
+        },
+        {
+          type: 1,
+          name: "status",
+          description: "Show signup counts for the open round",
+        },
+        {
+          type: 1,
+          name: "close",
+          description: "Close the open signup round",
+        },
+      ],
+    },
+    {
       name: "generate-grid",
       description: "Build the team lineup grid from confirmed check-ins",
       options: [
@@ -894,6 +939,333 @@ export async function GET(req: NextRequest) {
           type: 5,
           name: "regenerate",
           description: "Rebuild an existing grid for this round",
+          required: false,
+        },
+      ],
+    },
+    {
+      // Season calendar admin (owner/co-owner/commissioner). Dispatches to
+      // calendar_add / calendar_import / calendar_list / calendar_remove in
+      // src/lib/discord/commands/season-admin.ts.
+      name: "calendar",
+      description: "Set up a season's race calendar (owner/co-owner/commissioner)",
+      dm_permission: false,
+      options: [
+        {
+          type: 1,
+          name: "add",
+          description: "Add or update one round on the calendar",
+          options: [
+            {
+              type: 4,
+              name: "season",
+              description: "Season number",
+              required: true,
+              min_value: 1,
+            },
+            {
+              type: 4,
+              name: "round",
+              description: "Round number",
+              required: true,
+              min_value: 1,
+            },
+            {
+              type: 3,
+              name: "name",
+              description: "Round name, e.g. Australia Grand Prix",
+              required: true,
+            },
+            {
+              type: 3,
+              name: "date",
+              description: "Race date, YYYY-MM-DD (e.g. 2026-09-06)",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "circuit",
+              description: "Circuit name",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "country",
+              description: "Country",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "flag",
+              description: "Flag emoji (e.g. 🇦🇺) — needed for the flag image on check-in cards",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "division",
+              description: "Division code (omit for a league-wide round)",
+              required: false,
+            },
+            {
+              type: 5,
+              name: "sprint",
+              description: "Sprint weekend?",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "type",
+              description: "Round type (default: race)",
+              required: false,
+              choices: [
+                { name: "Race", value: "race" },
+                { name: "Break", value: "break" },
+                { name: "Testing", value: "testing" },
+              ],
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "import",
+          description: "Load a whole season calendar from a CSV file",
+          options: [
+            {
+              type: 11,
+              name: "file",
+              description: "CSV with columns: round, name, circuit, country, flag, date, sprint, type",
+              required: true,
+            },
+            {
+              type: 4,
+              name: "season",
+              description: "Season number",
+              required: true,
+              min_value: 1,
+            },
+            {
+              type: 3,
+              name: "division",
+              description: "Division code (omit for league-wide rounds)",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "list",
+          description: "Show a season's calendar",
+          options: [
+            {
+              type: 4,
+              name: "season",
+              description: "Season number (defaults to the latest)",
+              required: false,
+              min_value: 1,
+            },
+            {
+              type: 3,
+              name: "division",
+              description: "Only show this division",
+              required: false,
+            },
+          ],
+        },
+        {
+          type: 1,
+          name: "remove",
+          description: "Remove a round from the calendar (blocked if it has results)",
+          options: [
+            {
+              type: 4,
+              name: "season",
+              description: "Season number",
+              required: true,
+              min_value: 1,
+            },
+            {
+              type: 4,
+              name: "round",
+              description: "Round number",
+              required: true,
+              min_value: 1,
+            },
+            {
+              type: 3,
+              name: "division",
+              description: "Division code (omit for a league-wide round)",
+              required: false,
+            },
+            {
+              type: 3,
+              name: "type",
+              description: "Round type (default: race)",
+              required: false,
+              choices: [
+                { name: "Race", value: "race" },
+                { name: "Break", value: "break" },
+                { name: "Testing", value: "testing" },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "set-result",
+      description: "Enter one driver's result for a race (owner/co-owner/commissioner)",
+      dm_permission: false,
+      options: [
+        {
+          type: 6,
+          name: "driver",
+          description: "Driver",
+          required: true,
+        },
+        {
+          type: 4,
+          name: "season",
+          description: "Season number",
+          required: true,
+          min_value: 1,
+        },
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name",
+          required: true,
+        },
+        {
+          type: 4,
+          name: "finish",
+          description: "Finishing position (not needed if DNF)",
+          required: false,
+          min_value: 1,
+        },
+        {
+          type: 4,
+          name: "quali",
+          description: "Qualifying position",
+          required: false,
+          min_value: 1,
+        },
+        {
+          type: 5,
+          name: "dnf",
+          description: "Did not finish?",
+          required: false,
+        },
+        {
+          type: 5,
+          name: "fastest_lap",
+          description: "Set the fastest lap?",
+          required: false,
+        },
+        {
+          type: 10,
+          name: "points",
+          description: "Points override (defaults to the league's points table)",
+          required: false,
+        },
+        {
+          type: 4,
+          name: "sprint_finish",
+          description: "Sprint finishing position",
+          required: false,
+          min_value: 1,
+        },
+        {
+          type: 3,
+          name: "dnf_reason",
+          description: "Reason for the DNF",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "division",
+          description: "Division code (needed if the round exists in more than one division)",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "import-results",
+      description: "Load a whole race's results from a CSV file (owner/co-owner/commissioner)",
+      dm_permission: false,
+      options: [
+        {
+          type: 11,
+          name: "file",
+          description: "CSV with columns: driver, finish, quali, dnf, dnf_reason, fastest_lap, points, sprint_finish",
+          required: true,
+        },
+        {
+          type: 4,
+          name: "season",
+          description: "Season number",
+          required: true,
+          min_value: 1,
+        },
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "division",
+          description: "Division code (needed if the round exists in more than one division)",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "set-standings",
+      description: "Set a driver's total season points (owner/co-owner/commissioner)",
+      dm_permission: false,
+      options: [
+        {
+          type: 6,
+          name: "driver",
+          description: "Driver",
+          required: true,
+        },
+        {
+          type: 4,
+          name: "season",
+          description: "Season number",
+          required: true,
+          min_value: 1,
+        },
+        {
+          type: 10,
+          name: "points",
+          description: "Their total points for the season",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "reason",
+          description: "Why (saved with the adjustment)",
+          required: false,
+        },
+      ],
+    },
+    {
+      name: "results",
+      description: "View the results for a race round (defaults to the most recent round with results)",
+      options: [
+        {
+          type: 3,
+          name: "round",
+          description: "Round number or name (defaults to the most recent round with results)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "season",
+          description: "Season (defaults to the most recent season with recorded results)",
           required: false,
         },
       ],
