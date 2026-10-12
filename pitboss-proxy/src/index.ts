@@ -1,6 +1,7 @@
 interface Env {
   OPENROUTER_API_KEY: string;
   GROQ_API_KEY?: string;
+  GEMINI_API_KEY?: string;
   ANTHROPIC_KEY?: string;
   OPENAI_KEY?: string;
   PITBOSS_INTERNAL_KEY: string;
@@ -304,6 +305,155 @@ async function resolveVideoUrl(url: string, env: Env, reasons: string[]): Promis
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Gemini video pass (Google AI Studio free tier, no billing account needed).
+// The worker downloads each resolved clip and sends it inline as base64, because
+// Gemini cannot fetch arbitrary video URLs the way OpenRouter does. Inline requests
+// are limited to about 20 MB total, so raw clip bytes are capped below that.
+// Edit GEMINI_VIDEO_MODELS if Google renames or retires a model.
+// ---------------------------------------------------------------------------
+const GEMINI_VIDEO_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_DOWNLOAD_TIMEOUT_MS = 8_000;
+const GEMINI_CALL_TIMEOUT_MS = 15_000;
+const GEMINI_MAX_TOTAL_VIDEO_BYTES = 14 * 1024 * 1024;
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk) as unknown as number[]);
+  }
+  return btoa(binary);
+}
+
+function mimeFromUrl(url: string): string {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    if (path.endsWith(".webm")) return "video/webm";
+    if (path.endsWith(".mov")) return "video/quicktime";
+  } catch {
+    // fall through to default
+  }
+  return "video/mp4";
+}
+
+async function downloadVideoForGemini(
+  url: string,
+  maxBytes: number,
+  reasons: string[]
+): Promise<{ mime: string; data: string; bytes: number } | null> {
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      { headers: { "User-Agent": PAGE_UA }, redirect: "follow" },
+      GEMINI_DOWNLOAD_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      reasons.push(`gemini: download http ${res.status} for ${hostOf(url)}`);
+      return null;
+    }
+    const tooBig = () =>
+      reasons.push(`gemini: clip from ${hostOf(url)} too large for inline upload (limit ${Math.floor(maxBytes / 1048576)} MB)`);
+    const declared = Number(res.headers.get("Content-Length") ?? 0);
+    if (declared > maxBytes) {
+      tooBig();
+      return null;
+    }
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > maxBytes) {
+      tooBig();
+      return null;
+    }
+    const headerMime = (res.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+    const mime = headerMime.startsWith("video/") ? headerMime : mimeFromUrl(url);
+    return { mime, data: arrayBufferToBase64(buf), bytes: buf.byteLength };
+  } catch (err) {
+    reasons.push(`gemini: download failed for ${hostOf(url)}: ${String(err)}`);
+    return null;
+  }
+}
+
+async function describeVideosWithGemini(
+  resolved: ResolvedVideo[],
+  system: string,
+  prompt: string,
+  env: Env,
+  reasons: string[]
+): Promise<{ response: string; model: string; usage: any; clipCount: number } | null> {
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+
+  const clips: { mime: string; data: string; bytes: number }[] = [];
+  let remainingBytes = GEMINI_MAX_TOTAL_VIDEO_BYTES;
+  for (const r of resolved) {
+    const clip = await downloadVideoForGemini(r.url, remainingBytes, reasons);
+    if (!clip) continue;
+    remainingBytes -= clip.bytes;
+    clips.push(clip);
+  }
+  if (clips.length === 0) return null;
+
+  const body = {
+    systemInstruction: { parts: [{ text: system }] },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          ...clips.map((c) => ({ inline_data: { mime_type: c.mime, data: c.data } })),
+        ],
+      },
+    ],
+    generationConfig: { maxOutputTokens: 900, temperature: 0.1 },
+  };
+
+  const errors: string[] = [];
+  for (const model of GEMINI_VIDEO_MODELS) {
+    try {
+      const res = await fetchWithTimeout(
+        `${GEMINI_API_BASE}/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+          body: JSON.stringify(body),
+        },
+        GEMINI_CALL_TIMEOUT_MS
+      );
+      if (!res.ok) {
+        errors.push(`${model}: ${res.status} ${(await res.text()).slice(0, 160)}`);
+        continue;
+      }
+      const json: any = await res.json();
+      const text = (json?.candidates?.[0]?.content?.parts ?? [])
+        .map((p: any) => p.text ?? "")
+        .join("")
+        .trim();
+      if (!text) {
+        const why = json?.candidates?.[0]?.finishReason ?? json?.promptFeedback?.blockReason ?? "no reason given";
+        errors.push(`${model}: empty response (${why})`);
+        continue;
+      }
+      return {
+        response: text,
+        model: json?.modelVersion ?? model,
+        usage: json?.usageMetadata ?? null,
+        clipCount: clips.length,
+      };
+    } catch (err: any) {
+      errors.push(
+        err && err.name === "AbortError"
+          ? `${model}: timed out after ${GEMINI_CALL_TIMEOUT_MS}ms`
+          : `${model}: ${String(err).slice(0, 160)}`
+      );
+    }
+  }
+  console.error("[video] gemini pass failed:", JSON.stringify(errors));
+  reasons.push(`gemini failed: ${errors.join(" | ")}`);
+  return null;
+}
+
 type VideoPassResult = {
   submitted: number;
   analysis: {
@@ -348,6 +498,23 @@ If a video fails to play, is unrelated to racing, or you cannot see the incident
   const prompt = `INCIDENT CONTEXT (for reference only, not for you to judge): ${incidentContext}
 
 Describe what happens in the attached video(s), in order.`;
+
+  // Gemini first (free tier, no balance needed). If it is not configured or fails,
+  // fall through to the OpenRouter video models below.
+  const gemini = await describeVideosWithGemini(resolved, system, prompt, env, reasons);
+  if (gemini) {
+    return {
+      submitted,
+      reasons,
+      analysis: {
+        description: gemini.response,
+        model: gemini.model,
+        usage: gemini.usage,
+        video_count: gemini.clipCount,
+        via: resolved.map((r) => r.via),
+      },
+    };
+  }
 
   const data = await freeWaterfall(
     MODELS.video,
