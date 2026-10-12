@@ -307,6 +307,158 @@ export async function sendPendingDms(
 }
 
 // ---------------------------------------------------------------------------
+// Test invite: one individual DM, no DB writes
+// ---------------------------------------------------------------------------
+
+const SIGNUP_CHANNEL_ID =
+  process.env.PITBOSS_SIGNUP_CHANNEL_ID ?? '1559261744470163556' // VRC #driver-signups
+
+// F1 25 base game + 2026 Season Pack (Madring). Three distinct circuits are
+// drawn per test invite. Circuits with a reverse layout get a 50/50 flip.
+const TRACK_POOL: { name: string; hasReverse?: boolean }[] = [
+  { name: 'Albert Park Circuit (Melbourne)' },
+  { name: 'Shanghai International Circuit' },
+  { name: 'Suzuka Circuit' },
+  { name: 'Bahrain International Circuit (Sakhir)' },
+  { name: 'Jeddah Corniche Circuit' },
+  { name: 'Miami International Autodrome' },
+  { name: 'Autodromo Enzo e Dino Ferrari (Imola)' },
+  { name: 'Circuit de Monaco' },
+  { name: 'Circuit de Barcelona-Catalunya' },
+  { name: 'Circuit Gilles Villeneuve (Montreal)' },
+  { name: 'Red Bull Ring (Spielberg)', hasReverse: true },
+  { name: 'Silverstone Circuit', hasReverse: true },
+  { name: 'Circuit de Spa-Francorchamps' },
+  { name: 'Hungaroring' },
+  { name: 'Circuit Zandvoort', hasReverse: true },
+  { name: 'Autodromo Nazionale Monza' },
+  { name: 'Baku City Circuit' },
+  { name: 'Marina Bay Street Circuit (Singapore)' },
+  { name: 'Circuit of the Americas (Austin)' },
+  { name: 'Autódromo Hermanos Rodríguez (Mexico City)' },
+  { name: 'Autódromo José Carlos Pace (Interlagos)' },
+  { name: 'Las Vegas Strip Circuit' },
+  { name: 'Lusail International Circuit (Qatar)' },
+  { name: 'Yas Marina Circuit (Abu Dhabi)' },
+  { name: 'Madring (Madrid)' }, // 2026 Season Pack, 2026 cars only
+]
+
+function pickTracks(n = 3): string[] {
+  const pool = [...TRACK_POOL]
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[pool[i], pool[j]] = [pool[j], pool[i]]
+  }
+  return pool.slice(0, n).map((t) =>
+    t.hasReverse && Math.random() < 0.5 ? `${t.name} - Reverse` : t.name
+  )
+}
+
+export async function sendTestSignup(params: {
+  leagueId: string
+  openedByDiscordId: string
+  targetDiscordId: string
+  seasonNumber?: number // defaults to 2
+}): Promise<{ ok: true; tracks: string[] } | { ok: false; error: string }> {
+  const { leagueId, openedByDiscordId, targetDiscordId } = params
+  const seasonNumber = params.seasonNumber ?? 2
+
+  if (!(await canOpenSignups(openedByDiscordId, leagueId))) {
+    return { ok: false, error: 'Only league owners can send test signups.' }
+  }
+
+  const { data: league } = await db()
+    .from('leagues')
+    .select('name')
+    .eq('id', leagueId)
+    .maybeSingle()
+
+  const { data: driver } = await db()
+    .from('drivers')
+    .select('display_name, discord_username')
+    .eq('discord_id', targetDiscordId)
+    .maybeSingle()
+
+  const name = driver?.display_name || driver?.discord_username || 'driver'
+  const leagueName = league?.name ?? 'the league'
+  const tracks = pickTracks(3)
+
+  const content =
+    `**${leagueName}: Season ${seasonNumber} Driver Signup** *(test invite)*\n\n` +
+    `Hi ${name}, we'd be delighted to have you on the grid for **Season ${seasonNumber}**. ` +
+    `Your pace and sportsmanship have been a big part of what makes this league fun, ` +
+    `and we'd love to see you back out there.\n\n` +
+    `If you're in, tap **Sign Up** below. As part of signups, please post a picture ` +
+    `of each of these three tracks in <#${SIGNUP_CHANNEL_ID}>:\n` +
+    tracks.map((t, i) => `${i + 1}. ${t}`).join('\n') +
+    `\n\nNot this time? Tap **No Thanks**, no hard feelings. Thanks for racing with us!`
+
+  try {
+    const channel = await discord('/users/@me/channels', {
+      recipient_id: targetDiscordId,
+    })
+    await discord(`/channels/${channel.id}/messages`, {
+      content,
+      components: [
+        {
+          type: 1,
+          components: [
+            {
+              type: 2,
+              style: 3,
+              label: 'Sign Up',
+              custom_id: `signuptest:${seasonNumber}:yes`,
+            },
+            {
+              type: 2,
+              style: 2,
+              label: 'No Thanks',
+              custom_id: `signuptest:${seasonNumber}:no`,
+            },
+          ],
+        },
+      ],
+    })
+    return { ok: true, tracks }
+  } catch (e: any) {
+    return {
+      ok: false,
+      error: e?.code ? `${e.code}: ${e.message}` : String(e?.message ?? e),
+    }
+  }
+}
+
+// Test button clicks: reply in the DM and post the result to the signups
+// channel so feedback lands where you'll see it. Nothing is saved to the DB.
+async function handleTestButton(
+  seasonNumber: string,
+  answer: string,
+  discordUserId: string
+) {
+  const signedUp = answer === 'yes'
+  try {
+    await discord(`/channels/${SIGNUP_CHANNEL_ID}/messages`, {
+      content:
+        `🧪 Test signup response: <@${discordUserId}> chose ` +
+        `**${signedUp ? 'Sign Up' : 'No Thanks'}** for Season ${seasonNumber}. ` +
+        `Nothing was saved.`,
+      allowed_mentions: { parse: [] },
+    })
+  } catch (e) {
+    console.error('[signuptest] channel post failed:', e)
+  }
+  return {
+    type: 7,
+    data: {
+      content: signedUp
+        ? `Thanks! You're signed up for Season ${seasonNumber} *(test, nothing saved)*. Please post your 3 track pictures in <#${SIGNUP_CHANNEL_ID}>.`
+        : `Got it, no problem *(test, nothing saved)*.`,
+      components: [] as [],
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Button handler: return value is the interaction response body
 // (type 7 = update the DM in place). Returns null if not a signup button.
 // ---------------------------------------------------------------------------
@@ -316,6 +468,12 @@ export async function handleSignupButton(
   discordUserId: string
 ): Promise<{ type: number; data: { content: string; components: [] } } | null> {
   const [prefix, roundId, answer] = customId.split(':')
+
+  // Test invites: no DB writes (roundId slot carries the season number)
+  if (prefix === 'signuptest' && ['yes', 'no'].includes(answer)) {
+    return handleTestButton(roundId, answer, discordUserId)
+  }
+
   if (prefix !== 'signup' || !roundId || !['yes', 'no'].includes(answer)) {
     return null
   }
