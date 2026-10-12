@@ -1,4 +1,5 @@
 // steward.ts
+import { randomUUID } from "crypto";
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import {
@@ -14,6 +15,11 @@ import {
   sendAppealPromptDM,
 } from "../tickets";
 import { hasDiscordStewardAccess } from "../permissions";
+import {
+  copyDiscordAttachmentToStorage,
+  recordIncidentEvidence,
+  resolveEvidenceUrl,
+} from "../evidence-storage";
 
 function resolveAppBaseUrl(): string | null {
   const explicit = process.env.NEXT_PUBLIC_APP_URL;
@@ -58,7 +64,7 @@ function formatEvidenceLines(link?: string, attachmentUrl?: string): string[] {
 }
 
 type EvidenceInput =
-  | { ok: true; urls: string[]; link?: string }
+  | { ok: true; link?: string }
   | { ok: false; error: string };
 
 // Evidence on /steward report and /steward respond is "link OR file":
@@ -68,14 +74,19 @@ type EvidenceInput =
 // could attach a file instead) typed filler like "will send soon" into
 // it, which then got forwarded to the accused and to the AI analysis as
 // if it were evidence. `evidence_file` is the alternative, not an extra.
-function collectEvidenceUrls(
+//
+// Only the link is validated and returned here. An attached file is
+// copied into the incident-evidence bucket by the command handlers
+// (see copyDiscordAttachmentToStorage) rather than stored as the raw
+// Discord CDN URL, which expires.
+function collectEvidence(
   link: string | undefined,
-  attachmentUrl: string | undefined,
+  hasAttachment: boolean,
   missingMessage: string
 ): EvidenceInput {
   const trimmed = link?.trim();
 
-  if (!trimmed && !attachmentUrl) {
+  if (!trimmed && !hasAttachment) {
     return { ok: false, error: missingMessage };
   }
 
@@ -99,8 +110,7 @@ function collectEvidenceUrls(
     }
   }
 
-  const urls = [trimmed, attachmentUrl].filter((u): u is string => Boolean(u));
-  return { ok: true, urls, link: trimmed || undefined };
+  return { ok: true, link: trimmed || undefined };
 }
 
 async function getOrCreateDriverId(
@@ -138,13 +148,27 @@ async function getOrCreateDriverId(
 // accused, lap, round, and evidence are mandatory on /steward report so
 // stewards always have a fully-formed report to work from instead of
 // chasing missing context after the fact. Evidence is satisfied by a
-// link OR an uploaded file (see collectEvidenceUrls). Validated
+// link OR an uploaded file (see collectEvidence). Validated
 // defensively below in addition to marking them on the slash command
 // schema itself (outside these files — wherever /steward report's
 // options are registered with Discord), since ctx.options isn't
 // guaranteed to match the schema at runtime. On the schema, `evidence`
 // and `evidence_file` must both be optional, or Discord will force a
 // link even when a file is attached.
+//
+// Where the evidence lands:
+//   - a pasted link goes in incidents.evidence_urls (as before)
+//   - an attached file is copied into the private incident-evidence
+//     bucket and recorded as a pitboss.incident_evidence row
+//     (source = 'upload', url = storage path), so it survives Discord's
+//     CDN link expiry. Anything that needs a URL signs it on demand.
+// The two are kept in separate places on purpose: readers that merge
+// the legacy array with the table (getIncidentEvidence, appeal.ts)
+// would double-count anything written to both.
+//
+// When a file is attached the handler defers its reply (the download
+// and upload can outlast Discord's 3-second ACK window); link-only
+// reports still answer inline.
 registerCommand("steward_report", async (ctx) => {
   const leagueId = ctx.leagueId;
   if (!leagueId) {
@@ -166,15 +190,14 @@ registerCommand("steward_report", async (ctx) => {
     ? ctx.resolvedAttachments[evidenceAttachmentId]
     : undefined;
 
-  const evidence = collectEvidenceUrls(
+  const evidence = collectEvidence(
     evidenceLinkRaw,
-    evidenceAttachment?.url,
+    Boolean(evidenceAttachment),
     "Evidence is required — paste a POV link in `evidence`, or attach a file in `evidence_file`. Either works, and you can send both."
   );
   if (!evidence.ok) {
     return { content: evidence.error, ephemeral: true };
   }
-  const evidenceUrls = evidence.urls;
   const evidenceLink = evidence.link;
 
   if (!accusedDiscordId) {
@@ -190,135 +213,189 @@ registerCommand("steward_report", async (ctx) => {
     return { content: "`lap` is required.", ephemeral: true };
   }
 
-  const reporterId = await getOrCreateDriverId(ctx.discordUserId);
-  if (!reporterId) {
-    return {
-      content: "Couldn't set up your driver record — try again in a moment.",
-      ephemeral: true,
-    };
-  }
-
-  const accusedUsername = ctx.resolvedUsers[accusedDiscordId]?.username ?? null;
-  const accusedDriverId = await getOrCreateDriverId(
-    accusedDiscordId,
-    accusedUsername ?? undefined
-  );
-
-  const supabase = createAdminClient();
-
-  // Claim the next sequential ticket number for this league atomically
-  // before inserting, so the incident row is created with its final
-  // number already set rather than backfilled after the fact.
-  const { data: ticketNumber, error: ticketNumberError } = await supabase
-    .schema("rise_os")
-    .rpc("increment_ticket_number", { p_league_id: leagueId });
-
-  if (ticketNumberError || ticketNumber === null || ticketNumber === undefined) {
-    console.error("[steward_report] ticket number claim failed:", ticketNumberError);
-    return {
-      content: "Couldn't assign a ticket number — try again in a moment.",
-      ephemeral: true,
-    };
-  }
-
-  const { data, error } = await supabase
-    .schema("pitboss")
-    .from("incidents")
-    .insert({
-      league_id: leagueId,
-      reported_by: reporterId,
-      accused_driver_id: accusedDriverId,
-      accused_discord_username: accusedUsername,
-      incident_type: incidentType,
-      description,
-      lap,
-      round,
-      evidence_urls: evidenceUrls,
-      status: "open",
-      ticket_number: ticketNumber,
-    })
-    .select("id, ticket_number")
-    .single();
-
-  if (error || !data) {
-    console.error("[steward_report] insert failed:", error);
-    return {
-      content: `Something went wrong filing that report: ${error?.message ?? "unknown error"}`,
-      ephemeral: true,
-    };
-  }
-
-  const ticketLabel = getTicketLabel(data);
-
-  const { data: leagueConfig } = await supabase
-    .schema("rise_os")
-    .from("leagues")
-    .select("discord_ticket_category_id, discord_steward_role_id")
-    .eq("id", leagueId)
-    .maybeSingle();
-
-  const ticketCategoryId = leagueConfig?.discord_ticket_category_id ?? null;
-  const stewardRoleId = leagueConfig?.discord_steward_role_id ?? null;
-
-  let channelId: string | null = null;
-  let ticketNote: string;
-
-  if (!ticketCategoryId || !stewardRoleId) {
-    // Both are required to open a ticket channel. Say exactly which one(s)
-    // are missing instead of always blaming the category.
-    const missing: string[] = [];
-    if (!ticketCategoryId) missing.push("ticket category");
-    if (!stewardRoleId) missing.push("steward role");
-
-    const isAdmin =
-      (BigInt(ctx.memberPermissions || "0") & (1n << 3n)) !== 0n;
-    const fix = isAdmin
-      ? "Run `/setup` — it detects them automatically, or you can pick them in the command."
-      : "Ask a server admin to run `/setup`.";
-
-    ticketNote = `Incident **${ticketLabel}** filed (${incidentType}), but no ticket channel was created because this league is missing its ${missing.join(" and ")}. ${fix} Check status with \`/steward status\`.`;
-  } else {
-    channelId = await createIncidentTicket({
-      guildId,
-      categoryId: ticketCategoryId,
-      stewardRoleId,
-      reporterDiscordId: ctx.discordUserId,
-      accusedDiscordId,
-      ticketLabel: ticketLabel,
-      incidentType,
-      description,
-      lap,
-      round,
-      // tickets.ts's createIncidentTicket takes evidenceUrls (array)
-      // directly — see that file for the up-to-date signature.
-      evidenceUrls,
-    });
-
-    if (channelId) {
-      await supabase
-        .schema("pitboss")
-        .from("incidents")
-        .update({ ticket_channel_id: channelId })
-        .eq("id", data.id);
-      ticketNote = `Incident **${ticketLabel}** filed — see <#${channelId}> for the ticket.`;
-    } else {
-      ticketNote = `Incident **${ticketLabel}** filed (${incidentType}), but I couldn't open a ticket channel for it. Stewards can still see it via \`/steward status\`.`;
+  const run = async (): Promise<{ content: string }> => {
+    const reporterId = await getOrCreateDriverId(ctx.discordUserId);
+    if (!reporterId) {
+      return { content: "Couldn't set up your driver record — try again in a moment." };
     }
+
+    const accusedUsername = ctx.resolvedUsers[accusedDiscordId]?.username ?? null;
+    const accusedDriverId = await getOrCreateDriverId(
+      accusedDiscordId,
+      accusedUsername ?? undefined
+    );
+
+    const supabase = createAdminClient();
+
+    // The incident id is generated up front so an attached file can be
+    // copied into storage under it BEFORE anything is filed. If the copy
+    // fails, nothing is created (no ticket number burned, no half-filed
+    // incident with no evidence) and the reporter is told to retry.
+    const incidentId = randomUUID();
+    let storedFilePath: string | null = null;
+
+    if (evidenceAttachment) {
+      const copied = await copyDiscordAttachmentToStorage({
+        incidentId,
+        party: "reporter",
+        url: evidenceAttachment.url,
+        filename: evidenceAttachment.filename,
+        contentType: evidenceAttachment.contentType,
+      });
+      if ("error" in copied) {
+        return {
+          content: `${copied.error} Nothing was filed — try again, or paste a link in \`evidence\` instead.`,
+        };
+      }
+      storedFilePath = copied.path;
+    }
+
+    // Claim the next sequential ticket number for this league atomically
+    // before inserting, so the incident row is created with its final
+    // number already set rather than backfilled after the fact.
+    const { data: ticketNumber, error: ticketNumberError } = await supabase
+      .schema("rise_os")
+      .rpc("increment_ticket_number", { p_league_id: leagueId });
+
+    if (ticketNumberError || ticketNumber === null || ticketNumber === undefined) {
+      console.error("[steward_report] ticket number claim failed:", ticketNumberError);
+      return { content: "Couldn't assign a ticket number — try again in a moment." };
+    }
+
+    const { data, error } = await supabase
+      .schema("pitboss")
+      .from("incidents")
+      .insert({
+        id: incidentId,
+        league_id: leagueId,
+        reported_by: reporterId,
+        accused_driver_id: accusedDriverId,
+        accused_discord_username: accusedUsername,
+        incident_type: incidentType,
+        description,
+        lap,
+        round,
+        evidence_urls: evidenceLink ? [evidenceLink] : [],
+        status: "open",
+        ticket_number: ticketNumber,
+      })
+      .select("id, ticket_number")
+      .single();
+
+    if (error || !data) {
+      console.error("[steward_report] insert failed:", error);
+      return {
+        content: `Something went wrong filing that report: ${error?.message ?? "unknown error"}`,
+      };
+    }
+
+    // Record the stored file against the incident now that it exists.
+    let evidenceWarning = "";
+    let fileUrl: string | null = null;
+    if (storedFilePath) {
+      const recorded = await recordIncidentEvidence({
+        incidentId: data.id,
+        party: "reporter",
+        source: "upload",
+        url: storedFilePath,
+        label: evidenceAttachment?.filename ?? null,
+        addedByDriverId: reporterId,
+        addedByRole: "reporter",
+      });
+      if ("error" in recorded) {
+        evidenceWarning =
+          "\n⚠ Your file was uploaded but couldn't be linked to the incident — tell a steward so they can look into it.";
+      } else {
+        fileUrl = await resolveEvidenceUrl(storedFilePath, "upload");
+      }
+    }
+
+    // What the ticket and the accused's DM show: the pasted link plus a
+    // freshly signed URL for the stored file.
+    const evidenceUrls = [evidenceLink, fileUrl].filter((u): u is string =>
+      Boolean(u)
+    );
+
+    const ticketLabel = getTicketLabel(data);
+
+    const { data: leagueConfig } = await supabase
+      .schema("rise_os")
+      .from("leagues")
+      .select("discord_ticket_category_id, discord_steward_role_id")
+      .eq("id", leagueId)
+      .maybeSingle();
+
+    const ticketCategoryId = leagueConfig?.discord_ticket_category_id ?? null;
+    const stewardRoleId = leagueConfig?.discord_steward_role_id ?? null;
+
+    let channelId: string | null = null;
+    let ticketNote: string;
+
+    if (!ticketCategoryId || !stewardRoleId) {
+      // Both are required to open a ticket channel. Say exactly which one(s)
+      // are missing instead of always blaming the category.
+      const missing: string[] = [];
+      if (!ticketCategoryId) missing.push("ticket category");
+      if (!stewardRoleId) missing.push("steward role");
+
+      const isAdmin =
+        (BigInt(ctx.memberPermissions || "0") & (1n << 3n)) !== 0n;
+      const fix = isAdmin
+        ? "Run `/setup` — it detects them automatically, or you can pick them in the command."
+        : "Ask a server admin to run `/setup`.";
+
+      ticketNote = `Incident **${ticketLabel}** filed (${incidentType}), but no ticket channel was created because this league is missing its ${missing.join(" and ")}. ${fix} Check status with \`/steward status\`.`;
+    } else {
+      channelId = await createIncidentTicket({
+        guildId,
+        categoryId: ticketCategoryId,
+        stewardRoleId,
+        reporterDiscordId: ctx.discordUserId,
+        accusedDiscordId,
+        ticketLabel: ticketLabel,
+        incidentType,
+        description,
+        lap,
+        round,
+        // tickets.ts's createIncidentTicket takes evidenceUrls (array)
+        // directly — see that file for the up-to-date signature.
+        evidenceUrls,
+      });
+
+      if (channelId) {
+        await supabase
+          .schema("pitboss")
+          .from("incidents")
+          .update({ ticket_channel_id: channelId })
+          .eq("id", data.id);
+        ticketNote = `Incident **${ticketLabel}** filed — see <#${channelId}> for the ticket.`;
+      } else {
+        ticketNote = `Incident **${ticketLabel}** filed (${incidentType}), but I couldn't open a ticket channel for it. Stewards can still see it via \`/steward status\`.`;
+      }
+    }
+
+    const dmLines = [
+      `You've been named in an incident report — **${ticketLabel}** (${incidentType}) — filed against you.`,
+      `\n${description}`,
+      ...(evidenceUrls.length > 0
+        ? [`\nEvidence submitted against you:`, ...formatEvidenceLines(evidenceLink, fileUrl ?? undefined)]
+        : []),
+      channelId
+        ? `\nRespond with your side in <#${channelId}> using \`/steward respond\` — you can include your own POV link or file.`
+        : `\nA steward will follow up with a ticket channel shortly. Once it's open, use \`/steward respond\` there to give your side, including your own POV if you have one.`,
+    ].filter(Boolean);
+    await sendDirectMessage(accusedDiscordId, dmLines.join("\n"));
+
+    return { content: `${ticketNote}${evidenceWarning}` };
+  };
+
+  // Copying an attachment can outlast Discord's 3s ACK window, so defer
+  // whenever a file is attached. Link-only reports answer inline as before.
+  if (evidenceAttachment) {
+    return { defer: true, ephemeral: true, background: run };
   }
-
-  const dmLines = [
-    `You've been named in an incident report — **${ticketLabel}** (${incidentType}) — filed against you.`,
-    `\n${description}`,
-    ...(evidenceUrls.length > 0
-      ? [`\nEvidence submitted against you:`, ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url)]
-      : []),
-    channelId
-      ? `\nRespond with your side in <#${channelId}> using \`/steward respond\` — you can include your own POV link or file.`
-      : `\nA steward will follow up with a ticket channel shortly. Once it's open, use \`/steward respond\` there to give your side, including your own POV if you have one.`,
-  ].filter(Boolean);
-  await sendDirectMessage(accusedDiscordId, dmLines.join("\n"));
-
-  return { content: ticketNote, ephemeral: true };
+  const result = await run();
+  return { ...result, ephemeral: true };
 });
 
 registerCommand("steward_status", async (ctx) => {
@@ -918,6 +995,13 @@ registerCommand("steward_removeuser", async (ctx) => {
 // router rejects the interaction with "server isn't linked to a
 // league" before this handler's own ctx.leagueId/ctx.channelId
 // fallback logic below ever runs.
+//
+// Evidence handling mirrors /steward report: a pasted link goes in
+// incidents.accused_evidence_urls; an attached file is copied into the
+// incident-evidence bucket and recorded in pitboss.incident_evidence.
+// accused_evidence_urls is only overwritten when a new link is given,
+// so a file-only follow-up never wipes an earlier link. The reply is
+// deferred whenever a file is attached.
 registerCommand(
   "steward_respond",
   async (ctx) => {
@@ -932,15 +1016,14 @@ registerCommand(
     // Same "link OR file" rule as /steward report. `evidence` and
     // `evidence_file` must both be optional on the Discord command
     // schema; this is where "at least one" is actually enforced.
-    const evidence = collectEvidenceUrls(
+    const evidence = collectEvidence(
       evidenceLinkRaw,
-      evidenceAttachment?.url,
+      Boolean(evidenceAttachment),
       "Evidence is required — paste a POV link in `evidence`, or attach a file in `evidence_file`. Either works, and you can send both."
     );
     if (!evidence.ok) {
       return { content: evidence.error, ephemeral: true };
     }
-    const evidenceUrls = evidence.urls;
     const evidenceLink = evidence.link;
 
     // Two ways to identify the incident: running inside the ticket
@@ -1012,7 +1095,7 @@ registerCommand(
       accusedDiscordId = accusedDriver?.discord_id;
     }
 
-    if (!accusedDiscordId || accusedDiscordId !== ctx.discordUserId) {
+    if (!incident.accused_driver_id || !accusedDiscordId || accusedDiscordId !== ctx.discordUserId) {
       return {
         content: "Only the driver named in this incident can submit a defense.",
         ephemeral: true,
@@ -1026,53 +1109,106 @@ registerCommand(
       };
     }
 
-    const { error } = await supabase
-      .schema("pitboss")
-      .from("incidents")
-      .update({
+    // Narrowed copies for use inside the (possibly deferred) closure below.
+    const target = incident;
+    const accusedDriverId = incident.accused_driver_id;
+
+    const run = async (): Promise<{ content: string }> => {
+      // Copy an attached file into storage first; if that fails, nothing
+      // has been saved yet, so the driver can simply try again.
+      let storedFilePath: string | null = null;
+      if (evidenceAttachment) {
+        const copied = await copyDiscordAttachmentToStorage({
+          incidentId: target.id,
+          party: "accused",
+          url: evidenceAttachment.url,
+          filename: evidenceAttachment.filename,
+          contentType: evidenceAttachment.contentType,
+        });
+        if ("error" in copied) {
+          return {
+            content: `${copied.error} Your response wasn't saved — try again, or paste a link in \`evidence\` instead.`,
+          };
+        }
+        storedFilePath = copied.path;
+      }
+
+      const update: Record<string, unknown> = {
         accused_response: responseText,
         accused_response_at: new Date().toISOString(),
-        accused_evidence_urls: evidenceUrls,
-      })
-      .eq("id", incident.id);
-
-    if (error) {
-      console.error("[steward_respond] update failed:", error);
-      return {
-        content: `Couldn't save your response: ${error.message}`,
-        ephemeral: true,
       };
-    }
-
-    const defenseMessage = [
-      `**Defense submitted by <@${ctx.discordUserId}>:**`,
-      responseText,
-      ...formatEvidenceLines(evidenceLink, evidenceAttachment?.url).map((l) =>
-        l.replace(/^- /, "POV — ")
-      ),
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    // Always post to the incident's actual ticket channel (not
-    // ctx.channelId) since this may have been submitted from a
-    // different channel or a DM. Let the driver know where it landed
-    // if that's not where they typed the command.
-    let confirmationNote = "";
-    if (incident.ticket_channel_id) {
-      await postTicketMessage(incident.ticket_channel_id, defenseMessage);
-      if (incident.ticket_channel_id !== ctx.channelId) {
-        confirmationNote = ` It's been posted in <#${incident.ticket_channel_id}>.`;
+      if (evidenceLink) {
+        update.accused_evidence_urls = [evidenceLink];
       }
-    } else {
-      confirmationNote =
-        " No ticket channel is linked to this incident yet, so it wasn't posted anywhere — a steward can still see it on the incident record.";
-    }
 
-    return {
-      content: `Your response has been recorded.${confirmationNote}`,
-      ephemeral: true,
+      const { error } = await supabase
+        .schema("pitboss")
+        .from("incidents")
+        .update(update)
+        .eq("id", target.id);
+
+      if (error) {
+        console.error("[steward_respond] update failed:", error);
+        return { content: `Couldn't save your response: ${error.message}` };
+      }
+
+      let evidenceWarning = "";
+      let fileUrl: string | null = null;
+      if (storedFilePath) {
+        const recorded = await recordIncidentEvidence({
+          incidentId: target.id,
+          party: "accused",
+          source: "upload",
+          url: storedFilePath,
+          label: evidenceAttachment?.filename ?? null,
+          addedByDriverId: accusedDriverId,
+          addedByRole: "accused",
+        });
+        if ("error" in recorded) {
+          evidenceWarning =
+            " ⚠ Your file was uploaded but couldn't be linked to the incident — tell a steward so they can look into it.";
+        } else {
+          fileUrl = await resolveEvidenceUrl(storedFilePath, "upload");
+        }
+      }
+
+      const defenseMessage = [
+        `**Defense submitted by <@${ctx.discordUserId}>:**`,
+        responseText,
+        ...formatEvidenceLines(evidenceLink, fileUrl ?? undefined).map((l) =>
+          l.replace(/^- /, "POV — ")
+        ),
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      // Always post to the incident's actual ticket channel (not
+      // ctx.channelId) since this may have been submitted from a
+      // different channel or a DM. Let the driver know where it landed
+      // if that's not where they typed the command.
+      let confirmationNote = "";
+      if (target.ticket_channel_id) {
+        await postTicketMessage(target.ticket_channel_id, defenseMessage);
+        if (target.ticket_channel_id !== ctx.channelId) {
+          confirmationNote = ` It's been posted in <#${target.ticket_channel_id}>.`;
+        }
+      } else {
+        confirmationNote =
+          " No ticket channel is linked to this incident yet, so it wasn't posted anywhere — a steward can still see it on the incident record.";
+      }
+
+      return {
+        content: `Your response has been recorded.${confirmationNote}${evidenceWarning}`,
+      };
     };
+
+    // Copying an attachment can outlast Discord's 3s ACK window, so defer
+    // whenever a file is attached. Link-only responses answer inline.
+    if (evidenceAttachment) {
+      return { defer: true, ephemeral: true, background: run };
+    }
+    const result = await run();
+    return { ...result, ephemeral: true };
   },
   { leagueOptional: true }
 );
