@@ -6,15 +6,16 @@
 // day). Links (YouTube, Twitch, Streamable, etc.) can't be downloaded, so
 // they are recorded as source = 'link' and stored as typed.
 //
-// Storage references are saved as "storage:<path>" in the `url` column.
-// The bucket is private, so anything that needs a clickable or fetchable
-// URL (tickets, AI analysis, appeals) must pass the stored value through
-// resolveEvidenceUrl / resolveEvidenceList to get a fresh signed URL.
+// Convention (matches steward.ts's getIncidentEvidence): for rows with
+// source = 'upload', the `url` column holds the raw storage PATH inside
+// the incident-evidence bucket, not a URL. The bucket is private, so
+// anything that needs a clickable or fetchable URL (tickets, DMs, AI
+// analysis, appeals) must sign it first via resolveEvidenceUrl /
+// resolveEvidenceList. Rows with source = 'link' pass through unchanged.
 
 import { createAdminClient } from "@/lib/supabase/server";
 
 const BUCKET = "incident-evidence";
-const STORAGE_PREFIX = "storage:";
 const MAX_BYTES = 50 * 1024 * 1024; // refuse anything over 50 MB
 const SIGNED_URL_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days, regenerated on every read
 
@@ -43,7 +44,7 @@ function safeFileName(name: string | undefined): string {
 
 /**
  * Downloads a Discord attachment and uploads it to the incident-evidence
- * bucket. Returns the storage reference to save in incident_evidence.url.
+ * bucket. Returns the storage path to save in incident_evidence.url.
  */
 export async function copyDiscordAttachmentToStorage(params: {
   incidentId: string;
@@ -51,7 +52,7 @@ export async function copyDiscordAttachmentToStorage(params: {
   url: string;
   filename?: string;
   contentType?: string | null;
-}): Promise<{ ref: string; path: string } | { error: string }> {
+}): Promise<{ path: string } | { error: string }> {
   let host: string;
   try {
     host = new URL(params.url).hostname;
@@ -98,12 +99,13 @@ export async function copyDiscordAttachmentToStorage(params: {
     return { error: "Couldn't save the file to evidence storage." };
   }
 
-  return { ref: `${STORAGE_PREFIX}${path}`, path };
+  return { path };
 }
 
 /**
- * Records one piece of evidence in pitboss.incident_evidence.
- * `url` is a storage reference for uploads, or the typed link for links.
+ * Records one piece of evidence in pitboss.incident_evidence. For
+ * source = 'upload', `url` is the storage path; for 'link', the link.
+ * The incident row must already exist (foreign key).
  */
 export async function recordIncidentEvidence(params: {
   incidentId: string;
@@ -136,10 +138,11 @@ export async function recordIncidentEvidence(params: {
 }
 
 /**
- * Convenience wrapper: copy a Discord attachment to storage, then record it.
- * If the copy fails, nothing is recorded and the error comes back so the
- * caller can tell the user to retry (a raw Discord CDN link would die within
- * a day, so it is deliberately NOT used as a fallback).
+ * Convenience wrapper for when the incident already exists: copy a Discord
+ * attachment to storage, then record it. If the copy fails, nothing is
+ * recorded and the error comes back so the caller can tell the user to
+ * retry (a raw Discord CDN link would die within a day, so it is
+ * deliberately NOT used as a fallback).
  */
 export async function addEvidenceFile(params: {
   incidentId: string;
@@ -149,7 +152,7 @@ export async function addEvidenceFile(params: {
   contentType?: string | null;
   addedByDriverId: string;
   addedByRole: EvidenceAddedByRole;
-}): Promise<{ ok: true } | { error: string }> {
+}): Promise<{ ok: true; path: string } | { error: string }> {
   const copied = await copyDiscordAttachmentToStorage({
     incidentId: params.incidentId,
     party: params.party,
@@ -159,15 +162,18 @@ export async function addEvidenceFile(params: {
   });
   if ("error" in copied) return copied;
 
-  return recordIncidentEvidence({
+  const recorded = await recordIncidentEvidence({
     incidentId: params.incidentId,
     party: params.party,
     source: "upload",
-    url: copied.ref,
+    url: copied.path,
     label: params.filename ?? null,
     addedByDriverId: params.addedByDriverId,
     addedByRole: params.addedByRole,
   });
+  if ("error" in recorded) return recorded;
+
+  return { ok: true, path: copied.path };
 }
 
 /** Records a pasted link as-is (validate with isHttpUrl first). */
@@ -189,18 +195,21 @@ export async function addEvidenceLink(params: {
 }
 
 /**
- * Turns a stored evidence value into a usable URL. Storage references get a
- * fresh 7-day signed URL; plain links (and legacy rows) pass through as-is.
- * Returns null if a storage reference can't be signed (e.g. file deleted).
+ * Turns a stored evidence value into a usable URL. Uploads (storage
+ * paths) get a fresh 7-day signed URL; links and legacy values pass
+ * through as-is. Returns null if an upload can't be signed (e.g. the
+ * file was deleted).
  */
-export async function resolveEvidenceUrl(stored: string): Promise<string | null> {
-  if (!stored.startsWith(STORAGE_PREFIX)) return stored;
+export async function resolveEvidenceUrl(
+  stored: string,
+  source: string | undefined
+): Promise<string | null> {
+  if (source !== "upload") return stored;
 
-  const path = stored.slice(STORAGE_PREFIX.length);
   const supabase = createAdminClient();
   const { data, error } = await supabase.storage
     .from(BUCKET)
-    .createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
+    .createSignedUrl(stored, SIGNED_URL_TTL_SECONDS);
 
   if (error || !data?.signedUrl) {
     console.error("[evidence-storage] signed URL failed:", error);
@@ -210,12 +219,12 @@ export async function resolveEvidenceUrl(stored: string): Promise<string | null>
 }
 
 /** Resolves a whole evidence list, dropping entries that can't be resolved. */
-export async function resolveEvidenceList<T extends { url: string }>(
-  items: T[]
-): Promise<T[]> {
+export async function resolveEvidenceList<
+  T extends { url: string; source?: string }
+>(items: T[]): Promise<T[]> {
   const resolved = await Promise.all(
     items.map(async (item) => {
-      const url = await resolveEvidenceUrl(item.url);
+      const url = await resolveEvidenceUrl(item.url, item.source);
       return url ? { ...item, url } : null;
     })
   );
