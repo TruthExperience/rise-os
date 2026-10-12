@@ -24,12 +24,13 @@ const VALIDATED_WORKER_URL = validateWorkerUrl(WORKER_URL);
 // so 25s sits comfortably above that.
 const DEFAULT_TIMEOUT_MS = 25_000;
 
-// /steward is slower: the worker now runs an image pass and a video pass in
-// parallel (video budget 12s) BEFORE the verdict pass (groq 5s + free 10s +
-// paid 6s), so a worst case is ~33s. 40s covers that. Vercel Hobby functions
-// get 300s by default with Fluid compute, so this fits; if a project ever
-// runs with the old 10/30/60s limits, lower this or set maxDuration.
-const STEWARD_TIMEOUT_MS = 40_000;
+// /steward is slow: the worker runs an image pass and a video pass in
+// parallel BEFORE the verdict pass (groq 5s + free 10s + paid 6s). The video
+// pass can resolve the link (~24s worst case), then download a clip, upload it
+// to the Gemini Files API, wait for processing and generate (hard-capped at
+// 70s by the worker). Worst case ~115s total. 130s covers that and must stay
+// below the route's maxDuration (150).
+const STEWARD_TIMEOUT_MS = 130_000;
 
 export type LLMMode = 'fast' | 'primary' | 'reasoning' | 'certgen' | 'quick' | 'steward' | 'coding' | 'vision';
 
