@@ -268,6 +268,9 @@ import "./cert";
 // Side-effect import: registers the signups_* commands (open, resume,
 // status, close).
 import "./signups";
+// Side-effect import: registers the members-sync command (syncs Discord
+// server members into pitboss.drivers / driver_leagues).
+import "./members-sync";
 // Side-effect import: registers the calendar_* commands plus set-result,
 // import-results and set-standings (owner season administration).
 import "./season-admin";
