@@ -101,6 +101,10 @@ const MAX_EVIDENCE_IMAGES = 4;
 // ---------------------------------------------------------------------------
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v)$/i;
 const MAX_EVIDENCE_VIDEOS = 2;
+// Paused: OpenRouter video models require >= $1.00 balance. Flip to true to re-enable.
+const ENABLE_OPENROUTER_VIDEO_FALLBACK = false;
+// Hard ceiling for the whole Gemini pass (download + upload + processing + generate).
+const GEMINI_PASS_BUDGET_MS = 70_000;
 const VIDEO_PASS_BUDGET_MS = 12_000;
 const PAGE_FETCH_TIMEOUT_MS = 4_000;
 const RESOLVER_TIMEOUT_MS = 20_000;
@@ -307,16 +311,25 @@ async function resolveVideoUrl(url: string, env: Env, reasons: string[]): Promis
 
 // ---------------------------------------------------------------------------
 // Gemini video pass (Google AI Studio free tier, no billing account needed).
-// The worker downloads each resolved clip and sends it inline as base64, because
-// Gemini cannot fetch arbitrary video URLs the way OpenRouter does. Inline requests
-// are limited to about 20 MB total, so raw clip bytes are capped below that.
+// Clips within a 14 MB total budget go inline as base64. Larger clips are
+// uploaded via the Gemini Files API and referenced by URI. Uploaded files are
+// deleted after use (they otherwise auto-expire after 48h).
 // Edit GEMINI_VIDEO_MODELS if Google renames or retires a model.
 // ---------------------------------------------------------------------------
 const GEMINI_VIDEO_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
-const GEMINI_DOWNLOAD_TIMEOUT_MS = 8_000;
-const GEMINI_CALL_TIMEOUT_MS = 15_000;
-const GEMINI_MAX_TOTAL_VIDEO_BYTES = 14 * 1024 * 1024;
+const GEMINI_FILES_BASE = "https://generativelanguage.googleapis.com";
+const GEMINI_DOWNLOAD_TIMEOUT_MS = 20_000;
+const GEMINI_UPLOAD_TIMEOUT_MS = 40_000;
+const GEMINI_CALL_TIMEOUT_MS = 30_000;
+const GEMINI_POLL_INTERVAL_MS = 2_000;
+const GEMINI_POLL_MAX = 15;
+const GEMINI_INLINE_BUDGET_BYTES = 14 * 1024 * 1024; // total across inline clips
+const GEMINI_MAX_CLIP_BYTES = 80 * 1024 * 1024; // Worker memory guard (128 MB limit)
+
+type GeminiClip =
+  | { kind: "inline"; mime: string; data: string; bytes: number }
+  | { kind: "file"; mime: string; uri: string; name: string; bytes: number };
 
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
@@ -339,11 +352,29 @@ function mimeFromUrl(url: string): string {
   return "video/mp4";
 }
 
-async function downloadVideoForGemini(
+function withBudget<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T | null> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      onTimeout();
+      resolve(null);
+    }, ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(null);
+      }
+    );
+  });
+}
+
+async function downloadClip(
   url: string,
-  maxBytes: number,
   reasons: string[]
-): Promise<{ mime: string; data: string; bytes: number } | null> {
+): Promise<{ mime: string; buf: ArrayBuffer } | null> {
   try {
     const res = await fetchWithTimeout(
       url,
@@ -355,23 +386,113 @@ async function downloadVideoForGemini(
       return null;
     }
     const tooBig = () =>
-      reasons.push(`gemini: clip from ${hostOf(url)} too large for inline upload (limit ${Math.floor(maxBytes / 1048576)} MB)`);
+      reasons.push(
+        `gemini: clip from ${hostOf(url)} exceeds ${Math.floor(GEMINI_MAX_CLIP_BYTES / 1048576)} MB cap`
+      );
     const declared = Number(res.headers.get("Content-Length") ?? 0);
-    if (declared > maxBytes) {
+    if (declared > GEMINI_MAX_CLIP_BYTES) {
       tooBig();
       return null;
     }
     const buf = await res.arrayBuffer();
-    if (buf.byteLength > maxBytes) {
+    if (buf.byteLength > GEMINI_MAX_CLIP_BYTES) {
       tooBig();
       return null;
     }
     const headerMime = (res.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
     const mime = headerMime.startsWith("video/") ? headerMime : mimeFromUrl(url);
-    return { mime, data: arrayBufferToBase64(buf), bytes: buf.byteLength };
+    return { mime, buf };
   } catch (err) {
     reasons.push(`gemini: download failed for ${hostOf(url)}: ${String(err)}`);
     return null;
+  }
+}
+
+async function uploadClipToGeminiFiles(
+  buf: ArrayBuffer,
+  mime: string,
+  apiKey: string,
+  host: string | null,
+  reasons: string[]
+): Promise<GeminiClip | null> {
+  try {
+    // 1. start resumable upload
+    const start = await fetchWithTimeout(
+      `${GEMINI_FILES_BASE}/upload/v1beta/files`,
+      {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": apiKey,
+          "X-Goog-Upload-Protocol": "resumable",
+          "X-Goog-Upload-Command": "start",
+          "X-Goog-Upload-Header-Content-Length": String(buf.byteLength),
+          "X-Goog-Upload-Header-Content-Type": mime,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ file: { display_name: "incident-clip" } }),
+      },
+      GEMINI_CALL_TIMEOUT_MS
+    );
+    if (!start.ok) {
+      reasons.push(`gemini: files start http ${start.status} for ${host}: ${(await start.text()).slice(0, 120)}`);
+      return null;
+    }
+    const uploadUrl = start.headers.get("x-goog-upload-url");
+    if (!uploadUrl) {
+      reasons.push(`gemini: files start returned no upload url for ${host}`);
+      return null;
+    }
+
+    // 2. upload bytes + finalize
+    const up = await fetchWithTimeout(
+      uploadUrl,
+      {
+        method: "POST",
+        headers: {
+          "X-Goog-Upload-Offset": "0",
+          "X-Goog-Upload-Command": "upload, finalize",
+        },
+        body: buf,
+      },
+      GEMINI_UPLOAD_TIMEOUT_MS
+    );
+    if (!up.ok) {
+      reasons.push(`gemini: files upload http ${up.status} for ${host}: ${(await up.text()).slice(0, 120)}`);
+      return null;
+    }
+    let file: any = ((await up.json()) as any)?.file;
+
+    // 3. wait for processing to finish
+    for (let i = 0; i < GEMINI_POLL_MAX && file?.state === "PROCESSING"; i++) {
+      await new Promise((r) => setTimeout(r, GEMINI_POLL_INTERVAL_MS));
+      const poll = await fetchWithTimeout(
+        `${GEMINI_FILES_BASE}/v1beta/${file.name}`,
+        { headers: { "x-goog-api-key": apiKey } },
+        5_000
+      );
+      if (!poll.ok) break;
+      file = await poll.json();
+    }
+    if (!file?.uri || file.state !== "ACTIVE") {
+      reasons.push(`gemini: uploaded clip from ${host} not ready (state ${file?.state ?? "unknown"})`);
+      return null;
+    }
+    return { kind: "file", mime: file.mimeType ?? mime, uri: file.uri, name: file.name, bytes: buf.byteLength };
+  } catch (err) {
+    reasons.push(`gemini: files upload failed for ${host}: ${String(err).slice(0, 160)}`);
+    return null;
+  }
+}
+
+async function deleteGeminiFile(name: string, apiKey: string): Promise<void> {
+  try {
+    await fetchWithTimeout(
+      `${GEMINI_FILES_BASE}/v1beta/${name}`,
+      { method: "DELETE", headers: { "x-goog-api-key": apiKey } },
+      5_000
+    );
+  } catch {
+    // best-effort; files auto-expire after 48h
   }
 }
 
@@ -388,73 +509,95 @@ async function describeVideosWithGemini(
     return null;
   }
 
-  const clips: { mime: string; data: string; bytes: number }[] = [];
-  let remainingBytes = GEMINI_MAX_TOTAL_VIDEO_BYTES;
-  for (const r of resolved) {
-    const clip = await downloadVideoForGemini(r.url, remainingBytes, reasons);
-    if (!clip) continue;
-    remainingBytes -= clip.bytes;
-    clips.push(clip);
-  }
-  if (clips.length === 0) return null;
-
-  const body = {
-    systemInstruction: { parts: [{ text: system }] },
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { text: prompt },
-          ...clips.map((c) => ({ inline_data: { mime_type: c.mime, data: c.data } })),
-        ],
-      },
-    ],
-    generationConfig: { maxOutputTokens: 900, temperature: 0.1 },
-  };
-
-  const errors: string[] = [];
-  for (const model of GEMINI_VIDEO_MODELS) {
-    try {
-      const res = await fetchWithTimeout(
-        `${GEMINI_API_BASE}/${model}:generateContent`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-          body: JSON.stringify(body),
-        },
-        GEMINI_CALL_TIMEOUT_MS
-      );
-      if (!res.ok) {
-        errors.push(`${model}: ${res.status} ${(await res.text()).slice(0, 160)}`);
-        continue;
+  const clips: GeminiClip[] = [];
+  try {
+    let remainingInline = GEMINI_INLINE_BUDGET_BYTES;
+    for (const r of resolved) {
+      const dl = await downloadClip(r.url, reasons);
+      if (!dl) continue;
+      if (dl.buf.byteLength <= remainingInline) {
+        remainingInline -= dl.buf.byteLength;
+        clips.push({
+          kind: "inline",
+          mime: dl.mime,
+          data: arrayBufferToBase64(dl.buf),
+          bytes: dl.buf.byteLength,
+        });
+      } else {
+        const uploaded = await uploadClipToGeminiFiles(dl.buf, dl.mime, apiKey, hostOf(r.url), reasons);
+        if (uploaded) clips.push(uploaded);
       }
-      const json: any = await res.json();
-      const text = (json?.candidates?.[0]?.content?.parts ?? [])
-        .map((p: any) => p.text ?? "")
-        .join("")
-        .trim();
-      if (!text) {
-        const why = json?.candidates?.[0]?.finishReason ?? json?.promptFeedback?.blockReason ?? "no reason given";
-        errors.push(`${model}: empty response (${why})`);
-        continue;
-      }
-      return {
-        response: text,
-        model: json?.modelVersion ?? model,
-        usage: json?.usageMetadata ?? null,
-        clipCount: clips.length,
-      };
-    } catch (err: any) {
-      errors.push(
-        err && err.name === "AbortError"
-          ? `${model}: timed out after ${GEMINI_CALL_TIMEOUT_MS}ms`
-          : `${model}: ${String(err).slice(0, 160)}`
-      );
     }
+    if (clips.length === 0) return null;
+
+    const body = {
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: prompt },
+            ...clips.map((c) =>
+              c.kind === "inline"
+                ? { inline_data: { mime_type: c.mime, data: c.data } }
+                : { file_data: { mime_type: c.mime, file_uri: c.uri } }
+            ),
+          ],
+        },
+      ],
+      generationConfig: { maxOutputTokens: 900, temperature: 0.1 },
+    };
+
+    const errors: string[] = [];
+    for (const model of GEMINI_VIDEO_MODELS) {
+      try {
+        const res = await fetchWithTimeout(
+          `${GEMINI_API_BASE}/${model}:generateContent`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+            body: JSON.stringify(body),
+          },
+          GEMINI_CALL_TIMEOUT_MS
+        );
+        if (!res.ok) {
+          errors.push(`${model}: ${res.status} ${(await res.text()).slice(0, 160)}`);
+          continue;
+        }
+        const json: any = await res.json();
+        const text = (json?.candidates?.[0]?.content?.parts ?? [])
+          .map((p: any) => p.text ?? "")
+          .join("")
+          .trim();
+        if (!text) {
+          const why = json?.candidates?.[0]?.finishReason ?? json?.promptFeedback?.blockReason ?? "no reason given";
+          errors.push(`${model}: empty response (${why})`);
+          continue;
+        }
+        return {
+          response: text,
+          model: json?.modelVersion ?? model,
+          usage: json?.usageMetadata ?? null,
+          clipCount: clips.length,
+        };
+      } catch (err: any) {
+        errors.push(
+          err && err.name === "AbortError"
+            ? `${model}: timed out after ${GEMINI_CALL_TIMEOUT_MS}ms`
+            : `${model}: ${String(err).slice(0, 160)}`
+        );
+      }
+    }
+    console.error("[video] gemini pass failed:", JSON.stringify(errors));
+    reasons.push(`gemini failed: ${errors.join(" | ")}`);
+    return null;
+  } finally {
+    await Promise.all(
+      clips
+        .filter((c): c is Extract<GeminiClip, { kind: "file" }> => c.kind === "file")
+        .map((c) => deleteGeminiFile(c.name, apiKey))
+    );
   }
-  console.error("[video] gemini pass failed:", JSON.stringify(errors));
-  reasons.push(`gemini failed: ${errors.join(" | ")}`);
-  return null;
 }
 
 type VideoPassResult = {
@@ -502,9 +645,12 @@ If a video fails to play, is unrelated to racing, or you cannot see the incident
 
 Describe what happens in the attached video(s), in order.`;
 
-  // Gemini first (free tier, no balance needed). If it is not configured or fails,
-  // fall through to the OpenRouter video models below.
-  const gemini = await describeVideosWithGemini(resolved, system, prompt, env, reasons);
+  // Gemini (free tier, no balance needed), bounded by a hard overall budget.
+  const gemini = await withBudget(
+    describeVideosWithGemini(resolved, system, prompt, env, reasons),
+    GEMINI_PASS_BUDGET_MS,
+    () => reasons.push(`gemini: pass exceeded ${GEMINI_PASS_BUDGET_MS / 1000}s budget`)
+  );
   if (gemini) {
     return {
       submitted,
@@ -517,6 +663,11 @@ Describe what happens in the attached video(s), in order.`;
         via: resolved.map((r) => r.via),
       },
     };
+  }
+
+  if (!ENABLE_OPENROUTER_VIDEO_FALLBACK) {
+    // Paused: Gemini already recorded its own failure reasons. Nothing else to try.
+    return { submitted, analysis: null, reasons };
   }
 
   const data = await freeWaterfall(
@@ -544,7 +695,6 @@ Describe what happens in the attached video(s), in order.`;
     // Include each model's actual failure (timeout, rate limit, HTTP status) in the
     // reasons so /steward analyse can show WHY the video pass failed. The org prefix
     // and ":free" suffix are stripped from the model name to keep each entry short.
-    // Limit raised from 72 to 160 so the provider's message is not cut off.
     const detail = (data.tried ?? [data.error])
       .slice(0, 2)
       .map((t) => String(t).replace(/^[^/\s]+\//, "").replace(":free", "").slice(0, 160))
@@ -816,6 +966,12 @@ async function freeWaterfall(
       if (res.status === 429 || res.status === 503) {
         errors.push(`${model}: rate limited`);
         continue;
+      }
+      if (res.status === 402) {
+        // Account-wide balance problem: the next model would fail the same way.
+        const err = await res.text();
+        errors.push(`${model}: 402 insufficient OpenRouter balance (${err.slice(0, 120)})`);
+        break;
       }
       if (!res.ok) {
         const err = await res.text();
@@ -1165,7 +1321,7 @@ Base your verdict on ALL evidence provided \u2014 the reporter's account, the ac
     submitted: videoPass.submitted,
     reviewed: Boolean(videoPass.analysis),
     not_reviewed: videoNotReviewed,
-    reasons: videoPass.reasons ?? [],
+    reasons: [...new Set(videoPass.reasons ?? [])],
   };
   const imageAnalysisMeta = imageAnalysis
     ? { model: imageAnalysis.model, usage: imageAnalysis.usage, image_count: imageUrls.length }
@@ -1278,6 +1434,7 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
       source: "pitboss-proxy",
       probed: false,
       video_resolver_configured: Boolean(env.VIDEO_RESOLVER_URL && env.VIDEO_RESOLVER_KEY),
+      openrouter_video_fallback_enabled: ENABLE_OPENROUTER_VIDEO_FALLBACK,
       models: MODELS,
     });
   }
