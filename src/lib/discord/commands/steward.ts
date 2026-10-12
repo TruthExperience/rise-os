@@ -1177,21 +1177,29 @@ registerCommand("steward_analyse", async (ctx) => {
         ? `\n_${ai.image_analysis.image_count} evidence image(s) reviewed._`
         : null;
 
-            const totalEvidenceCount = reporterEvidence.length + accusedEvidence.length;
-      // pitboss-proxy now runs a real video-description pass (direct video
-      // files, or webpage links resolved via og:video) and reports it back
-      // as ai.video_analysis, exactly parallel to ai.image_analysis. This
-      // used to unconditionally claim videos were never analyzed --
-      // reflect what actually happened on this specific request instead.
+      const totalEvidenceCount = reporterEvidence.length + accusedEvidence.length;
+      // pitboss-proxy runs a real video-description pass (direct video
+      // files, or webpage links resolved via og:video / the video resolver)
+      // and reports it back as ai.video_analysis, exactly parallel to
+      // ai.image_analysis. When it can't watch a video it also returns
+      // ai.video_status.reasons (e.g. "resolver http 502", "no direct video
+      // tag on medal.tv", "video model pass failed"). Show those so a
+      // steward can see WHY a video wasn't analysed instead of guessing.
       const nonImageCount = [...reporterEvidence, ...accusedEvidence].filter(
         (e) => !/\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(e.url.split("?")[0])
       ).length;
+      const videoReasons: string[] = (ai.video_status?.reasons ?? []).map(
+        (r: string) => String(r).slice(0, 150)
+      );
       const videoNote = ai.video_analysis
         ? `\n_${ai.video_analysis.video_count} evidence video(s) reviewed._`
         : nonImageCount > 0
-          ? `\n_${nonImageCount} video/link evidence item(s) noted but not visually analyzed (link may have expired, failed to load, or had no playable video/thumbnail available)._`
+          ? `\n_${nonImageCount} video/link evidence item(s) noted but not visually analyzed._${
+              videoReasons.length > 0
+                ? `\nWhy: ${videoReasons.slice(0, 4).join("; ")}`
+                : ""
+            }`
           : null;
-
 
       const lines = [
         `**AI Steward Analysis**`,
