@@ -4,6 +4,12 @@ import { createAdminClient } from "@/lib/supabase/server";
 import { postTicketMessage, sendDirectMessage, createAppealTicket } from "../tickets";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 import { getTicketLabel } from "./steward";
+import {
+  addEvidenceFile,
+  addEvidenceLink,
+  isHttpUrl,
+  resolveEvidenceList,
+} from "../evidence-storage";
 
 const STEWARD_FLAGS = [
   "is_owner",
@@ -59,6 +65,45 @@ async function getOrCreateDriverId(
   return created.id;
 }
 
+// Reads a Discord attachment option (type 11) off the command context.
+//
+// ALIGN WITH steward.ts: this checks the shapes a command context could
+// plausibly expose an attachment in (the option already being an object
+// with a url, or an attachment id looked up in the interaction's resolved
+// data). If steward.ts reads `evidence_file` differently, change this one
+// function to match — nothing else in this file depends on the shape.
+//
+// Returns null if the option wasn't supplied, or { error } if it was
+// supplied but couldn't be read (so the caller can say so instead of
+// silently dropping the person's file).
+function readAttachmentOption(
+  ctx: any,
+  name: string
+):
+  | { url: string; filename?: string; contentType?: string | null }
+  | { error: string }
+  | null {
+  const raw = ctx.options?.[name];
+  if (raw === undefined || raw === null || raw === "") return null;
+
+  const candidate =
+    typeof raw === "object"
+      ? raw
+      : ctx.resolved?.attachments?.[raw] ??
+        ctx.attachments?.[raw] ??
+        ctx.interaction?.data?.resolved?.attachments?.[raw];
+
+  if (!candidate?.url) {
+    return { error: "I couldn't read the file you attached — try attaching it again." };
+  }
+
+  return {
+    url: candidate.url as string,
+    filename: candidate.filename as string | undefined,
+    contentType: (candidate.content_type as string | undefined) ?? null,
+  };
+}
+
 // Appeals happen after an incident's ticket channel may already be
 // closed or deleted, so lookup is by the displayed ticket label
 // (option input) rather than by channel context like steward.ts's
@@ -102,6 +147,11 @@ async function findIncidentByShortId(leagueId: string, shortId: string) {
 // table supersedes the arrays going forward but the arrays are kept
 // for backward compatibility on older incidents, so both need to be
 // checked for a complete picture.
+//
+// Rows in incident_evidence may hold "storage:<path>" references to
+// files copied into the private incident-evidence bucket, so the final
+// list goes through resolveEvidenceList to swap those for fresh signed
+// URLs before anything is posted to a ticket.
 async function gatherIncidentEvidence(
   incidentId: string,
   reporterEvidenceUrls: unknown,
@@ -131,18 +181,24 @@ async function gatherIncidentEvidence(
     }
   }
 
-  return evidence;
+  return resolveEvidenceList(evidence);
 }
 
 /**
  * Shared core of "file an appeal": creates the incident_appeals row,
- * flips the incident to appealed, opens the appeal ticket channel if
- * the league has one configured, and posts to the appeals/incident
- * pointer channel. Used by both /appeal file (appellant explicitly
- * runs the command, with a written reason) and
+ * flips the incident to appealed, saves any new evidence the appellant
+ * supplied, opens the appeal ticket channel if the league has one
+ * configured, and posts to the appeals/incident pointer channel. Used
+ * by both /appeal file (appellant explicitly runs the command, with a
+ * written reason and optionally a link and/or file) and
  * handleAppealPromptComponent below (appellant clicked "Yes" on the
  * post-removal DM prompt, no written reason yet — see the placeholder
  * reason used there).
+ *
+ * New evidence is saved after the appeal row exists but BEFORE the
+ * ticket is built, so it shows up in the ticket's evidence list. If
+ * saving the evidence fails the appeal is still filed and the failure
+ * is reported back in the returned content.
  *
  * Note: the "does this incident already have an open appeal" check
  * happens here, after the caller has already resolved/created the
@@ -157,6 +213,7 @@ async function createAppealRecord(params: {
   ticketLabel: string;
   appellantDiscordId: string;
   appellantDriverId: string;
+  appellantParty: "reporter" | "accused";
   reason: string;
   originalVerdict: string | null;
   originalPenalty: string | null;
@@ -164,6 +221,8 @@ async function createAppealRecord(params: {
   evidenceUrls: unknown;
   accusedEvidenceUrls: unknown;
   guildId: string;
+  newEvidenceLink?: string;
+  newEvidenceFile?: { url: string; filename?: string; contentType?: string | null };
 }): Promise<{ content: string } | { error: string }> {
   const supabase = createAdminClient();
 
@@ -207,6 +266,44 @@ async function createAppealRecord(params: {
 
   if (statusError) {
     console.error("[appeal] incident status update failed:", statusError);
+  }
+
+  // Save any new evidence the appellant supplied. Files are copied into
+  // the incident-evidence bucket so they outlive Discord's CDN links;
+  // links are stored as typed. Failures don't undo the appeal — they're
+  // collected and shown to the appellant.
+  const evidenceWarnings: string[] = [];
+
+  if (params.newEvidenceLink) {
+    const linkResult = await addEvidenceLink({
+      incidentId: params.incidentId,
+      party: params.appellantParty,
+      link: params.newEvidenceLink,
+      addedByDriverId: params.appellantDriverId,
+      addedByRole: params.appellantParty,
+    });
+    if ("error" in linkResult) {
+      evidenceWarnings.push(
+        "Your evidence link couldn't be saved — post it in the appeal ticket instead."
+      );
+    }
+  }
+
+  if (params.newEvidenceFile) {
+    const fileResult = await addEvidenceFile({
+      incidentId: params.incidentId,
+      party: params.appellantParty,
+      attachmentUrl: params.newEvidenceFile.url,
+      filename: params.newEvidenceFile.filename,
+      contentType: params.newEvidenceFile.contentType,
+      addedByDriverId: params.appellantDriverId,
+      addedByRole: params.appellantParty,
+    });
+    if ("error" in fileResult) {
+      evidenceWarnings.push(
+        `Your evidence file couldn't be saved (${fileResult.error}) — post it in the appeal ticket instead.`
+      );
+    }
   }
 
   const { data: leagueConfig } = await supabase
@@ -272,10 +369,15 @@ async function createAppealRecord(params: {
     );
   }
 
+  const baseContent = ticketChannelId
+    ? `Appeal filed on incident **${params.ticketLabel}** — see <#${ticketChannelId}> for the ticket.`
+    : `Appeal filed on incident **${params.ticketLabel}**, but I couldn't open a ticket channel for it. A steward will still see it via \`/appeal status\`.`;
+
   return {
-    content: ticketChannelId
-      ? `Appeal filed on incident **${params.ticketLabel}** — see <#${ticketChannelId}> for the ticket.`
-      : `Appeal filed on incident **${params.ticketLabel}**, but I couldn't open a ticket channel for it. A steward will still see it via \`/appeal status\`.`,
+    content:
+      evidenceWarnings.length > 0
+        ? `${baseContent}\n${evidenceWarnings.join("\n")}`
+        : baseContent,
   };
 }
 
@@ -291,6 +393,22 @@ registerCommand("appeal_file", async (ctx) => {
 
   const rawInput = (ctx.options.incident as string).trim();
   const reason = ctx.options.reason as string;
+
+  // Optional new evidence: a link, a file, or both. Neither is required —
+  // an appeal can rest on the written reason alone.
+  const rawLink = (ctx.options.evidence as string | undefined)?.trim();
+  if (rawLink && !isHttpUrl(rawLink)) {
+    return {
+      content:
+        "That evidence isn't a valid link — paste a full URL starting with `http://` or `https://`, or attach a file with `evidence_file`.",
+      ephemeral: true,
+    };
+  }
+
+  const attachment = readAttachmentOption(ctx, "evidence_file");
+  if (attachment && "error" in attachment) {
+    return { content: attachment.error, ephemeral: true };
+  }
 
   const incident = await findIncidentByShortId(leagueId, rawInput);
 
@@ -338,6 +456,10 @@ registerCommand("appeal_file", async (ctx) => {
     };
   }
 
+  // Which side of the incident the new evidence belongs to.
+  const appellantParty: "reporter" | "accused" =
+    ctx.discordUserId === reporterDiscordId ? "reporter" : "accused";
+
   const appellantDriverId = await getOrCreateDriverId(ctx.discordUserId);
   if (!appellantDriverId) {
     return {
@@ -352,6 +474,7 @@ registerCommand("appeal_file", async (ctx) => {
     ticketLabel,
     appellantDiscordId: ctx.discordUserId,
     appellantDriverId,
+    appellantParty,
     reason,
     originalVerdict: incident.verdict,
     originalPenalty: incident.penalty,
@@ -359,6 +482,8 @@ registerCommand("appeal_file", async (ctx) => {
     evidenceUrls: incident.evidence_urls,
     accusedEvidenceUrls: incident.accused_evidence_urls,
     guildId,
+    newEvidenceLink: rawLink || undefined,
+    newEvidenceFile: attachment ?? undefined,
   });
 
   if ("error" in result) {
@@ -700,6 +825,8 @@ export async function handleAppealPromptComponent(
     ticketLabel,
     appellantDiscordId: discordUserId,
     appellantDriverId,
+    // This prompt only goes to the original reporter (checked above).
+    appellantParty: "reporter",
     reason:
       "Appeal requested via post-removal DM prompt — no written reason provided yet. Add detail with a follow-up message in the appeal ticket.",
     originalVerdict: incident.verdict,
