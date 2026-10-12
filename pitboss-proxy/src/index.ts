@@ -316,7 +316,9 @@ async function resolveVideoUrl(url: string, env: Env, reasons: string[]): Promis
 // deleted after use (they otherwise auto-expire after 48h).
 // Edit GEMINI_VIDEO_MODELS if Google renames or retires a model.
 // ---------------------------------------------------------------------------
-const GEMINI_VIDEO_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+// gemini-2.5-flash / -flash-lite now 404 ("no longer available"); Google's listed
+// replacements are gemini-3.5-flash and gemini-3.1-flash-lite.
+const GEMINI_VIDEO_MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_FILES_BASE = "https://generativelanguage.googleapis.com";
 const GEMINI_DOWNLOAD_TIMEOUT_MS = 20_000;
