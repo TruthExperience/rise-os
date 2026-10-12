@@ -288,7 +288,11 @@ Describe what happens in the attached video(s), in order.`;
   );
   if ("error" in data) {
     console.error("[video] description pass failed:", JSON.stringify(data.tried ?? data.error));
-    reasons.push("video model pass failed");
+    // Include each model's actual failure (timeout, rate limit, HTTP status) in the
+    // reasons so /steward analyse can show WHY the video pass failed. The org prefix
+    // and ":free" suffix are stripped from the model name to keep each entry short.
+    const detail = (data.tried ?? [data.error]).slice(0, 2).map((t) => String(t).replace(/^[^/\s]+\//, "").replace(":free", "").slice(0, 72)).join(" | ");
+    reasons.push(`video model pass failed: ${detail}`);
     return { submitted, analysis: null, reasons };
   }
   return {
