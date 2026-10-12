@@ -2,7 +2,10 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF', 'COMMISSIONER', 'ADMIN', 'COM']
-const STEWARD_LEAGUE_ROLES = ['co_owner', 'commissioner', 'head_steward', 'bsac_chief']
+// 'owner' was missing here, so a league whose only role string is "owner"
+// (e.g. vector-racing-championship) got no steward access in the web app
+// even though the Discord side (hasDiscordStewardAccess) lets owners in.
+const STEWARD_LEAGUE_ROLES = ['owner', 'co_owner', 'commissioner', 'head_steward', 'bsac_chief']
 
 /**
  * Resolves the requesting user's pitboss.drivers row.
@@ -53,14 +56,20 @@ export async function hasStewwardAccess(
   const { data: memberships } = await supabase
     .schema('pitboss')
     .from('driver_leagues')
-    .select('role, league_id')
+    .select('role, league_id, is_owner, is_co_owner, is_commissioner, is_head_steward, is_bsac_chief')
     .eq('driver_id', driverId)
     .eq('league_id', leagueId)
 
   if (!memberships) return false
 
   for (const m of memberships) {
-    const roles = (m.role as string)
+    // The boolean flags are the source of truth; the free-text `role`
+    // string can drift (e.g. just "owner", or "co_commissioner").
+    if (m.is_owner || m.is_co_owner || m.is_commissioner || m.is_head_steward || m.is_bsac_chief) {
+      return true
+    }
+
+    const roles = ((m.role as string) ?? '')
       .split(',')
       .map((r: string) => r.trim().toLowerCase())
     if (roles.some((r: string) => STEWARD_LEAGUE_ROLES.includes(r))) {
