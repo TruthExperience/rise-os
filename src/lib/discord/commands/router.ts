@@ -274,3 +274,5 @@ import "./members-sync";
 // Side-effect import: registers the calendar_* commands plus set-result,
 // import-results and set-standings (owner season administration).
 import "./season-admin";
+// Side-effect import: registers the roles_* commands.
+import "./roles";
