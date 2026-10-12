@@ -11,6 +11,7 @@ import {
   type CheckinStatus,
 } from "../commands/checkin-embed";
 import { handleAppealPromptComponent } from "../commands/appeal";
+import { handleSignupButton } from "@/lib/discord-signups";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
@@ -19,6 +20,7 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
  * clicks, select menus, etc). Dispatches by custom_id prefix:
  *   - "checkin_btn:<postId>:<status>" -> handleCheckinButton
  *   - "appeal_prompt:<yes|no>:<incidentId>" -> handleAppealPrompt
+ *   - "signup:<roundId>:<yes|no>" -> handleSignup (season signup DMs)
  * Anything else falls through to a generic "not wired up" reply so
  * unknown components fail loudly instead of silently.
  */
@@ -33,10 +35,43 @@ export async function routeComponent(interaction: any) {
     return handleAppealPrompt(interaction, customId);
   }
 
+  if (customId.startsWith("signup:")) {
+    return handleSignup(interaction, customId);
+  }
+
   return {
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: { content: "This button isn't wired up yet.", flags: 64 },
   };
+}
+
+/**
+ * Handles the Sign Up / No Thanks buttons on the season signup DMs sent
+ * by sendPendingDms in src/lib/discord-signups.ts. These clicks happen
+ * in a DM, so there is no guild/member — Discord puts the clicker on
+ * interaction.user, which is why the id lookup falls back to it.
+ *
+ * Answered inline (type 7, UPDATE_MESSAGE): handleSignupButton is two or
+ * three small Supabase queries and returns the response body that edits
+ * the DM in place and removes the buttons.
+ */
+async function handleSignup(interaction: any, customId: string) {
+  const discordUserId: string | undefined =
+    interaction.member?.user?.id ?? interaction.user?.id;
+
+  if (!discordUserId) {
+    return {
+      type: InteractionResponseType.UPDATE_MESSAGE,
+      data: { content: "Couldn't identify you for that action.", components: [] },
+    };
+  }
+
+  const result = await handleSignupButton(customId, discordUserId);
+  if (!result) {
+    return ephemeralError("Malformed signup button — ping the commissioner.");
+  }
+
+  return result;
 }
 
 /**
