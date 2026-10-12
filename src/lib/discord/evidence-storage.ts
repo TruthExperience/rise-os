@@ -222,11 +222,14 @@ export async function resolveEvidenceUrl(
 export async function resolveEvidenceList<
   T extends { url: string; source?: string }
 >(items: T[]): Promise<T[]> {
-  const resolved = await Promise.all(
-    items.map(async (item) => {
-      const url = await resolveEvidenceUrl(item.url, item.source);
-      return url ? { ...item, url } : null;
-    })
+  const urls = await Promise.all(
+    items.map((item) => resolveEvidenceUrl(item.url, item.source))
   );
-  return resolved.filter((item): item is T => item !== null);
+
+  const out: T[] = [];
+  items.forEach((item, i) => {
+    const url = urls[i];
+    if (url) out.push({ ...item, url });
+  });
+  return out;
 }
