@@ -5,6 +5,10 @@ import { pbInfer, pbSteward, type RuleArticle } from '@/lib/pitboss-llm';
 import { getSession } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
+// /steward can take ~2 min when a large evidence clip goes through the Gemini
+// Files API. Must stay above STEWARD_TIMEOUT_MS (130s) in pitboss-llm.ts.
+// Hobby without Fluid Compute caps at 60s; enable Fluid for large clips.
+export const maxDuration = 150;
 
 function getSupabase() {
   return createClient(
