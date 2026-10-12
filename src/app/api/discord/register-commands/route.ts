@@ -914,6 +914,26 @@ export async function GET(req: NextRequest) {
         },
         {
           type: 1,
+          name: "list",
+          description: "See who signed up, declined, or hasn't answered yet",
+          options: [
+            {
+              type: 3,
+              name: "show",
+              description: "Which members to list (default: signed up)",
+              required: false,
+              choices: [
+                { name: "Signed up", value: "signed_up" },
+                { name: "Declined", value: "declined" },
+                { name: "No answer yet", value: "pending" },
+                { name: "Couldn't DM", value: "dm_failed" },
+                { name: "Everyone", value: "all" },
+              ],
+            },
+          ],
+        },
+        {
+          type: 1,
           name: "close",
           description: "Close the open signup round",
         },
