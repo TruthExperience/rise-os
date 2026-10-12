@@ -920,6 +920,31 @@ export async function GET(req: NextRequest) {
       ],
     },
     {
+      // Syncs the Discord server's members into PitBoss (pitboss.drivers +
+      // pitboss.driver_leagues) so /signups open can see them. Dispatches
+      // to "members-sync" in src/lib/discord/commands/members-sync.ts.
+      // No default_member_permissions on purpose: the handler checks league
+      // owner flags OR Discord Administrator / Manage Server itself, so
+      // owners who aren't server admins can still run it.
+      name: "members-sync",
+      description: "Add this server's Discord members to the league (owner / server admin)",
+      dm_permission: false,
+      options: [
+        {
+          type: 8,
+          name: "role",
+          description: "Only sync members with this role (use for a small test group)",
+          required: false,
+        },
+        {
+          type: 5,
+          name: "apply",
+          description: "Actually add them (default: preview only, nothing is written)",
+          required: false,
+        },
+      ],
+    },
+    {
       name: "generate-grid",
       description: "Build the team lineup grid from confirmed check-ins",
       options: [
