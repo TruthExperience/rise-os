@@ -291,7 +291,8 @@ Describe what happens in the attached video(s), in order.`;
     // Include each model's actual failure (timeout, rate limit, HTTP status) in the
     // reasons so /steward analyse can show WHY the video pass failed. The org prefix
     // and ":free" suffix are stripped from the model name to keep each entry short.
-    const detail = (data.tried ?? [data.error]).slice(0, 2).map((t) => String(t).replace(/^[^/\s]+\//, "").replace(":free", "").slice(0, 72)).join(" | ");
+    // Limit raised from 72 to 160 so the provider's message is not cut off.
+    const detail = (data.tried ?? [data.error]).slice(0, 2).map((t) => String(t).replace(/^[^/\s]+\//, "").replace(":free", "").slice(0, 160)).join(" | ");
     reasons.push(`video model pass failed: ${detail}`);
     return { submitted, analysis: null, reasons };
   }
@@ -531,7 +532,8 @@ async function freeWaterfall(pool, body, env, budgetMs = FREE_WATERFALL_BUDGET_M
       }
       if (!res.ok) {
         const err = await res.text();
-        errors.push(`${model}: ${res.status} ${err.slice(0, 100)}`);
+        // Limit raised from 100 to 300 so the provider's full message is kept.
+        errors.push(`${model}: ${res.status} ${err.slice(0, 300)}`);
         continue;
       }
       const data = await res.json();
