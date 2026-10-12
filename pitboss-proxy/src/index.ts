@@ -383,7 +383,10 @@ async function describeVideosWithGemini(
   reasons: string[]
 ): Promise<{ response: string; model: string; usage: any; clipCount: number } | null> {
   const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) {
+    reasons.push("gemini skipped: GEMINI_API_KEY not set on this worker");
+    return null;
+  }
 
   const clips: { mime: string; data: string; bytes: number }[] = [];
   let remainingBytes = GEMINI_MAX_TOTAL_VIDEO_BYTES;
