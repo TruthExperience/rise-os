@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
+import { openDiscordAppealTicket } from '@/lib/discord/app-sync'
 
 export async function POST(
   req: NextRequest,
@@ -134,5 +135,17 @@ export async function POST(
     return NextResponse.json({ error: statusError.message }, { status: 500 })
   }
 
-  return NextResponse.json({ success: true, appeal })
+  // Mirror the appeal into Discord (appeal-XXXX channel + pointer in the
+  // appeals channel). Never throws; a Discord failure doesn't undo the appeal.
+  const discord = await openDiscordAppealTicket(appeal.id)
+  if (!discord.ok) {
+    console.error('[incidents/id/appeal POST] discord sync', discord.error)
+  }
+  const channelId = discord.ok ? discord.channelId : null
+
+  return NextResponse.json({
+    success: true,
+    appeal: { ...appeal, ticket_channel_id: channelId ?? appeal.ticket_channel_id },
+    discord_ticket_channel_id: channelId,
+  })
 }
