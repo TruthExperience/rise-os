@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthedDriver } from '@/lib/getSupabaseUserId'
 import { createClient } from '@supabase/supabase-js'
+import { openDiscordIncidentTicket } from '@/lib/discord/app-sync'
 
 function getSupabase() {
   return createClient(
@@ -183,5 +184,19 @@ export async function POST(req: NextRequest) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  return NextResponse.json({ incident }, { status: 201 })
+  // Mirror the incident into Discord (private incident-XXXX channel + DM to the
+  // accused). Never throws; a Discord failure doesn't undo the report.
+  const discord = await openDiscordIncidentTicket(incident.id)
+  if (!discord.ok) {
+    console.error('[incidents POST] discord sync', discord.error)
+  }
+  const channelId = discord.ok ? discord.channelId : null
+
+  return NextResponse.json(
+    {
+      incident: { ...incident, ticket_channel_id: channelId ?? incident.ticket_channel_id ?? null },
+      discord_ticket_channel_id: channelId,
+    },
+    { status: 201 }
+  )
 }
