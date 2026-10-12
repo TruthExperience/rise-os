@@ -11,6 +11,21 @@ interface RuleSearchRow {
   rank: number;
 }
 
+const DISCORD_MAX = 2000;
+
+// Safety net: the SQL now emits Discord bold (**), but strip any stray
+// HTML highlight tags from older snippets or bot_summary text.
+function htmlToDiscord(text: string): string {
+  return text
+    .replace(/<\/?b>/gi, "**")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
 // No permission check here on purpose — rulebook lookup is open to
 // anyone in the league, same posture as roster_view.
 registerCommand("kb_search", async (ctx) => {
@@ -50,12 +65,17 @@ registerCommand("kb_search", async (ctx) => {
     const label = row.article_number
       ? `**${row.article_number}${row.chapter ? ` — ${row.chapter}` : ""}: ${row.title}**`
       : `**${row.title}**`;
-    const body = row.bot_summary ?? row.snippet ?? "";
+    const body = htmlToDiscord(row.bot_summary ?? row.snippet ?? "");
     return `${label}\n${body}`;
   });
 
+  let content = lines.join("\n\n");
+  if (content.length > DISCORD_MAX) {
+    content = content.slice(0, DISCORD_MAX - 1) + "…";
+  }
+
   return {
-    content: lines.join("\n\n"),
+    content,
     ephemeral: false,
   };
 });
