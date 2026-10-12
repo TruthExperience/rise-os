@@ -113,13 +113,13 @@ export async function GET(req: NextRequest) {
             {
               type: 3,
               name: "evidence",
-              description: "POV clip / evidence link — required",
-              required: true,
+              description: "POV clip / evidence link (https://...) — provide this or evidence_file",
+              required: false,
             },
             {
               type: 11,
               name: "evidence_file",
-              description: "Optionally also attach a screenshot or file as backup evidence",
+              description: "Screenshot or video file — provide this or evidence (link)",
               required: false,
             },
           ],
@@ -158,8 +158,8 @@ export async function GET(req: NextRequest) {
             {
               type: 3,
               name: "evidence",
-              description: "Link to your own POV clip / evidence — required",
-              required: true,
+              description: "Link to your own POV clip / evidence (https://...) — provide this or evidence_file",
+              required: false,
             },
             {
               type: 3,
@@ -171,7 +171,7 @@ export async function GET(req: NextRequest) {
             {
               type: 11,
               name: "evidence_file",
-              description: "Optionally also attach a screenshot or file as backup evidence",
+              description: "Screenshot or video file — provide this or evidence (link)",
               required: false,
             },
           ],
@@ -1333,7 +1333,7 @@ export async function GET(req: NextRequest) {
             {
               type: 3,
               name: "incident",
-              description: "Incident short ID",
+              description: "Ticket number (e.g. 0007)",
               required: true,
             },
             {
@@ -1341,6 +1341,18 @@ export async function GET(req: NextRequest) {
               name: "reason",
               description: "Why you're appealing this incident",
               required: true,
+            },
+            {
+              type: 3,
+              name: "evidence",
+              description: "Optional new evidence link (https://...)",
+              required: false,
+            },
+            {
+              type: 11,
+              name: "evidence_file",
+              description: "Optional new evidence file (screenshot or video)",
+              required: false,
             },
           ],
         },
