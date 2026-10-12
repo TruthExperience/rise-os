@@ -16,6 +16,11 @@ const MAX_ROWS = 25;
  * a separate rollup/aggregation pipeline; if per-season result volume
  * grows large enough that this gets slow, revisit with a maintained
  * rollup table + trigger instead.
+ *
+ * PATCH (season admin): pitboss.standings_adjustments rows (written by
+ * /set-standings) are added on top of the live results totals, so an
+ * owner can set a driver's total directly without editing results. A
+ * driver with only an adjustment and no results still appears.
  */
 
 /**
@@ -121,10 +126,6 @@ registerCommand("standings", async (ctx) => {
     return { content: `Something went wrong pulling results: ${error.message}`, ephemeral: true };
   }
 
-  if (!data || data.length === 0) {
-    return { content: `No results recorded for season ${season}.`, ephemeral: true };
-  }
-
   interface Accumulator {
     name: string;
     points: number;
@@ -136,7 +137,7 @@ registerCommand("standings", async (ctx) => {
 
   const byDriver = new Map<string, Accumulator>();
 
-  for (const row of data) {
+  for (const row of data ?? []) {
     const driver = row.drivers as unknown as
       | { discord_username: string; display_name: string | null }
       | null;
@@ -160,13 +161,49 @@ registerCommand("standings", async (ctx) => {
     byDriver.set(row.driver_id, existing);
   }
 
+  // Manual adjustments from /set-standings, added on top of the results
+  // totals. A failure here is logged but doesn't blank the leaderboard.
+  const { data: adjustments, error: adjustmentsError } = await supabase
+    .schema("pitboss")
+    .from("standings_adjustments")
+    .select("driver_id, points_delta, drivers(discord_username, display_name)")
+    .eq("league_id", leagueId)
+    .eq("season", season);
+
+  if (adjustmentsError) {
+    console.error("[standings] adjustments lookup failed:", adjustmentsError);
+  }
+
+  for (const adj of adjustments ?? []) {
+    const driver = adj.drivers as unknown as
+      | { discord_username: string; display_name: string | null }
+      | null;
+    const name = driver?.display_name ?? driver?.discord_username ?? "Unknown";
+
+    const existing = byDriver.get(adj.driver_id) ?? {
+      name,
+      points: 0,
+      wins: 0,
+      podiums: 0,
+      poles: 0,
+      dnfs: 0,
+    };
+
+    existing.points += Number(adj.points_delta ?? 0);
+    byDriver.set(adj.driver_id, existing);
+  }
+
+  if (byDriver.size === 0) {
+    return { content: `No results recorded for season ${season}.`, ephemeral: true };
+  }
+
   const sorted = [...byDriver.values()].sort((a, b) => b.points - a.points);
   const limited = sorted.slice(0, limit);
 
   const rows: StandingsRow[] = limited.map((r, i) => ({
     position: i + 1,
     name: r.name,
-    points: r.points,
+    points: Math.round(r.points * 100) / 100,
     wins: r.wins,
     podiums: r.podiums,
     poles: r.poles,
