@@ -6,6 +6,7 @@ import {
   sendPendingDms,
   closeSignupRound,
   signupSummary,
+  seasonRoundIds,
 } from "@/lib/discord-signups";
 
 // Season signup commands. An owner opens a round for a season; the bot DMs
@@ -222,6 +223,7 @@ const STATUS_ICON: Record<string, string> = {
 };
 
 interface SignupListRow {
+  driver_id: string;
   status: string;
   responded_at: string | null;
   drivers:
@@ -259,11 +261,19 @@ registerCommand("signups_list", async (ctx) => {
     ephemeral: true,
     background: async () => {
       const supabase = createAdminClient();
+
+      // Signed-up lists span every round of the season, so people who signed
+      // up in an earlier round still appear after a round is closed/reopened.
+      const roundIds =
+        filter === "signed_up" ? await seasonRoundIds(round.id) : [round.id];
+
       let query = supabase
         .schema("pitboss")
         .from("league_signups")
-        .select("status, responded_at, drivers:driver_id(display_name, discord_username, discord_id)")
-        .eq("round_id", round.id);
+        .select(
+          "driver_id, status, responded_at, drivers:driver_id(display_name, discord_username, discord_id)"
+        )
+        .in("round_id", roundIds);
 
       if (filter === "pending") query = query.eq("status", "invited");
       else if (filter !== "all") query = query.eq("status", filter);
@@ -274,9 +284,10 @@ registerCommand("signups_list", async (ctx) => {
         return { content: `Couldn't load the list: ${error.message}` };
       }
 
-      const rows = ((data ?? []) as unknown as SignupListRow[]).map((r) => {
+      const allRows = ((data ?? []) as unknown as SignupListRow[]).map((r) => {
         const d = Array.isArray(r.drivers) ? r.drivers[0] : r.drivers;
         return {
+          driverId: r.driver_id,
           status: r.status,
           respondedAt: r.responded_at,
           name: d?.display_name || d?.discord_username || "Unknown driver",
@@ -284,14 +295,21 @@ registerCommand("signups_list", async (ctx) => {
         };
       });
 
+      // One entry per driver (earliest response wins)
+      allRows.sort((a, b) => (a.respondedAt ?? "").localeCompare(b.respondedAt ?? ""));
+      const seen = new Set<string>();
+      const rows = allRows.filter((r) => {
+        if (seen.has(r.driverId)) return false;
+        seen.add(r.driverId);
+        return true;
+      });
+
       if (rows.length === 0) {
         return { content: `**${round.name}** — nobody in "${LIST_LABELS[filter]}" yet.` };
       }
 
       // Signed-up list reads best in the order people signed up; the rest A–Z.
-      if (filter === "signed_up") {
-        rows.sort((a, b) => (a.respondedAt ?? "").localeCompare(b.respondedAt ?? ""));
-      } else {
+      if (filter !== "signed_up") {
         rows.sort((a, b) => a.name.localeCompare(b.name));
       }
 
