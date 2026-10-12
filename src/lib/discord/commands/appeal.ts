@@ -1,5 +1,5 @@
 // appeal.ts
-import { registerCommand } from "./registry";
+import { registerCommand, type CommandContext } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { postTicketMessage, sendDirectMessage, createAppealTicket } from "../tickets";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
@@ -66,41 +66,32 @@ async function getOrCreateDriverId(
 }
 
 // Reads a Discord attachment option (type 11) off the command context.
-//
-// ALIGN WITH steward.ts: this checks the shapes a command context could
-// plausibly expose an attachment in (the option already being an object
-// with a url, or an attachment id looked up in the interaction's resolved
-// data). If steward.ts reads `evidence_file` differently, change this one
-// function to match — nothing else in this file depends on the shape.
+// Discord only sends the attachment's ID as the option value; the router
+// resolves the url/filename/content type into ctx.resolvedAttachments
+// (same lookup steward.ts uses for evidence_file).
 //
 // Returns null if the option wasn't supplied, or { error } if it was
-// supplied but couldn't be read (so the caller can say so instead of
+// supplied but couldn't be resolved (so the caller can say so instead of
 // silently dropping the person's file).
 function readAttachmentOption(
-  ctx: any,
+  ctx: CommandContext,
   name: string
 ):
   | { url: string; filename?: string; contentType?: string | null }
   | { error: string }
   | null {
-  const raw = ctx.options?.[name];
-  if (raw === undefined || raw === null || raw === "") return null;
+  const id = ctx.options[name] as string | undefined;
+  if (!id) return null;
 
-  const candidate =
-    typeof raw === "object"
-      ? raw
-      : ctx.resolved?.attachments?.[raw] ??
-        ctx.attachments?.[raw] ??
-        ctx.interaction?.data?.resolved?.attachments?.[raw];
-
-  if (!candidate?.url) {
+  const attachment = ctx.resolvedAttachments[id];
+  if (!attachment?.url) {
     return { error: "I couldn't read the file you attached — try attaching it again." };
   }
 
   return {
-    url: candidate.url as string,
-    filename: candidate.filename as string | undefined,
-    contentType: (candidate.content_type as string | undefined) ?? null,
+    url: attachment.url,
+    filename: attachment.filename,
+    contentType: attachment.contentType ?? null,
   };
 }
 
@@ -148,40 +139,51 @@ async function findIncidentByShortId(leagueId: string, shortId: string) {
 // for backward compatibility on older incidents, so both need to be
 // checked for a complete picture.
 //
-// Rows in incident_evidence may hold "storage:<path>" references to
-// files copied into the private incident-evidence bucket, so the final
-// list goes through resolveEvidenceList to swap those for fresh signed
-// URLs before anything is posted to a ticket.
+// Rows with source = 'upload' hold a storage path in the private
+// incident-evidence bucket, so the list goes through resolveEvidenceList
+// to swap those for fresh signed URLs before anything is posted to a
+// ticket. Links and the legacy arrays pass through unchanged.
 async function gatherIncidentEvidence(
   incidentId: string,
   reporterEvidenceUrls: unknown,
   accusedEvidenceUrls: unknown
 ): Promise<{ url: string; label?: string | null; party: string }[]> {
   const supabase = createAdminClient();
-  const evidence: { url: string; label?: string | null; party: string }[] = [];
+  const evidence: {
+    url: string;
+    label?: string | null;
+    party: string;
+    source?: string;
+  }[] = [];
 
   for (const url of (reporterEvidenceUrls as string[] | null) ?? []) {
-    evidence.push({ url, label: null, party: "reporter" });
+    evidence.push({ url, label: null, party: "reporter", source: "link" });
   }
   for (const url of (accusedEvidenceUrls as string[] | null) ?? []) {
-    evidence.push({ url, label: null, party: "accused" });
+    evidence.push({ url, label: null, party: "accused", source: "link" });
   }
 
   const { data: evidenceRows, error } = await supabase
     .schema("pitboss")
     .from("incident_evidence")
-    .select("url, label, party")
+    .select("url, label, party, source")
     .eq("incident_id", incidentId);
 
   if (error) {
     console.error("[appeal] incident_evidence fetch failed:", error);
   } else if (evidenceRows) {
     for (const row of evidenceRows) {
-      evidence.push({ url: row.url, label: row.label, party: row.party });
+      evidence.push({
+        url: row.url,
+        label: row.label,
+        party: row.party,
+        source: row.source,
+      });
     }
   }
 
-  return resolveEvidenceList(evidence);
+  const resolved = await resolveEvidenceList(evidence);
+  return resolved.map(({ url, label, party }) => ({ url, label, party }));
 }
 
 /**
