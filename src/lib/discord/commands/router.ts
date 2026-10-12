@@ -265,3 +265,9 @@ import "./setup";
 import "./results";
 // Side-effect import: registers the exam and cert commands.
 import "./cert";
+// Side-effect import: registers the signups_* commands (open, resume,
+// status, close).
+import "./signups";
+// Side-effect import: registers the calendar_* commands plus set-result,
+// import-results and set-standings (owner season administration).
+import "./season-admin";
