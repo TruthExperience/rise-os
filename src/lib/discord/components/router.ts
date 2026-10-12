@@ -21,6 +21,8 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
  *   - "checkin_btn:<postId>:<status>" -> handleCheckinButton
  *   - "appeal_prompt:<yes|no>:<incidentId>" -> handleAppealPrompt
  *   - "signup:<roundId>:<yes|no>" -> handleSignup (season signup DMs)
+ *   - "signuptest:<seasonNumber>:<yes|no>" -> handleSignup (test invites
+ *     from /signups test; handled without any DB writes)
  * Anything else falls through to a generic "not wired up" reply so
  * unknown components fail loudly instead of silently.
  */
@@ -35,7 +37,7 @@ export async function routeComponent(interaction: any) {
     return handleAppealPrompt(interaction, customId);
   }
 
-  if (customId.startsWith("signup:")) {
+  if (customId.startsWith("signup:") || customId.startsWith("signuptest:")) {
     return handleSignup(interaction, customId);
   }
 
@@ -47,13 +49,14 @@ export async function routeComponent(interaction: any) {
 
 /**
  * Handles the Sign Up / No Thanks buttons on the season signup DMs sent
- * by sendPendingDms in src/lib/discord-signups.ts. These clicks happen
- * in a DM, so there is no guild/member — Discord puts the clicker on
- * interaction.user, which is why the id lookup falls back to it.
+ * by sendPendingDms in src/lib/discord-signups.ts, and on the test invites
+ * sent by sendTestSignup (custom_id prefix "signuptest:"). These clicks
+ * happen in a DM, so there is no guild/member — Discord puts the clicker
+ * on interaction.user, which is why the id lookup falls back to it.
  *
  * Answered inline (type 7, UPDATE_MESSAGE): handleSignupButton is two or
- * three small Supabase queries and returns the response body that edits
- * the DM in place and removes the buttons.
+ * three small Supabase queries (none at all for test buttons) and returns
+ * the response body that edits the DM in place and removes the buttons.
  */
 async function handleSignup(interaction: any, customId: string) {
   const discordUserId: string | undefined =
