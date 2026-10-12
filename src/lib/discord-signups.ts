@@ -358,18 +358,49 @@ export async function handleSignupButton(
 }
 
 // ---------------------------------------------------------------------------
-// Summary for a status command
+// Season-wide helpers + summary for a status command
 // ---------------------------------------------------------------------------
+
+// Every round id that belongs to the same season as the given round. Used so
+// signups made in an earlier (closed) round still count after a round is
+// closed and reopened for the same season.
+export async function seasonRoundIds(roundId: string): Promise<string[]> {
+  const { data: r } = await db()
+    .from('signup_rounds')
+    .select('season_id')
+    .eq('id', roundId)
+    .single()
+  if (!r?.season_id) return [roundId]
+
+  const { data } = await db()
+    .from('signup_rounds')
+    .select('id')
+    .eq('season_id', r.season_id)
+  return (data ?? []).map((x) => x.id)
+}
 
 export async function signupSummary(roundId: string) {
   const { data } = await db()
     .from('league_signups')
-    .select('status')
+    .select('status, driver_id')
     .eq('round_id', roundId)
 
   const counts = { invited: 0, signed_up: 0, declined: 0, dm_failed: 0 }
+  const signed = new Set<string>()
   for (const r of data ?? []) {
-    counts[r.status as keyof typeof counts]++
+    if (r.status === 'signed_up') signed.add(r.driver_id)
+    else counts[r.status as keyof typeof counts]++
   }
+
+  // Add anyone who signed up in an earlier round of the same season
+  const ids = await seasonRoundIds(roundId)
+  const { data: all } = await db()
+    .from('league_signups')
+    .select('driver_id')
+    .in('round_id', ids)
+    .eq('status', 'signed_up')
+  for (const a of all ?? []) signed.add(a.driver_id)
+
+  counts.signed_up = signed.size
   return counts
 }
