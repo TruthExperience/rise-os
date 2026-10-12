@@ -103,12 +103,17 @@ const SIGNUPS_COMMAND = {
 
 async function register(): Promise<NextResponse> {
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
-  const appId = process.env.DISCORD_APPLICATION_ID;
+  const appId =
+    process.env.PITBOSS_DISCORD_APPLICATION_ID ??
+    process.env.DISCORD_APPLICATION_ID;
   const guildId = process.env.DISCORD_GUILD_ID;
 
   if (!token || !appId) {
     return NextResponse.json(
-      { error: "Set PITBOSS_DISCORD_BOT_TOKEN and DISCORD_APPLICATION_ID" },
+      {
+        error:
+          "Set PITBOSS_DISCORD_BOT_TOKEN and PITBOSS_DISCORD_APPLICATION_ID",
+      },
       { status: 500 }
     );
   }
