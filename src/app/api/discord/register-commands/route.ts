@@ -4,9 +4,12 @@
 // POSTing a command with an existing name overwrites it, so this contains
 // EVERY /signups subcommand, not just the new one.
 //
-// Call it once after deploying:
-//   curl -X POST https://<your-domain>/api/discord/register-commands \
-//     -H "Authorization: Bearer $REGISTER_COMMANDS_SECRET"
+// Two ways to call it after deploying:
+//   1. Browser / link:
+//        https://<your-domain>/api/discord/register-commands?secret=<REGISTER_COMMANDS_SECRET>
+//   2. curl:
+//        curl -X POST https://<your-domain>/api/discord/register-commands \
+//          -H "Authorization: Bearer $REGISTER_COMMANDS_SECRET"
 //
 // Env: PITBOSS_DISCORD_BOT_TOKEN, DISCORD_APPLICATION_ID,
 //      REGISTER_COMMANDS_SECRET (any long random string, you choose it)
@@ -98,12 +101,7 @@ const SIGNUPS_COMMAND = {
   ],
 };
 
-export async function POST(req: NextRequest) {
-  const secret = process.env.REGISTER_COMMANDS_SECRET;
-  if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
-    return new NextResponse("Unauthorized", { status: 401 });
-  }
-
+async function register(): Promise<NextResponse> {
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
   const appId = process.env.DISCORD_APPLICATION_ID;
   const guildId = process.env.DISCORD_GUILD_ID;
@@ -141,5 +139,24 @@ export async function POST(req: NextRequest) {
     ok: true,
     scope: guildId ? `guild ${guildId}` : "global",
     commandId: json.id,
+    subcommands: (json.options ?? []).map((o: { name: string }) => o.name),
   });
+}
+
+// curl / scripts: Authorization: Bearer <secret>
+export async function POST(req: NextRequest) {
+  const secret = process.env.REGISTER_COMMANDS_SECRET;
+  if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
+    return new NextResponse("Unauthorized", { status: 401 });
+  }
+  return register();
+}
+
+// Browser / link: ?secret=<secret>
+export async function GET(req: NextRequest) {
+  const secret = process.env.REGISTER_COMMANDS_SECRET;
+  if (!secret || req.nextUrl.searchParams.get("secret") !== secret) {
+    return new NextResponse("Unauthorized", { status: 401 });
+  }
+  return register();
 }
