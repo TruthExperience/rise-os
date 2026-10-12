@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
-// NOTE: adjust this import to wherever checkin-embed.ts lives in your repo
-// (it sits next to checkin.ts in the commands folder).
 import {
   buildCheckinEmbed,
   buildCheckinComponents,
   CHECKIN_STATUSES,
   type CheckinStatus,
-} from "@/lib/pitboss/discord/commands/checkin-embed";
+} from "@/lib/discord/commands/checkin-embed";
 
 // Called by pg_cron via pitboss.dispatch_checkin_reminders() every 5
 // minutes. Auth is a shared secret (Supabase vault: checkin_reminder_cron_secret),
