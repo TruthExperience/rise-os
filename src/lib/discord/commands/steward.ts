@@ -57,6 +57,52 @@ function formatEvidenceLines(link?: string, attachmentUrl?: string): string[] {
   return lines;
 }
 
+type EvidenceInput =
+  | { ok: true; urls: string[]; link?: string }
+  | { ok: false; error: string };
+
+// Evidence on /steward report and /steward respond is "link OR file":
+// at least one of the two must be supplied, and both may be. A pasted
+// link must be a real http(s) URL — the `evidence` option used to be
+// required, and people who had nothing to paste (or didn't realise they
+// could attach a file instead) typed filler like "will send soon" into
+// it, which then got forwarded to the accused and to the AI analysis as
+// if it were evidence. `evidence_file` is the alternative, not an extra.
+function collectEvidenceUrls(
+  link: string | undefined,
+  attachmentUrl: string | undefined,
+  missingMessage: string
+): EvidenceInput {
+  const trimmed = link?.trim();
+
+  if (!trimmed && !attachmentUrl) {
+    return { ok: false, error: missingMessage };
+  }
+
+  if (trimmed) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      parsed = null;
+    }
+    const valid =
+      parsed !== null &&
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.hostname.includes(".");
+    if (!valid) {
+      return {
+        ok: false,
+        error:
+          "`evidence` must be a link starting with http:// or https:// — or leave it blank and attach a file in `evidence_file` instead.",
+      };
+    }
+  }
+
+  const urls = [trimmed, attachmentUrl].filter((u): u is string => Boolean(u));
+  return { ok: true, urls, link: trimmed || undefined };
+}
+
 async function getOrCreateDriverId(
   discordId: string,
   username?: string
@@ -89,14 +135,16 @@ async function getOrCreateDriverId(
   return created.id;
 }
 
-// accused, lap, round, and evidence used to be optional — now
-// mandatory on /steward report so stewards always have a
-// fully-formed report to work from instead of chasing missing context
-// after the fact. Validated defensively below in addition to marking
-// them required on the slash command schema itself (outside these
-// files — wherever /steward report's options are registered with
-// Discord), since ctx.options isn't guaranteed to match the schema at
-// runtime.
+// accused, lap, round, and evidence are mandatory on /steward report so
+// stewards always have a fully-formed report to work from instead of
+// chasing missing context after the fact. Evidence is satisfied by a
+// link OR an uploaded file (see collectEvidenceUrls). Validated
+// defensively below in addition to marking them on the slash command
+// schema itself (outside these files — wherever /steward report's
+// options are registered with Discord), since ctx.options isn't
+// guaranteed to match the schema at runtime. On the schema, `evidence`
+// and `evidence_file` must both be optional, or Discord will force a
+// link even when a file is attached.
 registerCommand("steward_report", async (ctx) => {
   const leagueId = ctx.leagueId;
   if (!leagueId) {
@@ -112,27 +160,22 @@ registerCommand("steward_report", async (ctx) => {
   const accusedDiscordId = ctx.options.accused as string | undefined;
   const lap = ctx.options.lap as number | undefined;
   const round = ctx.options.round as number | undefined;
-  const evidenceLink = ctx.options.evidence as string | undefined;
+  const evidenceLinkRaw = ctx.options.evidence as string | undefined;
   const evidenceAttachmentId = ctx.options.evidence_file as string | undefined;
   const evidenceAttachment = evidenceAttachmentId
     ? ctx.resolvedAttachments[evidenceAttachmentId]
     : undefined;
 
-  // `evidence` (link) is required on the Discord command schema itself,
-  // so evidenceLink should always be present here — this check is
-  // defensive in case ctx.options doesn't match the schema at runtime.
-  // `evidence_file` stays optional/additive: a photo/clip attachment
-  // can be submitted alongside the link but is never required on its
-  // own.
-  if (!evidenceLink) {
-    return {
-      content: "`evidence` is required — paste a POV link for stewards to review.",
-      ephemeral: true,
-    };
-  }
-  const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
-    (u): u is string => Boolean(u)
+  const evidence = collectEvidenceUrls(
+    evidenceLinkRaw,
+    evidenceAttachment?.url,
+    "Evidence is required — paste a POV link in `evidence`, or attach a file in `evidence_file`. Either works, and you can send both."
   );
+  if (!evidence.ok) {
+    return { content: evidence.error, ephemeral: true };
+  }
+  const evidenceUrls = evidence.urls;
+  const evidenceLink = evidence.link;
 
   if (!accusedDiscordId) {
     return {
@@ -246,7 +289,7 @@ registerCommand("steward_report", async (ctx) => {
       description,
       lap,
       round,
-      // tickets.ts's createIncidentTicket now takes evidenceUrls (array)
+      // tickets.ts's createIncidentTicket takes evidenceUrls (array)
       // directly — see that file for the up-to-date signature.
       evidenceUrls,
     });
@@ -879,26 +922,26 @@ registerCommand(
   "steward_respond",
   async (ctx) => {
     const responseText = ctx.options.response as string;
-    const evidenceLink = ctx.options.evidence as string | undefined;
+    const evidenceLinkRaw = ctx.options.evidence as string | undefined;
     const evidenceAttachmentId = ctx.options.evidence_file as string | undefined;
     const evidenceAttachment = evidenceAttachmentId
       ? ctx.resolvedAttachments[evidenceAttachmentId]
       : undefined;
     const incidentTicketRaw = ctx.options.incident as string | undefined;
 
-    // `evidence` (link) is required on the Discord command schema itself,
-    // matching /steward report — this check is defensive in case
-    // ctx.options doesn't match the schema at runtime. `evidence_file`
-    // stays optional/additive.
-    if (!evidenceLink) {
-      return {
-        content: "`evidence` is required — paste a POV link with your defense.",
-        ephemeral: true,
-      };
-    }
-    const evidenceUrls = [evidenceLink, evidenceAttachment?.url].filter(
-      (u): u is string => Boolean(u)
+    // Same "link OR file" rule as /steward report. `evidence` and
+    // `evidence_file` must both be optional on the Discord command
+    // schema; this is where "at least one" is actually enforced.
+    const evidence = collectEvidenceUrls(
+      evidenceLinkRaw,
+      evidenceAttachment?.url,
+      "Evidence is required — paste a POV link in `evidence`, or attach a file in `evidence_file`. Either works, and you can send both."
     );
+    if (!evidence.ok) {
+      return { content: evidence.error, ephemeral: true };
+    }
+    const evidenceUrls = evidence.urls;
+    const evidenceLink = evidence.link;
 
     // Two ways to identify the incident: running inside the ticket
     // channel itself (original behavior — fast, no extra input needed),
