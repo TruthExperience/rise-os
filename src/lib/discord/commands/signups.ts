@@ -7,6 +7,7 @@ import {
   closeSignupRound,
   signupSummary,
   seasonRoundIds,
+  sendTestSignup,
 } from "@/lib/discord-signups";
 
 // Season signup commands. An owner opens a round for a season; the bot DMs
@@ -14,11 +15,11 @@ import {
 // (button clicks are handled by handleSignupButton in
 // src/lib/discord-signups.ts — see the wiring notes in the hand-off).
 //
-// Registered in Discord as ONE command, /signups, with five subcommands.
+// Registered in Discord as ONE command, /signups, with six subcommands.
 // commands/index.ts builds the dispatch key "<command>_<subcommand>", so the
 // handlers below are keyed signups_open / signups_resume / signups_status /
-// signups_list / signups_close (underscores — NOT hyphens, or the router
-// can't find them).
+// signups_list / signups_close / signups_test (underscores — NOT hyphens, or
+// the router can't find them).
 //
 //   /signups open    season (optional season number; defaults to the league's
 //                    latest "upcoming" season), message (optional custom DM text)
@@ -27,6 +28,9 @@ import {
 //   /signups list    names for the open round; show = signed_up (default) |
 //                    declined | pending | dm_failed | all
 //   /signups close   closes the open round
+//   /signups test    user (required), season (optional, defaults to 2).
+//                    Sends ONE test invite DM with 3 random F1 25 tracks.
+//                    Writes nothing to signup_rounds / league_signups.
 //
 // Tables: pitboss.signup_rounds (one open round per season),
 //         pitboss.league_signups (one row per member per round),
@@ -39,6 +43,9 @@ import {
 // Owners only: is_owner / is_co_owner / is_commissioner.
 
 const OWNER_FLAGS = ["is_owner", "is_co_owner", "is_commissioner"] as const;
+
+// VRC #driver-signups (where test responses are posted)
+const SIGNUP_CHANNEL_ID = process.env.PITBOSS_SIGNUP_CHANNEL_ID ?? "1559261744470163556";
 
 async function findOpenRound(leagueId: string) {
   const supabase = createAdminClient();
@@ -380,5 +387,55 @@ registerCommand("signups_close", async (ctx) => {
       `${counts.signed_up} signed up, ${counts.declined} declined, ` +
       `${counts.invited} never answered, ${counts.dm_failed} couldn't be DMed.`,
     ephemeral: true,
+  };
+});
+
+// ─── /signups test ───────────────────────────────────────────────────────
+// Sends ONE test invite DM to the chosen user. No rows are written, so an
+// existing signup for that person is untouched.
+
+registerCommand("signups_test", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
+  if (!hasAnyFlag(membership, [...OWNER_FLAGS])) {
+    return { content: "Only league owners can send test signups.", ephemeral: true };
+  }
+
+  const target = ctx.options.user as string | undefined;
+  if (!target) {
+    return { content: "Pick a user to send the test invite to.", ephemeral: true };
+  }
+
+  const seasonInput = ctx.options.season as string | number | undefined;
+  const seasonNumber =
+    seasonInput !== undefined && seasonInput !== null && seasonInput !== ""
+      ? Number(seasonInput)
+      : 2;
+  if (!Number.isFinite(seasonNumber)) {
+    return { content: "season must be a season number (e.g. 2).", ephemeral: true };
+  }
+
+  return {
+    defer: true,
+    ephemeral: true,
+    background: async () => {
+      const res = await sendTestSignup({
+        leagueId,
+        openedByDiscordId: ctx.discordUserId,
+        targetDiscordId: target,
+        seasonNumber,
+      });
+      if (!res.ok) return { content: `Test invite failed: ${res.error}` };
+      return {
+        content:
+          `Test invite for Season ${seasonNumber} sent to <@${target}>.\n` +
+          `Tracks requested: ${res.tracks.join(", ")}.\n` +
+          `Their button response will post in <#${SIGNUP_CHANNEL_ID}>. Nothing is saved.`,
+      };
+    },
   };
 });
