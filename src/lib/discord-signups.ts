@@ -1238,3 +1238,157 @@ export async function signupSummary(roundId: string) {
   counts.signed_up = signed.size
   return counts
 }
+// ===========================================================================
+// PASTE AT THE END of src/lib/discord-signups.ts (no new imports needed).
+// Uses helpers already in that file: db, discord, sleep, SEND_DELAY_MS,
+// REQUEST_MARKER, trackRequestBlock, defaultInviteContent, canOpenSignups,
+// seasonRoundIds, MAX_REQUESTED_TRACKS.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Add / change the requested tracks on an ALREADY OPEN round
+// ---------------------------------------------------------------------------
+
+export type SetTracksResult =
+  | {
+      ok: true
+      roundId: string
+      roundName: string
+      tracks: string[]
+      replaced: boolean // true if the round already had a picture request
+    }
+  | { ok: false; error: string }
+
+// Rewrites the track-request block in the open round's saved invite text.
+// Nobody is re-invited and no signup rows change. Effects:
+//   - anyone who taps Sign Up from now on is asked for the pictures (the
+//     Sign Up reply reads the round's text at click time)
+//   - invites sent later (/signups resume, /signups invite) include the block
+//   - invite DMs already delivered keep their old text
+export async function setRoundTracks(params: {
+  leagueId: string
+  byDiscordId: string
+  tracks: string[]
+}): Promise<SetTracksResult> {
+  const { leagueId, byDiscordId } = params
+  const tracks = params.tracks.slice(0, MAX_REQUESTED_TRACKS)
+
+  if (!(await canOpenSignups(byDiscordId, leagueId))) {
+    return { ok: false, error: 'Only league owners can change signup tracks.' }
+  }
+  if (tracks.length === 0) {
+    return { ok: false, error: 'Give at least one track.' }
+  }
+
+  const { data: round } = await db()
+    .from('signup_rounds')
+    .select('id, name, message, leagues!inner(name)')
+    .eq('league_id', leagueId)
+    .eq('status', 'open')
+    .order('opened_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (!round) {
+    return {
+      ok: false,
+      error: 'No signup round is open for this league. Open one with `/signups open` first.',
+    }
+  }
+
+  // Keep the owner's own text; swap out only the pictures block.
+  const existing = (round.message ?? '').trim()
+  const at = existing.indexOf(REQUEST_MARKER)
+  const replaced = at !== -1
+  const leagueName = (round as any).leagues?.name ?? 'the league'
+  const lead =
+    (replaced ? existing.slice(0, at) : existing).trim() ||
+    defaultInviteContent(leagueName, round.name)
+
+  const { error } = await db()
+    .from('signup_rounds')
+    .update({ message: `${lead}\n\n${trackRequestBlock(tracks)}` })
+    .eq('id', round.id)
+  if (error) return { ok: false, error: error.message }
+
+  return { ok: true, roundId: round.id, roundName: round.name, tracks, replaced }
+}
+
+// DMs drivers who have ALREADY signed up (any round of the season) asking for
+// the pictures. Skips drivers who have already sent some for this season.
+// Plain text, no buttons. Running it twice messages people twice.
+export async function notifySignedUpForPhotos(params: {
+  roundId: string
+  tracks: string[]
+  budgetMs?: number
+}): Promise<{ sent: number; failed: number; skipped: number; remaining: number }> {
+  const started = Date.now()
+  const budgetMs = params.budgetMs ?? 45_000
+  const none = { sent: 0, failed: 0, skipped: 0, remaining: 0 }
+
+  const { data: round } = await db()
+    .from('signup_rounds')
+    .select('id, name, status, leagues!inner(name)')
+    .eq('id', params.roundId)
+    .single()
+  if (!round || round.status !== 'open') return none
+
+  const roundIds = await seasonRoundIds(round.id)
+
+  const { data: signed } = await db()
+    .from('league_signups')
+    .select('driver_id, drivers!inner(discord_id)')
+    .in('round_id', roundIds)
+    .eq('status', 'signed_up')
+
+  const { data: photoRows } = await db()
+    .from('signup_photos')
+    .select('driver_id')
+    .in('round_id', roundIds)
+  const alreadySent = new Set(((photoRows ?? []) as any[]).map((p) => p.driver_id as string))
+
+  const seen = new Set<string>()
+  const queue: string[] = []
+  let skipped = 0
+  for (const row of (signed ?? []) as any[]) {
+    if (seen.has(row.driver_id)) continue
+    seen.add(row.driver_id)
+    const d = Array.isArray(row.drivers) ? row.drivers[0] : row.drivers
+    const discordId = d?.discord_id as string | undefined
+    if (!discordId || alreadySent.has(row.driver_id)) {
+      skipped++
+      continue
+    }
+    queue.push(discordId)
+  }
+
+  const leagueName = (round as any).leagues?.name ?? 'the league'
+  const subject = params.tracks.length === 1 ? 'this track' : 'each of these tracks'
+  const content =
+    `📸 **${leagueName}: ${round.name}** — one more step\n` +
+    `Thanks for signing up. The league now needs a picture of ${subject}. Send them ` +
+    `to me right here in this DM with \`/signup photos\` (attach up to ` +
+    `${MAX_REQUESTED_TRACKS} images) and I'll post them for the league:\n` +
+    params.tracks.map((t, i) => `${i + 1}. ${t}`).join('\n')
+
+  let sent = 0
+  let failed = 0
+  for (let i = 0; i < queue.length; i++) {
+    if (Date.now() - started > budgetMs) {
+      return { sent, failed, skipped, remaining: queue.length - i }
+    }
+    try {
+      const channel = await discord('/users/@me/channels', { recipient_id: queue[i] })
+      await discord(`/channels/${channel.id}/messages`, {
+        content,
+        allowed_mentions: { parse: [] },
+      })
+      sent++
+    } catch (e) {
+      console.error('[signups] photo request DM failed:', e)
+      failed++
+    }
+    await sleep(SEND_DELAY_MS)
+  }
+
+  return { sent, failed, skipped, remaining: 0 }
+}
