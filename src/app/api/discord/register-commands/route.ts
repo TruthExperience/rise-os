@@ -1,9 +1,9 @@
 // src/app/api/discord/register-commands/route.ts
 //
-// Registers /signups (open, resume, status, list, close, invite, test),
-// /signup (photos) and /timetrial with Discord. POSTing a command with an
-// existing name overwrites it, so this contains EVERY subcommand of each
-// command, not just the new ones.
+// Registers /setup, /signups (open, resume, status, list, close, invite,
+// test), /signup (photos) and /timetrial with Discord. POSTing a command with
+// an existing name overwrites it, so this contains EVERY option/subcommand of
+// each command, not just the new ones.
 //
 // Two ways to call it after deploying:
 //   1. Browser / link:
@@ -12,19 +12,87 @@
 //        curl -X POST https://<your-domain>/api/discord/register-commands \
 //          -H "Authorization: Bearer $REGISTER_COMMANDS_SECRET"
 //
-// Env: PITBOSS_DISCORD_BOT_TOKEN, DISCORD_APPLICATION_ID,
-//      REGISTER_COMMANDS_SECRET (any long random string, you choose it)
+// Env: PITBOSS_DISCORD_BOT_TOKEN, PITBOSS_DISCORD_APPLICATION_ID (or
+//      DISCORD_APPLICATION_ID), REGISTER_COMMANDS_SECRET (any long random
+//      string, you choose it)
 //      DISCORD_GUILD_ID (optional: set to register in ONE server and it
 //                        updates instantly. Omit for a global command, which
 //                        is what every league needs. A guild-scoped command
 //                        does NOT show up in DMs with the bot or in other
-//                        servers, so leave it unset for /signups to work in
-//                        all leagues and for /signup photos and
-//                        /timetrial submit to work from a DM.)
+//                        servers, so leave it unset for /setup and /signups
+//                        to work in all leagues and for /signup photos and
+//                        /timetrial submit to work from a DM. A guild-scoped
+//                        command also overrides a global one of the same
+//                        name in that server.)
 
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+
+// /setup. Every option is optional: the handler (src/lib/discord/commands/
+// setup.ts) auto-detects channels/roles by name and keeps saved values.
+// Option types: 3 = STRING, 5 = BOOLEAN, 7 = CHANNEL, 8 = ROLE
+// Channel types: 0 = text, 4 = category
+const SETUP_COMMAND = {
+  name: "setup",
+  description: "Set up or update this league's PitBoss config (admins only)",
+  default_member_permissions: "8", // Administrator
+  options: [
+    {
+      type: 3,
+      name: "name",
+      description: "League name (default: the server name)",
+      required: false,
+    },
+    {
+      type: 7,
+      name: "fia_category",
+      description: "Category where steward tickets are created",
+      channel_types: [4],
+      required: false,
+    },
+    {
+      type: 7,
+      name: "reports_channel",
+      description: "Incident reports channel",
+      channel_types: [0],
+      required: false,
+    },
+    {
+      type: 7,
+      name: "transcript_channel",
+      description: "Ticket transcripts channel",
+      channel_types: [0],
+      required: false,
+    },
+    {
+      type: 7,
+      name: "appeals_channel",
+      description: "Appeals channel",
+      channel_types: [0],
+      required: false,
+    },
+    {
+      type: 7,
+      name: "signup_channel",
+      description: "Driver signups channel",
+      channel_types: [0],
+      required: false,
+    },
+    {
+      type: 8,
+      name: "steward_role",
+      description: "Steward role",
+      required: false,
+    },
+    {
+      type: 5,
+      name: "financial_system",
+      description: "League uses a salary cap / wallets",
+      required: false,
+    },
+  ],
+};
 
 // Option types: 1 = SUB_COMMAND, 3 = STRING, 4 = INTEGER, 6 = USER
 const SIGNUPS_COMMAND = {
@@ -234,10 +302,15 @@ async function register(): Promise<NextResponse> {
   const results: {
     command: string;
     commandId: string;
-    subcommands: string[];
+    options: string[];
   }[] = [];
 
-  for (const command of [SIGNUPS_COMMAND, SIGNUP_COMMAND, TIMETRIAL_COMMAND]) {
+  for (const command of [
+    SETUP_COMMAND,
+    SIGNUPS_COMMAND,
+    SIGNUP_COMMAND,
+    TIMETRIAL_COMMAND,
+  ]) {
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -265,7 +338,8 @@ async function register(): Promise<NextResponse> {
     results.push({
       command: command.name,
       commandId: json.id,
-      subcommands: (json.options ?? []).map((o: { name: string }) => o.name),
+      // Subcommand names for /signups etc., option names for /setup.
+      options: (json.options ?? []).map((o: { name: string }) => o.name),
     });
   }
 
