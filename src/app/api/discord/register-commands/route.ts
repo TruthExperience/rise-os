@@ -1,9 +1,9 @@
 // src/app/api/discord/register-commands/route.ts
 //
-// Registers /signups (open, resume, status, list, close, test), /signup
-// (photos) and /timetrial with Discord. POSTing a command with an existing
-// name overwrites it, so this contains EVERY subcommand of each command, not
-// just the new ones.
+// Registers /signups (open, resume, status, list, close, invite, test),
+// /signup (photos) and /timetrial with Discord. POSTing a command with an
+// existing name overwrites it, so this contains EVERY subcommand of each
+// command, not just the new ones.
 //
 // Two ways to call it after deploying:
 //   1. Browser / link:
@@ -14,10 +14,12 @@
 //
 // Env: PITBOSS_DISCORD_BOT_TOKEN, DISCORD_APPLICATION_ID,
 //      REGISTER_COMMANDS_SECRET (any long random string, you choose it)
-//      DISCORD_GUILD_ID (optional: set to register in ONE server, e.g. VRC,
-//                        and it updates instantly. Omit for a global command.
-//                        A guild-scoped command does NOT show up in DMs with
-//                        the bot, so leave it unset for /signup photos and
+//      DISCORD_GUILD_ID (optional: set to register in ONE server and it
+//                        updates instantly. Omit for a global command, which
+//                        is what every league needs. A guild-scoped command
+//                        does NOT show up in DMs with the bot or in other
+//                        servers, so leave it unset for /signups to work in
+//                        all leagues and for /signup photos and
 //                        /timetrial submit to work from a DM.)
 
 import { NextRequest, NextResponse } from "next/server";
@@ -91,6 +93,19 @@ const SIGNUPS_COMMAND = {
     },
     {
       type: 1,
+      name: "invite",
+      description: "Send the open signup round's invite to one racer (saved like a normal signup)",
+      options: [
+        {
+          type: 6,
+          name: "user",
+          description: "Racer to invite",
+          required: true,
+        },
+      ],
+    },
+    {
+      type: 1,
       name: "test",
       description: "Send one test signup invite to a single user (nothing is saved)",
       options: [
@@ -109,7 +124,7 @@ const SIGNUPS_COMMAND = {
         {
           type: 3,
           name: "tracks",
-          description: "Up to 3 tracks to request pictures of, separated by commas (default: 3 random)",
+          description: "Up to 3 tracks to request pictures of (commas), or 'random' (default: none)",
           required: false,
         },
       ],
