@@ -13,6 +13,8 @@ import {
   parseTracks,
   leagueTeamOptions,
   requestedTracksFromMessage,
+  setRoundTracks,
+  notifySignedUpForPhotos,
 } from "@/lib/discord-signups";
 
 // Season signup commands. An owner opens a round for a season; the bot DMs
@@ -20,11 +22,11 @@ import {
 // (button clicks are handled by handleSignupButton in
 // src/lib/discord-signups.ts — see the wiring notes in the hand-off).
 //
-// Registered in Discord as ONE command, /signups, with seven subcommands.
+// Registered in Discord as ONE command, /signups, with eight subcommands.
 // commands/index.ts builds the dispatch key "<command>_<subcommand>", so the
 // handlers below are keyed signups_open / signups_resume / signups_status /
-// signups_list / signups_close / signups_invite / signups_test (underscores —
-// NOT hyphens, or the router can't find them).
+// signups_list / signups_close / signups_invite / signups_tracks /
+// signups_test (underscores — NOT hyphens, or the router can't find them).
 //
 //   /signups open    season (optional season number; defaults to the league's
 //                    latest "upcoming" season), message (optional custom DM
@@ -40,6 +42,12 @@ import {
 //   /signups invite  user (required). Sends the open round's real signup
 //                    invite to ONE racer. Their answer is saved like any other
 //                    signup. Needs an open round.
+//   /signups tracks  tracks (required, up to 3, commas), notify (optional
+//                    boolean). Adds or replaces the picture request on the
+//                    OPEN round without re-inviting anyone. Anyone who taps
+//                    Sign Up afterwards is asked for the pictures; notify=true
+//                    also DMs drivers who already signed up. Use this when a
+//                    round was opened without tracks.
 //   /signups test    user (required), season (optional, defaults to 2),
 //                    tracks (optional: up to 3 tracks, or "random" for 3
 //                    random F1 25 tracks; omit for no pictures request).
@@ -62,7 +70,8 @@ import {
 // Signup channel: each league has its own, stored in
 // pitboss.leagues.signup_channel_id. Test responses and screenshots are posted
 // there. A league with no channel set posts nothing to a channel (screenshots
-// are still saved). Set one with:
+// are still saved). Set one with /setup (signup_channel option, or
+// auto-detected from a channel named like "driver-signups"), or:
 //   update pitboss.leagues set signup_channel_id = '<channel id>' where slug = '<slug>';
 //
 // Tables: pitboss.signup_rounds (one open round per season),
@@ -178,7 +187,7 @@ registerCommand("signups_open", async (ctx) => {
         tracks.length > 0
           ? `Pictures requested: ${tracks.join(", ")}` +
             (trackCount > tracks.length ? ` (only the first ${tracks.length} are used).` : ".")
-          : "No track pictures requested.",
+          : "No track pictures requested. Add them later with `/signups tracks`.",
         teams.length > 0
           ? `Team requests: on (${teams.length} teams). Principals are DM'd when a driver finishes picking.`
           : "Team requests: off (no team rosters on file for this league).",
@@ -476,6 +485,73 @@ registerCommand("signups_invite", async (ctx) => {
           : "No track pictures requested for this round.",
         "Their answer is saved like any other signup. Check `/signups status` or `/signups list`.",
       ];
+      return { content: lines.join("\n") };
+    },
+  };
+});
+
+// ─── /signups tracks ─────────────────────────────────────────────────────
+// Adds (or replaces) the time trial picture request on the league's open
+// round. Nobody is re-invited. See setRoundTracks in discord-signups.ts.
+
+registerCommand("signups_tracks", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
+  if (!hasAnyFlag(membership, [...OWNER_FLAGS])) {
+    return { content: "Only league owners can change signup tracks.", ephemeral: true };
+  }
+
+  const tracksInput = ctx.options.tracks as string | undefined;
+  const tracks = parseTracks(tracksInput);
+  const trackCount = (tracksInput ?? "").split(/[;,\n]/).filter((t) => t.trim()).length;
+  if (tracks.length === 0) {
+    return {
+      content: "Give at least one track, e.g. `Monza, Suzuka, Spa`.",
+      ephemeral: true,
+    };
+  }
+
+  const notify = Boolean(ctx.options.notify);
+
+  return {
+    defer: true,
+    ephemeral: true,
+    background: async () => {
+      const res = await setRoundTracks({
+        leagueId,
+        byDiscordId: ctx.discordUserId,
+        tracks,
+      });
+      if (!res.ok) return { content: res.error };
+
+      const lines = [
+        `${res.replaced ? "Updated" : "Added"} the picture request on **${res.roundName}**: ` +
+          res.tracks.join(", ") +
+          (trackCount > res.tracks.length
+            ? ` (only the first ${res.tracks.length} are used).`
+            : "."),
+        "Anyone who taps **Sign Up** from now on is asked for them. Invite DMs already delivered keep their old text.",
+      ];
+
+      if (notify) {
+        const out = await notifySignedUpForPhotos({ roundId: res.roundId, tracks: res.tracks });
+        lines.push(
+          `Drivers who already signed up: ${out.sent} DM'd, ${out.failed} couldn't be reached, ` +
+            `${out.skipped} skipped (already sent pictures or no Discord ID).`
+        );
+        if (out.remaining > 0) {
+          lines.push(
+            `${out.remaining} not reached before the time limit. Running it again with notify messages everyone again.`
+          );
+        }
+      } else {
+        lines.push("Drivers who already signed up were not messaged. Add `notify: True` to DM them.");
+      }
+
       return { content: lines.join("\n") };
     },
   };
