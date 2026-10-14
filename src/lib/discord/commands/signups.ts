@@ -32,6 +32,13 @@ import {
 //                    Sends ONE test invite DM with 3 random F1 25 tracks.
 //                    Writes nothing to signup_rounds / league_signups.
 //
+// Driver-facing, registered as its own command so it can be used from a DM:
+//
+//   /signup photos   screenshot_1 (required), screenshot_2, screenshot_3.
+//                    Works in a DM with the bot or in a league server. The bot
+//                    re-posts the images into the signup channel for the
+//                    drivers' signup. Key: signup_photos (leagueOptional).
+//
 // Tables: pitboss.signup_rounds (one open round per season),
 //         pitboss.league_signups (one row per member per round),
 //         rise_os.seasons.
@@ -40,11 +47,11 @@ import {
 // Discord ID. Use /members-sync first to bring the Discord server's members
 // into driver_leagues.
 //
-// Owners only: is_owner / is_co_owner / is_commissioner.
+// Owners only (the /signups commands): is_owner / is_co_owner / is_commissioner.
 
 const OWNER_FLAGS = ["is_owner", "is_co_owner", "is_commissioner"] as const;
 
-// VRC #driver-signups (where test responses are posted)
+// VRC #driver-signups (where test responses and signup screenshots are posted)
 const SIGNUP_CHANNEL_ID = process.env.PITBOSS_SIGNUP_CHANNEL_ID ?? "1559261744470163556";
 
 async function findOpenRound(leagueId: string) {
@@ -439,3 +446,269 @@ registerCommand("signups_test", async (ctx) => {
     },
   };
 });
+
+// ─── /signup photos ──────────────────────────────────────────────────────
+// Driver-facing (NOT owner-only). The signup invite asks for screenshots, but
+// the signup channel is private, so drivers can't post there themselves. This
+// lets them send the images to the bot instead — from the invite DM or from
+// the league server — and the bot re-posts them into the signup channel.
+//
+// The bot only receives slash commands and button clicks, not ordinary DM
+// messages, so this has to be a command (same approach as /steward respond
+// and /timetrial submit). Registered leagueOptional so it runs from a DM,
+// where there is no guild to resolve a league from.
+//
+// A driver can use it once they have tapped Sign Up for an open round.
+// Nothing is written to the database; the channel post is the record.
+
+const PHOTO_SLOTS = ["screenshot_1", "screenshot_2", "screenshot_3"] as const;
+const PHOTO_MAX_BYTES = 8 * 1024 * 1024; // 8 MB per image, 24 MB for all three
+const PHOTO_TYPE = /^image\/(png|jpe?g|webp|gif)$/i;
+
+// Only fetch attachments from Discord's own CDN.
+const PHOTO_FETCH_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
+
+// Discord normally sends a content type with each attachment; fall back to the
+// file extension so a missing one doesn't reject a perfectly good screenshot.
+function guessPhotoType(filename: string | undefined): string | undefined {
+  const ext = filename?.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    default:
+      return undefined;
+  }
+}
+
+interface DownloadedPhoto {
+  filename: string;
+  contentType: string;
+  data: ArrayBuffer;
+}
+
+async function downloadPhoto(
+  att: { url: string; filename?: string; contentType?: string },
+  position: number
+): Promise<DownloadedPhoto | { error: string }> {
+  const contentType = (att.contentType ?? guessPhotoType(att.filename) ?? "")
+    .split(";")[0]
+    .trim();
+  if (!PHOTO_TYPE.test(contentType)) {
+    return { error: `Screenshot ${position} isn't an image — attach a png, jpg or webp.` };
+  }
+
+  let host: string;
+  try {
+    host = new URL(att.url).hostname;
+  } catch {
+    return { error: `Couldn't read screenshot ${position}.` };
+  }
+  if (!PHOTO_FETCH_HOSTS.has(host)) {
+    return { error: "Attachments can only be copied from Discord." };
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(att.url);
+  } catch (err) {
+    console.error("[signup_photos] download threw:", err);
+    return { error: `Couldn't download screenshot ${position} from Discord.` };
+  }
+  if (!res.ok) return { error: `Couldn't download screenshot ${position} from Discord.` };
+
+  const declared = Number(res.headers.get("content-length") ?? 0);
+  if (declared > PHOTO_MAX_BYTES) {
+    return { error: `Screenshot ${position} is over 8 MB — attach a smaller image.` };
+  }
+
+  const data = await res.arrayBuffer();
+  if (data.byteLength > PHOTO_MAX_BYTES) {
+    return { error: `Screenshot ${position} is over 8 MB — attach a smaller image.` };
+  }
+
+  const safeName = (att.filename ?? `screenshot-${position}`).replace(/[^a-zA-Z0-9._-]/g, "_");
+  return { filename: `${position}-${safeName}`, contentType, data };
+}
+
+// Posts one message with up to three image files. multipart/form-data: a
+// payload_json part carries the content and files[N] parts carry the bytes. Do
+// NOT set a Content-Type header manually — fetch adds the multipart boundary.
+async function postSignupPhotos(
+  channelId: string,
+  content: string,
+  photos: DownloadedPhoto[]
+): Promise<boolean> {
+  const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
+  if (!token) {
+    console.error("[signup_photos] PITBOSS_DISCORD_BOT_TOKEN not set");
+    return false;
+  }
+
+  const form = new FormData();
+  form.append(
+    "payload_json",
+    JSON.stringify({ content, allowed_mentions: { parse: [] } })
+  );
+  photos.forEach((p, i) => {
+    form.append(`files[${i}]`, new Blob([p.data], { type: p.contentType }), p.filename);
+  });
+
+  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bot ${token}` },
+    body: form,
+  });
+
+  if (!res.ok) {
+    console.error("[signup_photos] channel post failed:", res.status, await res.text());
+    return false;
+  }
+  return true;
+}
+
+registerCommand(
+  "signup_photos",
+  async (ctx) => {
+    const attachments: { url: string; filename?: string; contentType?: string }[] = [];
+    for (const slot of PHOTO_SLOTS) {
+      const id = ctx.options[slot] as string | undefined;
+      const attachment = id ? ctx.resolvedAttachments[id] : undefined;
+      if (attachment?.url) attachments.push(attachment);
+    }
+
+    if (attachments.length === 0) {
+      return {
+        content: "Attach at least one screenshot in `screenshot_1` (up to three in total).",
+        ephemeral: true,
+      };
+    }
+
+    // Always deferred: downloading and re-uploading images can outlast
+    // Discord's 3-second ACK window.
+    return {
+      defer: true,
+      ephemeral: true,
+      background: async () => {
+        const supabase = createAdminClient();
+
+        const { data: driver } = await supabase
+          .schema("pitboss")
+          .from("drivers")
+          .select("id, display_name, discord_username")
+          .eq("discord_id", ctx.discordUserId)
+          .maybeSingle();
+        if (!driver) {
+          return {
+            content:
+              "I can't find a driver record for you, so I can't match these to a signup. " +
+              "Ask a league owner to run `/members-sync`.",
+          };
+        }
+
+        // Which league(s)? In a server it's that league; in a DM, every league
+        // the driver belongs to.
+        let leagueIds: string[];
+        if (ctx.leagueId) {
+          leagueIds = [ctx.leagueId];
+        } else {
+          const { data: memberships, error: membershipError } = await supabase
+            .schema("pitboss")
+            .from("driver_leagues")
+            .select("league_id")
+            .eq("driver_id", driver.id);
+          if (membershipError) {
+            console.error("[signup_photos] membership lookup failed:", membershipError);
+            return { content: "Couldn't work out which league this is for — try again in a moment." };
+          }
+          leagueIds = Array.from(
+            new Set((memberships ?? []).map((m) => m.league_id as string))
+          );
+        }
+        if (leagueIds.length === 0) {
+          return { content: "You're not in any league yet, so there's no signup to attach these to." };
+        }
+
+        const { data: openRounds, error: roundsError } = await supabase
+          .schema("pitboss")
+          .from("signup_rounds")
+          .select("id, name, league_id")
+          .in("league_id", leagueIds)
+          .eq("status", "open");
+        if (roundsError) {
+          console.error("[signup_photos] round lookup failed:", roundsError);
+          return { content: "Couldn't look up the open signup — try again in a moment." };
+        }
+        if (!openRounds || openRounds.length === 0) {
+          return { content: "There's no signup open right now." };
+        }
+
+        // Only drivers who have tapped Sign Up. Checked across every round of
+        // the season, so someone who signed up in an earlier round still counts.
+        const signedUpRounds: { id: string; name: string }[] = [];
+        for (const round of openRounds) {
+          const roundIds = await seasonRoundIds(round.id);
+          const { data: rows } = await supabase
+            .schema("pitboss")
+            .from("league_signups")
+            .select("driver_id")
+            .eq("driver_id", driver.id)
+            .eq("status", "signed_up")
+            .in("round_id", roundIds)
+            .limit(1);
+          if (rows && rows.length > 0) signedUpRounds.push({ id: round.id, name: round.name });
+        }
+
+        if (signedUpRounds.length === 0) {
+          return {
+            content:
+              "I don't see a signup from you yet. Tap **Sign Up** on your invite first, " +
+              "then send the screenshots again.",
+          };
+        }
+        if (signedUpRounds.length > 1) {
+          return {
+            content:
+              "You have signups open in more than one league, so run `/signup photos` " +
+              "in the league's server instead of a DM.",
+          };
+        }
+        const round = signedUpRounds[0];
+
+        const photos: DownloadedPhoto[] = [];
+        for (let i = 0; i < attachments.length; i++) {
+          const result = await downloadPhoto(attachments[i], i + 1);
+          if ("error" in result) return { content: `${result.error} Nothing was posted.` };
+          photos.push(result);
+        }
+
+        const name = driver.display_name || driver.discord_username || "A driver";
+        const content =
+          `📸 **${name}** (<@${ctx.discordUserId}>) sent ${photos.length} ` +
+          `signup screenshot${photos.length === 1 ? "" : "s"} for **${round.name}**.`;
+
+        const posted = await postSignupPhotos(SIGNUP_CHANNEL_ID, content, photos);
+        if (!posted) {
+          return {
+            content:
+              "I couldn't post your screenshots to the signup channel. " +
+              "Tell a league owner — nothing was sent.",
+          };
+        }
+
+        return {
+          content:
+            `Sent ${photos.length} screenshot${photos.length === 1 ? "" : "s"} to the ` +
+            `signup channel for **${round.name}**. You're all set.`,
+        };
+      },
+    };
+  },
+  { leagueOptional: true }
+);
