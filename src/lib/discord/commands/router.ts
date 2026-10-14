@@ -56,8 +56,8 @@ export async function routeCommand(interaction: any) {
 
   // A guildId is required to resolve a league at all — DMs have none.
   // Commands that can't function without a league still hard-fail here;
-  // commands registered with { leagueOptional: true } (e.g. steward_respond)
-  // are allowed through with league === null.
+  // commands registered with { leagueOptional: true } (e.g. steward_respond,
+  // timetrial_submit) are allowed through with league === null.
   const league = guildId ? await resolveLeagueFromGuild(guildId) : null;
   if (!league && !isLeagueOptional(commandKey)) {
     return respond(
@@ -274,8 +274,12 @@ import "./results";
 // Side-effect import: registers the exam and cert commands.
 import "./cert";
 // Side-effect import: registers the signups_* commands (open, resume,
-// status, list, close).
+// status, list, close, test).
 import "./signups";
+// Side-effect import: registers the timetrial_* commands (submit,
+// leaderboard). timetrial_submit must be registered with
+// { leagueOptional: true } so it works from DMs.
+import "./timetrial";
 // Side-effect import: registers the members-sync command (syncs Discord
 // server members into pitboss.drivers / driver_leagues).
 import "./members-sync";
