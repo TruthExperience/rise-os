@@ -7,7 +7,7 @@ import { getLeagueMembership, hasAnyFlag } from "../permissions";
 //   /roles map   role:@X flag:...   link a Discord role to a flag
 //   /roles unmap role:@X [flag]     remove a link (all flags for the role if omitted)
 //   /roles list                     show the current mapping
-//   /roles sync  [apply]            mirror Discord roles onto pitboss.driver_leagues
+//   /roles sync  [apply]            mirror the Discord server onto pitboss.driver_leagues
 //
 // Dispatch keys: roles_map / roles_unmap / roles_list / roles_sync.
 //
@@ -16,30 +16,41 @@ import { getLeagueMembership, hasAnyFlag } from "../permissions";
 //     command in a guild, BEFORE the permission check. It reads the roles
 //     Discord already put on the interaction and fixes that one member's
 //     flags, so a new or removed role takes effect the next time they use
-//     the bot.
+//     the bot. (Flags only; the role snapshot refreshes on the bulk sync.)
 //  2. syncLeagueRoles() — called by /api/cron/roles-sync on a schedule to
 //     mirror every member, so people who haven't used the bot (and the web
 //     app) stay correct too.
 //
-// Sync rules:
+// Bulk sync rules (syncLeagueRoles):
+//  - EVERY Discord role a member holds is snapshotted into
+//    pitboss.driver_leagues.discord_roles as [{id, name}] (@everyone
+//    excluded). Informational only; permissions come from the is_* flags.
+//  - Every non-bot server member who isn't in the league yet is added (a
+//    pitboss.drivers row is created if they have none).
 //  - Only flags that have at least one mapping are managed. Flags with no
 //    mapping are never touched.
 //  - For a managed flag, a member gets it if they hold ANY role mapped to it,
 //    and loses it if they hold none (so removing a role removes the flag).
 //  - is_owner is never mappable and never changed by a sync.
-//  - Members who are in PitBoss but no longer in the Discord server are left
-//    alone by the bulk sync.
+//  - Members who are in PitBoss but no longer in the server (left OR banned)
+//    are only DELETED when the caller passes { removeLeavers: true } (the
+//    /roles sync apply:true path). The scheduled sync never deletes; it just
+//    reports them. Deleting removes the driver_leagues row (flags + role
+//    snapshot). The pitboss.drivers row and all history are kept. Owners,
+//    co-owners and commissioners are never deleted, only reported.
 //  - /roles sync defaults to a preview; pass apply:true to write changes.
-//    The scheduled and per-command syncs always apply.
+//    The scheduled and per-command syncs always apply (without deleting).
 //
 // Tables: pitboss.league_role_map (league_id, discord_role_id, flag),
-//         pitboss.driver_leagues (the flags).
+//         pitboss.driver_leagues (flags + discord_roles),
+//         pitboss.drivers (created for members PitBoss has never seen).
 //
 // Who can run /roles: owner / co-owner / commissioner, or a Discord
 // Administrator (so a brand-new league's owner can bootstrap it).
 
 const DISCORD_API = "https://discord.com/api/v10";
 const ADMINISTRATOR = BigInt(1) << BigInt(3);
+const DISCORD_MAX = 2000;
 
 const MANAGER_FLAGS = ["is_owner", "is_co_owner", "is_commissioner"] as const;
 
@@ -64,6 +75,11 @@ const FLAG_LABEL: Record<MappableFlag, string> = {
   is_driver: "Driver",
 };
 
+interface StoredRole {
+  id: string;
+  name: string;
+}
+
 function db() {
   // Untyped on purpose: flag columns are written by computed key.
   return (createAdminClient() as any).schema("pitboss");
@@ -71,6 +87,12 @@ function db() {
 
 function isMappableFlag(value: unknown): value is MappableFlag {
   return typeof value === "string" && (MAPPABLE_FLAGS as readonly string[]).includes(value);
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 async function requireManager(ctx: {
@@ -246,15 +268,25 @@ export async function syncMemberRoles(
 
 // ─── Bulk sync: whole league ────────────────────────────────────────────
 
-async function fetchGuildRoles(
+function botHeaders() {
+  return { Authorization: `Bot ${process.env.PITBOSS_DISCORD_BOT_TOKEN}` };
+}
+
+interface GuildMember {
+  roles: string[];
+  username: string;
+  displayName: string;
+}
+
+async function fetchGuildMembers(
   guildId: string
-): Promise<{ ok: true; members: Map<string, string[]> } | { ok: false; error: string }> {
-  const members = new Map<string, string[]>();
+): Promise<{ ok: true; members: Map<string, GuildMember> } | { ok: false; error: string }> {
+  const members = new Map<string, GuildMember>();
   let after = "0";
 
   for (let page = 0; page < 50; page++) {
     const res = await fetch(`${DISCORD_API}/guilds/${guildId}/members?limit=1000&after=${after}`, {
-      headers: { Authorization: `Bot ${process.env.PITBOSS_DISCORD_BOT_TOKEN}` },
+      headers: botHeaders(),
     });
     if (!res.ok) {
       return {
@@ -267,13 +299,19 @@ async function fetchGuildRoles(
     }
 
     const batch = (await res.json()) as {
-      user?: { id: string; bot?: boolean };
+      user?: { id: string; username?: string; global_name?: string | null; bot?: boolean };
+      nick?: string | null;
       roles?: string[];
     }[];
 
     for (const m of batch) {
       if (!m.user || m.user.bot) continue;
-      members.set(m.user.id, m.roles ?? []);
+      const username = m.user.username ?? m.user.id;
+      members.set(m.user.id, {
+        roles: m.roles ?? [],
+        username,
+        displayName: m.nick || m.user.global_name || username,
+      });
     }
 
     if (batch.length < 1000) return { ok: true, members };
@@ -283,9 +321,39 @@ async function fetchGuildRoles(
   return { ok: false, error: "The server has too many members to sync in one pass." };
 }
 
+// id -> name for every role in the server (@everyone shares the guild id).
+async function fetchRoleNames(
+  guildId: string
+): Promise<{ ok: true; names: Map<string, string> } | { ok: false; error: string }> {
+  const res = await fetch(`${DISCORD_API}/guilds/${guildId}/roles`, { headers: botHeaders() });
+  if (!res.ok) {
+    return { ok: false, error: `Discord returned HTTP ${res.status} when reading the server's roles.` };
+  }
+  const roles = (await res.json()) as { id: string; name: string }[];
+  const names = new Map<string, string>();
+  for (const r of roles) names.set(r.id, r.name);
+  return { ok: true, names };
+}
+
+function normaliseStored(value: unknown): StoredRole[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((r): r is StoredRole => !!r && typeof (r as StoredRole).id === "string")
+    .map((r) => ({ id: r.id, name: typeof r.name === "string" ? r.name : "" }));
+}
+
+function sameRoles(a: StoredRole[], b: StoredRole[]): boolean {
+  if (a.length !== b.length) return false;
+  const key = (r: StoredRole) => `${r.id}:${r.name}`;
+  const sa = a.map(key).sort();
+  const sb = b.map(key).sort();
+  return sa.every((v, i) => v === sb[i]);
+}
+
 interface MemberRow {
   id: string;
   driver_id: string;
+  discord_roles: unknown;
   drivers:
     | { discord_id: string | null; display_name: string | null; discord_username: string | null }
     | { discord_id: string | null; display_name: string | null; discord_username: string | null }[]
@@ -296,47 +364,72 @@ interface MemberRow {
 export interface LeagueSyncChange {
   id: string;
   name: string;
-  patch: Record<string, boolean>;
+  patch: Record<string, unknown>;
   notes: string[];
+}
+
+export interface LeagueSyncOptions {
+  /** Delete the league membership of people who left or were banned. Default false. */
+  removeLeavers?: boolean;
 }
 
 export type LeagueSyncResult =
   | { ok: false; error: string }
   | {
       ok: true;
+      /** Existing members whose flags and/or role snapshot changed. */
       changes: LeagueSyncChange[];
+      /** Display names of server members not yet in the league (added when apply). */
+      additions: string[];
+      /** Display names of members who left or were banned (deleted only with removeLeavers + apply). */
+      removals: string[];
+      /** Owners/co-owners/commissioners who are out of the server; never deleted. */
+      keptStaff: string[];
       summary: string[];
       footer: string[];
+      /** Existing members successfully updated. */
       applied: number;
+      /** Members added to the league. */
+      added: number;
+      /** Memberships deleted. */
+      removed: number;
       failed: number;
     };
 
 /**
- * Mirrors Discord roles onto driver_leagues flags for one league. With
- * apply=false nothing is written and `applied` is 0.
+ * Mirrors the Discord server onto the league. With apply=false nothing is
+ * written. Deletion of people who left only happens when apply AND
+ * options.removeLeavers are both true.
  */
 export async function syncLeagueRoles(
   leagueId: string,
   guildId: string,
-  apply: boolean
+  apply: boolean,
+  options: LeagueSyncOptions = {}
 ): Promise<LeagueSyncResult> {
-  const mappings = await loadMappings(leagueId);
-  if (mappings.length === 0) {
-    return { ok: false, error: "No roles are mapped yet. Use `/roles map` first." };
-  }
+  const removeLeavers = options.removeLeavers === true;
 
+  const mappings = await loadMappings(leagueId);
   const managed = MAPPABLE_FLAGS.filter((f) => mappings.some((m) => m.flag === f));
   const rolesForFlag = (flag: MappableFlag) =>
     mappings.filter((m) => m.flag === flag).map((m) => m.discord_role_id);
 
-  const fetched = await fetchGuildRoles(guildId);
+  const fetched = await fetchGuildMembers(guildId);
   if (!fetched.ok) return { ok: false, error: fetched.error };
   const guildMembers = fetched.members;
+
+  // An empty member list means the fetch is wrong, not that everyone left.
+  if (guildMembers.size === 0) {
+    return { ok: false, error: "Discord returned no members, so nothing was changed." };
+  }
+
+  const roleNames = await fetchRoleNames(guildId);
+  if (!roleNames.ok) return { ok: false, error: roleNames.error };
 
   const { data, error } = await db()
     .from("driver_leagues")
     .select(
-      `id, driver_id, ${MAPPABLE_FLAGS.join(", ")}, drivers:driver_id(discord_id, display_name, discord_username)`
+      `id, driver_id, discord_roles, is_owner, ${MAPPABLE_FLAGS.join(", ")}, drivers:driver_id(discord_id, display_name, discord_username)`
     )
     .eq("league_id", leagueId)
     .range(0, 4999);
@@ -347,10 +440,19 @@ export async function syncLeagueRoles(
 
   const rows = (data ?? []) as MemberRow[];
 
+  const rolesSnapshot = (roleIds: string[]): StoredRole[] =>
+    roleIds
+      .filter((id) => id !== guildId)
+      .map((id) => ({ id, name: roleNames.names.get(id) ?? "" }));
+
   const changes: LeagueSyncChange[] = [];
+  const removals: { id: string; name: string }[] = [];
+  const keptStaff: string[] = [];
+  const additions: { discordId: string; member: GuildMember }[] = [];
+
   const granted: Record<string, number> = {};
-  const removed: Record<string, number> = {};
-  let notInServer = 0;
+  const removedFlag: Record<string, number> = {};
+  let roleListsUpdated = 0;
   const knownDiscordIds = new Set<string>();
 
   for (const row of rows) {
@@ -359,57 +461,68 @@ export async function syncLeagueRoles(
     if (!discordId) continue;
     knownDiscordIds.add(discordId);
 
-    const roles = guildMembers.get(discordId);
-    if (!roles) {
-      notInServer++;
+    const name = d?.display_name || d?.discord_username || discordId;
+    const member = guildMembers.get(discordId);
+
+    // Left or banned. Staff are never deleted, only reported.
+    if (!member) {
+      const protectedRow = MANAGER_FLAGS.some((f) => row[f] === true);
+      if (protectedRow) keptStaff.push(name);
+      else removals.push({ id: row.id, name });
       continue;
     }
 
-    const patch: Record<string, boolean> = {};
+    const patch: Record<string, unknown> = {};
     const notes: string[] = [];
+
     for (const flag of managed) {
-      const want = rolesForFlag(flag).some((r) => roles.includes(r));
+      const want = rolesForFlag(flag).some((r) => member.roles.includes(r));
       const have = row[flag] === true;
       if (want !== have) {
         patch[flag] = want;
         notes.push(`${want ? "+" : "−"}${FLAG_LABEL[flag]}`);
         if (want) granted[flag] = (granted[flag] ?? 0) + 1;
-        else removed[flag] = (removed[flag] ?? 0) + 1;
+        else removedFlag[flag] = (removedFlag[flag] ?? 0) + 1;
       }
     }
 
-    if (notes.length > 0) {
-      changes.push({
-        id: row.id,
-        name: d?.display_name || d?.discord_username || discordId,
-        patch,
-        notes,
-      });
+    const current = rolesSnapshot(member.roles);
+    if (!sameRoles(current, normaliseStored(row.discord_roles))) {
+      patch.discord_roles = current;
+      roleListsUpdated++;
+      notes.push(`roles (${current.length})`);
     }
+
+    if (notes.length > 0) changes.push({ id: row.id, name, patch, notes });
   }
 
-  let missingFromPitboss = 0;
-  guildMembers.forEach((_roles, discordId) => {
-    if (!knownDiscordIds.has(discordId)) missingFromPitboss++;
+  // Everyone in the server who isn't in this league yet.
+  guildMembers.forEach((member, discordId) => {
+    if (!knownDiscordIds.has(discordId)) additions.push({ discordId, member });
   });
 
   const summary = managed.map(
-    (flag) => `${FLAG_LABEL[flag]}: +${granted[flag] ?? 0} / −${removed[flag] ?? 0}`
+    (flag) => `${FLAG_LABEL[flag]}: +${granted[flag] ?? 0} / −${removedFlag[flag] ?? 0}`
   );
-
-  const footer: string[] = [];
-  if (notInServer > 0) footer.push(`${notInServer} in PitBoss but not in the server (left alone).`);
-  if (missingFromPitboss > 0) {
-    footer.push(`${missingFromPitboss} server members aren't in this league yet — run \`/members-sync\`.`);
+  summary.push(`Role lists updated: ${roleListsUpdated}`);
+  summary.push(`Added to league: ${additions.length}`);
+  summary.push(
+    `${removeLeavers && apply ? "Removed" : "Would remove"} (left or banned): ${removals.length}`
+  );
+  if (managed.length === 0) {
+    summary.push("No roles are mapped to permissions yet, so flags were not touched.");
   }
 
-  let failed = 0;
   let applied = 0;
+  let added = 0;
+  let removed = 0;
+  let failed = 0;
+
   if (apply) {
-    for (let i = 0; i < changes.length; i += 10) {
-      const chunk = changes.slice(i, i + 10);
+    // 1. Flag and role-snapshot updates for existing members.
+    for (const group of chunk(changes, 10)) {
       const results = await Promise.all(
-        chunk.map((c) => db().from("driver_leagues").update(c.patch).eq("id", c.id))
+        group.map((c) => db().from("driver_leagues").update(c.patch).eq("id", c.id))
       );
       for (const r of results) {
         if (r.error) {
@@ -420,9 +533,124 @@ export async function syncLeagueRoles(
         }
       }
     }
+
+    // 2. Add server members who aren't in the league: reuse an existing
+    //    drivers row, otherwise create one.
+    if (additions.length > 0) {
+      const driverIdByDiscord = new Map<string, string>();
+
+      for (const group of chunk(additions, 100)) {
+        const { data: found, error: findError } = await db()
+          .from("drivers")
+          .select("id, discord_id")
+          .in(
+            "discord_id",
+            group.map((a) => a.discordId)
+          );
+        if (findError) {
+          console.error("[roles] driver lookup failed:", findError);
+          continue;
+        }
+        for (const d of (found ?? []) as { id: string; discord_id: string }[]) {
+          driverIdByDiscord.set(d.discord_id, d.id);
+        }
+      }
+
+      const missing = additions.filter((a) => !driverIdByDiscord.has(a.discordId));
+      for (const group of chunk(missing, 100)) {
+        const { data: created, error: createError } = await db()
+          .from("drivers")
+          .insert(
+            group.map((a) => ({
+              discord_id: a.discordId,
+              discord_username: a.member.username,
+              display_name: a.member.displayName,
+            }))
+          )
+          .select("id, discord_id");
+        if (createError) {
+          failed += group.length;
+          console.error("[roles] driver create failed:", createError);
+          continue;
+        }
+        for (const d of (created ?? []) as { id: string; discord_id: string }[]) {
+          driverIdByDiscord.set(d.discord_id, d.id);
+        }
+      }
+
+      const membershipRows = additions
+        .filter((a) => driverIdByDiscord.has(a.discordId))
+        .map((a) => {
+          const row: Record<string, unknown> = {
+            driver_id: driverIdByDiscord.get(a.discordId),
+            league_id: leagueId,
+            discord_roles: rolesSnapshot(a.member.roles),
+          };
+          for (const flag of managed) {
+            row[flag] = rolesForFlag(flag).some((r) => a.member.roles.includes(r));
+          }
+          return row;
+        });
+
+      for (const group of chunk(membershipRows, 100)) {
+        const { error: insError } = await db()
+          .from("driver_leagues")
+          .upsert(group, { onConflict: "driver_id,league_id", ignoreDuplicates: true });
+        if (insError) {
+          failed += group.length;
+          console.error("[roles] membership insert failed:", insError);
+        } else {
+          added += group.length;
+        }
+      }
+    }
+
+    // 3. Remove people who left or were banned (membership row only; the
+    //    drivers row and all history are kept). Only when explicitly asked.
+    if (removeLeavers && removals.length > 0) {
+      for (const group of chunk(removals, 100)) {
+        const { error: delError } = await db()
+          .from("driver_leagues")
+          .delete()
+          .in(
+            "id",
+            group.map((g) => g.id)
+          );
+        if (delError) {
+          failed += group.length;
+          console.error("[roles] membership delete failed:", delError);
+        } else {
+          removed += group.length;
+        }
+      }
+    }
   }
 
-  return { ok: true, changes, summary, footer, applied, failed };
+  const footer: string[] = [];
+  if (keptStaff.length > 0) {
+    footer.push(
+      `Not in the server but kept because they're owner/co-owner/commissioner: ${keptStaff.join(", ")}.`
+    );
+  }
+  if (removals.length > 0 && !(removeLeavers && apply)) {
+    footer.push(
+      `${removals.length} member(s) left or were banned. Run \`/roles sync apply:true\` to remove them from the league.`
+    );
+  }
+
+  return {
+    ok: true,
+    changes,
+    additions: additions.map((a) => a.member.displayName),
+    removals: removals.map((r) => r.name),
+    keptStaff,
+    summary,
+    footer,
+    applied,
+    added,
+    removed,
+    failed,
+  };
 }
 
 registerCommand("roles_sync", async (ctx) => {
@@ -439,45 +667,65 @@ registerCommand("roles_sync", async (ctx) => {
     defer: true,
     ephemeral: true,
     background: async () => {
-      const result = await syncLeagueRoles(leagueId, guildId, apply);
+      // The command is the one place deletion is allowed, and only with apply.
+      const result = await syncLeagueRoles(leagueId, guildId, apply, { removeLeavers: apply });
       if (!result.ok) return { content: result.error };
 
-      const { changes, summary, footer, applied, failed } = result;
+      const { changes, additions, removals, summary, footer, applied, added, removed, failed } = result;
 
-      if (changes.length === 0) {
+      const total = changes.length + additions.length + removals.length;
+      if (total === 0) {
         return {
-          content: ["Flags already match Discord roles. Nothing to change.", ...footer].join("\n"),
+          content: ["The league already matches the server. Nothing to change.", ...footer]
+            .join("\n")
+            .slice(0, DISCORD_MAX),
         };
       }
 
-      const sample = changes
-        .slice(0, 12)
-        .map((c) => `• ${c.name}: ${c.notes.join(", ")}`)
-        .join("\n");
-      const more = changes.length > 12 ? `\n…and ${changes.length - 12} more.` : "";
+      const list = (label: string, items: string[]) =>
+        items.length === 0
+          ? ""
+          : `**${label}**\n` +
+            items.slice(0, 8).map((s) => `• ${s}`).join("\n") +
+            (items.length > 8 ? `\n…and ${items.length - 8} more.` : "");
+
+      const sections = [
+        list("Updated", changes.map((c) => `${c.name}: ${c.notes.join(", ")}`)),
+        list("Added", additions),
+        list("Removed", removals),
+      ].filter(Boolean);
+
+      const truncate = (text: string) =>
+        text.length > DISCORD_MAX ? text.slice(0, DISCORD_MAX - 1) + "…" : text;
 
       if (!apply) {
         return {
-          content: [
-            `**Preview** — ${changes.length} member(s) would change. Nothing written.`,
-            summary.join("\n"),
-            "",
-            sample + more,
-            "",
-            "Run `/roles sync apply:true` to apply now. Otherwise this happens automatically.",
-            ...footer,
-          ].join("\n"),
+          content: truncate(
+            [
+              `**Preview** — ${total} change(s). Nothing written.`,
+              summary.join("\n"),
+              "",
+              sections.join("\n\n"),
+              "",
+              "Run `/roles sync apply:true` to apply (this also removes people who left or were banned).",
+              ...footer,
+            ].join("\n")
+          ),
         };
       }
 
       return {
-        content: [
-          `**Synced** — updated ${applied} member(s)${failed ? `, ${failed} failed (run it again)` : ""}.`,
-          summary.join("\n"),
-          "",
-          sample + more,
-          ...footer,
-        ].join("\n"),
+        content: truncate(
+          [
+            `**Synced** — ${applied} updated, ${added} added, ${removed} removed${
+              failed ? `, ${failed} failed (run it again)` : ""
+            }.`,
+            summary.join("\n"),
+            "",
+            sections.join("\n\n"),
+            ...footer,
+          ].join("\n")
+        ),
       };
     },
   };
