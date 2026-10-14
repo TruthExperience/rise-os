@@ -21,8 +21,10 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
  *   - "checkin_btn:<postId>:<status>" -> handleCheckinButton
  *   - "appeal_prompt:<yes|no>:<incidentId>" -> handleAppealPrompt
  *   - "signup:<roundId>:<yes|no>" -> handleSignup (season signup DMs)
- *   - "signuptest:<seasonNumber>:<yes|no>" -> handleSignup (test invites
- *     from /signups test; handled without any DB writes)
+ *   - "signuptest:<leagueId>:<seasonNumber>:<yes|no>:<1|0>" -> handleSignup
+ *     (test invites from /signups test; handled without any DB writes)
+ *   - "signupteam:<roundId>:<rank>:<teamId|none>" -> handleSignup (team
+ *     requests after a driver signs up)
  * Anything else falls through to a generic "not wired up" reply so
  * unknown components fail loudly instead of silently.
  */
@@ -37,7 +39,11 @@ export async function routeComponent(interaction: any) {
     return handleAppealPrompt(interaction, customId);
   }
 
-  if (customId.startsWith("signup:") || customId.startsWith("signuptest:")) {
+  if (
+    customId.startsWith("signup:") ||
+    customId.startsWith("signuptest:") ||
+    customId.startsWith("signupteam:")
+  ) {
     return handleSignup(interaction, customId);
   }
 
@@ -49,8 +55,9 @@ export async function routeComponent(interaction: any) {
 
 /**
  * Handles the Sign Up / No Thanks buttons on the season signup DMs sent
- * by sendPendingDms in src/lib/discord-signups.ts, and on the test invites
- * sent by sendTestSignup (custom_id prefix "signuptest:"). These clicks
+ * by sendPendingDms in src/lib/discord-signups.ts, the team request
+ * buttons that follow a Sign Up (custom_id prefix "signupteam:"), and the
+ * test invites sent by sendTestSignup (prefix "signuptest:"). These clicks
  * happen in a DM, so there is no guild/member — Discord puts the clicker
  * on interaction.user, which is why the id lookup falls back to it.
  *
