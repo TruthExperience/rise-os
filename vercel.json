@@ -15,6 +15,9 @@
     "src/app/api/cron/hbcu-rosters/route.ts": {
       "maxDuration": 300
     },
+    "src/app/api/cron/roles-sync/route.ts": {
+      "maxDuration": 60
+    },
     "src/app/api/pitboss/telemetry/coach/backfill/route.ts": {
       "maxDuration": 300
     }
@@ -23,6 +26,10 @@
     {
       "path": "/api/cron/ea-ratings-all",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/roles-sync",
+      "schedule": "0 8 * * *"
     },
     {
       "path": "/api/cron/cfb-irl-records",
