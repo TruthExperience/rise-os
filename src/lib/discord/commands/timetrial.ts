@@ -22,6 +22,35 @@ const BUCKET = "time-trials";
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25 MB
 const ALLOWED_TYPE = /^(image\/(png|jpe?g|webp|gif)|video\/(mp4|quicktime|webm))$/i;
 
+// Only fetch attachments from Discord's own CDN.
+const ALLOWED_FETCH_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
+
+// Discord normally sends a content type with each attachment, but it's
+// optional in our resolved shape — fall back to the file extension so a
+// missing one doesn't reject a perfectly good screenshot.
+function guessContentType(filename: string | undefined): string | undefined {
+  const ext = filename?.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    case "mp4":
+      return "video/mp4";
+    case "mov":
+      return "video/quicktime";
+    case "webm":
+      return "video/webm";
+    default:
+      return undefined;
+  }
+}
+
 // "1:23.456" -> 83456, "83.456" -> 83456, "1:23" -> 83000.
 function parseLapTime(raw: string): number | null {
   const s = raw.trim();
@@ -108,9 +137,20 @@ async function copyToStorage(params: {
   filename?: string;
   contentType?: string;
 }): Promise<{ path: string; contentType: string } | { error: string }> {
-  const contentType = params.contentType ?? "application/octet-stream";
+  const contentType =
+    params.contentType ?? guessContentType(params.filename) ?? "application/octet-stream";
   if (!ALLOWED_TYPE.test(contentType)) {
     return { error: "Attach a screenshot (png/jpg/webp) or a video clip (mp4/mov/webm)." };
+  }
+
+  let host: string;
+  try {
+    host = new URL(params.url).hostname;
+  } catch {
+    return { error: "Couldn't read your attachment." };
+  }
+  if (!ALLOWED_FETCH_HOSTS.has(host)) {
+    return { error: "Attachments can only be copied from Discord." };
   }
 
   let res: Response;
@@ -121,6 +161,13 @@ async function copyToStorage(params: {
     return { error: "Couldn't download your attachment from Discord." };
   }
   if (!res.ok) return { error: "Couldn't download your attachment from Discord." };
+
+  // Reject oversized files before pulling them into memory when Discord
+  // tells us the size up front.
+  const declaredLength = Number(res.headers.get("content-length") ?? 0);
+  if (declaredLength > MAX_FILE_BYTES) {
+    return { error: "That file is over 25 MB — attach a smaller clip or a screenshot." };
+  }
 
   const bytes = new Uint8Array(await res.arrayBuffer());
   if (bytes.byteLength > MAX_FILE_BYTES) {
@@ -257,10 +304,15 @@ registerCommand("timetrial_leaderboard", async (ctx) => {
   if (!track) return { content: "`track` is required.", ephemeral: true };
 
   const supabase = createAdminClient();
+  // time_trials has TWO foreign keys to pitboss.drivers (driver_id and
+  // verified_by), so a bare `drivers(...)` embed is ambiguous and PostgREST
+  // rejects it. Name the driver_id relationship explicitly.
   const { data, error } = await supabase
     .schema("pitboss")
     .from("time_trials")
-    .select("lap_time_ms, car_class, verified, drivers(discord_id)")
+    .select(
+      "lap_time_ms, car_class, verified, drivers!time_trials_driver_id_fkey(discord_id)"
+    )
     .eq("league_id", leagueId)
     .eq("track_key", trackKey(track))
     .order("lap_time_ms", { ascending: true })
