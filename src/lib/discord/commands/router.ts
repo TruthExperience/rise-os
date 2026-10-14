@@ -9,6 +9,7 @@ import {
   type ResolvedDiscordAttachment,
   type DeferredResponseFile,
 } from "./registry";
+import { syncMemberRoles } from "./roles";
 
 registerCommand("ping", async () => ({
   content: "Pong. AARL/TRL/WSC/SRH bot is alive.",
@@ -63,6 +64,13 @@ export async function routeCommand(interaction: any) {
       "This Discord server isn't linked to a PitBoss league yet. Ask an admin to set `discord_server_id` on the league record.",
       true
     );
+  }
+
+  // Keep this member's permission flags in step with their Discord roles
+  // (per the league's /roles mappings) BEFORE the handler runs its own
+  // permission check. Never throws; a failure here can't block the command.
+  if (league && guildId) {
+    await syncMemberRoles(league.id, discordUserId, memberRoles);
   }
 
   const options: Record<string, unknown> = {};
@@ -266,14 +274,13 @@ import "./results";
 // Side-effect import: registers the exam and cert commands.
 import "./cert";
 // Side-effect import: registers the signups_* commands (open, resume,
-// status, list, close, test).
+// status, list, close).
 import "./signups";
-
 // Side-effect import: registers the members-sync command (syncs Discord
 // server members into pitboss.drivers / driver_leagues).
 import "./members-sync";
 // Side-effect import: registers the calendar_* commands plus set-result,
 // import-results and set-standings (owner season administration).
 import "./season-admin";
-// Side-effect import: registers the roles_* commands.
-import "./roles";
+// roles_* commands (map, unmap, list, sync) are registered by the named
+// import of syncMemberRoles at the top of this file.
