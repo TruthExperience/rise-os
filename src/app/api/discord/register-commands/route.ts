@@ -1,7 +1,7 @@
 // src/app/api/discord/register-commands/route.ts
 //
 // Registers /setup, /signups (open, resume, status, list, close, invite,
-// test), /signup (photos) and /timetrial with Discord. POSTing a command with
+// tracks, test), /signup (photos) and /timetrial with Discord. POSTing a command with
 // an existing name overwrites it, so this contains EVERY option/subcommand of
 // each command, not just the new ones.
 //
@@ -94,7 +94,7 @@ const SETUP_COMMAND = {
   ],
 };
 
-// Option types: 1 = SUB_COMMAND, 3 = STRING, 4 = INTEGER, 6 = USER
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 4 = INTEGER, 5 = BOOLEAN, 6 = USER
 const SIGNUPS_COMMAND = {
   name: "signups",
   description: "Manage season signups (owners only)",
@@ -169,6 +169,25 @@ const SIGNUPS_COMMAND = {
           name: "user",
           description: "Racer to invite",
           required: true,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "tracks",
+      description: "Request time trial pictures on the open round (nobody is re-invited)",
+      options: [
+        {
+          type: 3,
+          name: "tracks",
+          description: "Up to 3 tracks, separated by commas",
+          required: true,
+        },
+        {
+          type: 5,
+          name: "notify",
+          description: "Also DM drivers who already signed up (default: no)",
+          required: false,
         },
       ],
     },
