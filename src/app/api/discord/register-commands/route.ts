@@ -1,8 +1,9 @@
 // src/app/api/discord/register-commands/route.ts
 //
-// Registers /signups (open, resume, status, list, close, test) with Discord.
-// POSTing a command with an existing name overwrites it, so this contains
-// EVERY /signups subcommand, not just the new one.
+// Registers /signups (open, resume, status, list, close, test), /signup
+// (photos) and /timetrial with Discord. POSTing a command with an existing
+// name overwrites it, so this contains EVERY subcommand of each command, not
+// just the new ones.
 //
 // Two ways to call it after deploying:
 //   1. Browser / link:
@@ -14,7 +15,10 @@
 // Env: PITBOSS_DISCORD_BOT_TOKEN, DISCORD_APPLICATION_ID,
 //      REGISTER_COMMANDS_SECRET (any long random string, you choose it)
 //      DISCORD_GUILD_ID (optional: set to register in ONE server, e.g. VRC,
-//                        and it updates instantly. Omit for a global command.)
+//                        and it updates instantly. Omit for a global command.
+//                        A guild-scoped command does NOT show up in DMs with
+//                        the bot, so leave it unset for /signup photos and
+//                        /timetrial submit to work from a DM.)
 
 import { NextRequest, NextResponse } from "next/server";
 
@@ -40,6 +44,12 @@ const SIGNUPS_COMMAND = {
           type: 3,
           name: "message",
           description: "Custom DM text (optional)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "tracks",
+          description: "Up to 3 tracks drivers send pictures of, separated by commas (optional)",
           required: false,
         },
       ],
@@ -94,6 +104,47 @@ const SIGNUPS_COMMAND = {
           type: 4,
           name: "season",
           description: "Season number for the invite (default: 2)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "tracks",
+          description: "Up to 3 tracks to request pictures of, separated by commas (default: 3 random)",
+          required: false,
+        },
+      ],
+    },
+  ],
+};
+
+// Driver-facing. Same registration as /timetrial: no extra DM settings, so it
+// works in a DM with the bot as well as in a league server (global scope).
+// Option types: 1 = SUB_COMMAND, 11 = ATTACHMENT
+const SIGNUP_COMMAND = {
+  name: "signup",
+  description: "Signup tools for drivers",
+  options: [
+    {
+      type: 1,
+      name: "photos",
+      description: "Send your signup screenshots (works in DMs too)",
+      options: [
+        {
+          type: 11,
+          name: "screenshot_1",
+          description: "First screenshot",
+          required: true,
+        },
+        {
+          type: 11,
+          name: "screenshot_2",
+          description: "Second screenshot (optional)",
+          required: false,
+        },
+        {
+          type: 11,
+          name: "screenshot_3",
+          description: "Third screenshot (optional)",
           required: false,
         },
       ],
@@ -171,7 +222,7 @@ async function register(): Promise<NextResponse> {
     subcommands: string[];
   }[] = [];
 
-  for (const command of [SIGNUPS_COMMAND, TIMETRIAL_COMMAND]) {
+  for (const command of [SIGNUPS_COMMAND, SIGNUP_COMMAND, TIMETRIAL_COMMAND]) {
     const res = await fetch(url, {
       method: "POST",
       headers: {
