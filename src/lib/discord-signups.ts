@@ -3,6 +3,10 @@
 // round for a season, the bot DMs every league member with a Discord ID, and
 // members answer with Sign Up / No Thanks buttons. Results land in
 // pitboss.league_signups, tied to the season via pitboss.signup_rounds.season_id.
+//
+// Owners can also request pictures of specific tracks (time trial screenshots)
+// as part of signup. Drivers send them to the bot with /signup photos, from
+// the invite DM, and the bot posts them into the signup channel.
 
 import { supabaseAdmin } from '@/lib/supabase/admin'
 
@@ -43,6 +47,43 @@ async function discord(path: string, body: unknown, attempt = 0): Promise<any> {
     throw err
   }
   return json
+}
+
+// ---------------------------------------------------------------------------
+// Requested tracks (time trial pictures)
+// ---------------------------------------------------------------------------
+
+// /signup photos takes up to three images, so at most three tracks.
+export const MAX_REQUESTED_TRACKS = 3
+
+// The track-request block always starts with this phrase. It is how the bot
+// recognises, from a round's saved invite text, that pictures were requested
+// and which tracks (see requestedTracksFromMessage).
+const REQUEST_MARKER = 'As part of signups, please send a picture'
+
+function trackRequestBlock(tracks: string[]): string {
+  const subject = tracks.length === 1 ? 'this track' : 'each of these tracks'
+  return (
+    `${REQUEST_MARKER} of ${subject}. Once you've tapped **Sign Up**, send them ` +
+    `to me right here in this DM with \`/signup photos\` (attach up to ` +
+    `${MAX_REQUESTED_TRACKS} images) and I'll post them for the league:\n` +
+    tracks.map((t, i) => `${i + 1}. ${t}`).join('\n')
+  )
+}
+
+// Reads the requested tracks back out of a round's saved invite text. Returns
+// [] when the round didn't request any.
+export function requestedTracksFromMessage(
+  message: string | null | undefined
+): string[] {
+  if (!message) return []
+  const at = message.indexOf(REQUEST_MARKER)
+  if (at === -1) return []
+  return message
+    .slice(at)
+    .split('\n')
+    .map((line) => line.match(/^\d+\.\s+(.+)$/)?.[1]?.trim())
+    .filter((t): t is string => !!t)
 }
 
 // ---------------------------------------------------------------------------
@@ -90,8 +131,10 @@ export async function openSignupRound(params: {
   openedByDiscordId: string
   seasonId?: string // omit to use the league's latest "upcoming" season
   message?: string // optional custom DM text
+  tracks?: string[] // optional: tracks to request pictures of (max 3)
 }): Promise<OpenRoundResult> {
   const { leagueId, openedByDiscordId, seasonId, message } = params
+  const tracks = (params.tracks ?? []).slice(0, MAX_REQUESTED_TRACKS)
 
   if (!(await canOpenSignups(openedByDiscordId, leagueId))) {
     return { ok: false, error: 'Only league owners can open season signups.' }
@@ -139,13 +182,29 @@ export async function openSignupRound(params: {
     .eq('discord_id', openedByDiscordId)
     .maybeSingle()
 
+  // The invite text every member is DM'd. With requested tracks, the pictures
+  // block is added after the owner's custom text (or the default opener).
+  let inviteMessage: string | null = message?.trim() ? message.trim() : null
+  if (tracks.length > 0) {
+    const { data: leagueRow } = await db()
+      .from('leagues')
+      .select('name')
+      .eq('id', leagueId)
+      .maybeSingle()
+    const lead =
+      inviteMessage ??
+      `**${leagueRow?.name ?? 'the league'}: ${season.name}**\n` +
+        `Season signups are open. Do you want to race this season?`
+    inviteMessage = `${lead}\n\n${trackRequestBlock(tracks)}`
+  }
+
   const { data: round, error: roundErr } = await db()
     .from('signup_rounds')
     .insert({
       league_id: leagueId,
       season_id: season.id,
       name: season.name,
-      message: message ?? null,
+      message: inviteMessage,
       opened_by: opener?.id ?? null,
     })
     .select('id')
@@ -314,7 +373,8 @@ const SIGNUP_CHANNEL_ID =
   process.env.PITBOSS_SIGNUP_CHANNEL_ID ?? '1559261744470163556' // VRC #driver-signups
 
 // F1 25 base game + 2026 Season Pack (Madring). Three distinct circuits are
-// drawn per test invite. Circuits with a reverse layout get a 50/50 flip.
+// drawn per test invite when the owner doesn't name any. Circuits with a
+// reverse layout get a 50/50 flip.
 const TRACK_POOL: { name: string; hasReverse?: boolean }[] = [
   { name: 'Albert Park Circuit (Melbourne)' },
   { name: 'Shanghai International Circuit' },
@@ -359,6 +419,7 @@ export async function sendTestSignup(params: {
   openedByDiscordId: string
   targetDiscordId: string
   seasonNumber?: number // defaults to 2
+  tracks?: string[] // owner-chosen tracks; omit for 3 random ones
 }): Promise<{ ok: true; tracks: string[] } | { ok: false; error: string }> {
   const { leagueId, openedByDiscordId, targetDiscordId } = params
   const seasonNumber = params.seasonNumber ?? 2
@@ -381,16 +442,16 @@ export async function sendTestSignup(params: {
 
   const name = driver?.display_name || driver?.discord_username || 'driver'
   const leagueName = league?.name ?? 'the league'
-  const tracks = pickTracks(3)
+  const requested = (params.tracks ?? []).slice(0, MAX_REQUESTED_TRACKS)
+  const tracks = requested.length > 0 ? requested : pickTracks(3)
 
   const content =
     `**${leagueName}: Season ${seasonNumber} Driver Signup** *(test invite)*\n\n` +
     `Hi ${name}, we'd be delighted to have you on the grid for **Season ${seasonNumber}**. ` +
     `Your pace and sportsmanship have been a big part of what makes this league fun, ` +
     `and we'd love to see you back out there.\n\n` +
-    `If you're in, tap **Sign Up** below. As part of signups, please post a picture ` +
-    `of each of these three tracks in <#${SIGNUP_CHANNEL_ID}>:\n` +
-    tracks.map((t, i) => `${i + 1}. ${t}`).join('\n') +
+    `If you're in, tap **Sign Up** below. ` +
+    trackRequestBlock(tracks) +
     `\n\nNot this time? Tap **No Thanks**, no hard feelings. Thanks for racing with us!`
 
   try {
@@ -451,7 +512,10 @@ async function handleTestButton(
     type: 7,
     data: {
       content: signedUp
-        ? `Thanks! You're signed up for Season ${seasonNumber} *(test, nothing saved)*. Please post your 3 track pictures in <#${SIGNUP_CHANNEL_ID}>.`
+        ? `Thanks! You're signed up for Season ${seasonNumber} *(test, nothing saved)*. ` +
+          `Send your pictures right here in this DM with \`/signup photos\` ` +
+          `(attach up to ${MAX_REQUESTED_TRACKS} images). League owners can try that now, ` +
+          `and it will post to the signup channel marked as a test.`
         : `Got it, no problem *(test, nothing saved)*.`,
       components: [] as [],
     },
@@ -485,7 +549,7 @@ export async function handleSignupButton(
 
   const { data: round } = await db()
     .from('signup_rounds')
-    .select('id, name, status, leagues!inner(name)')
+    .select('id, name, status, message, leagues!inner(name)')
     .eq('id', roundId)
     .single()
   if (!round || round.status !== 'open') {
@@ -508,10 +572,23 @@ export async function handleSignupButton(
   if (error) return reply('Something went wrong saving your answer. Try again.')
 
   const leagueName = (round as any).leagues?.name ?? 'the league'
+  if (status !== 'signed_up') {
+    return reply(
+      `Got it, you are not signing up for **${leagueName}: ${round.name}**.`
+    )
+  }
+
+  // This reply replaces the invite, so repeat the requested tracks here.
+  const tracks = requestedTracksFromMessage((round as any).message)
+  const signedUp = `You are signed up for **${leagueName}: ${round.name}**.`
+  if (tracks.length === 0) return reply(signedUp)
+
   return reply(
-    status === 'signed_up'
-      ? `You are signed up for **${leagueName}: ${round.name}**.`
-      : `Got it, you are not signing up for **${leagueName}: ${round.name}**.`
+    `${signedUp}\n\n` +
+      `Next, send a picture of ${tracks.length === 1 ? 'this track' : 'each of these tracks'} ` +
+      `right here in this DM with \`/signup photos\` (attach up to ` +
+      `${MAX_REQUESTED_TRACKS} images):\n` +
+      tracks.map((t, i) => `${i + 1}. ${t}`).join('\n')
   )
 }
 
