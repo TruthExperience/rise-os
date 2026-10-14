@@ -8,6 +8,8 @@ import {
   signupSummary,
   seasonRoundIds,
   sendTestSignup,
+  sendIndividualInvite,
+  signupChannelId,
   parseTracks,
   leagueTeamOptions,
   requestedTracksFromMessage,
@@ -18,24 +20,30 @@ import {
 // (button clicks are handled by handleSignupButton in
 // src/lib/discord-signups.ts — see the wiring notes in the hand-off).
 //
-// Registered in Discord as ONE command, /signups, with six subcommands.
+// Registered in Discord as ONE command, /signups, with seven subcommands.
 // commands/index.ts builds the dispatch key "<command>_<subcommand>", so the
 // handlers below are keyed signups_open / signups_resume / signups_status /
-// signups_list / signups_close / signups_test (underscores — NOT hyphens, or
-// the router can't find them).
+// signups_list / signups_close / signups_invite / signups_test (underscores —
+// NOT hyphens, or the router can't find them).
 //
 //   /signups open    season (optional season number; defaults to the league's
 //                    latest "upcoming" season), message (optional custom DM
 //                    text), tracks (optional, up to 3 tracks to request
-//                    pictures of, separated by commas)
+//                    pictures of, separated by commas). Leave tracks off for
+//                    seasons that don't need time trial pictures (e.g. VRC
+//                    season 2); set it for seasons that do (season 3).
 //   /signups resume  continues sending queued DMs after a timeout
 //   /signups status  counts for the open round
 //   /signups list    names for the open round; show = signed_up (default) |
 //                    declined | pending | dm_failed | all
 //   /signups close   closes the open round
+//   /signups invite  user (required). Sends the open round's real signup
+//                    invite to ONE racer. Their answer is saved like any other
+//                    signup. Needs an open round.
 //   /signups test    user (required), season (optional, defaults to 2),
-//                    tracks (optional; omit for 3 random F1 25 tracks).
-//                    Sends ONE test invite DM.
+//                    tracks (optional: up to 3 tracks, or "random" for 3
+//                    random F1 25 tracks; omit for no pictures request).
+//                    Sends ONE test invite DM. Works in any league.
 //                    Writes nothing to signup_rounds / league_signups.
 //
 // Team requests: after a driver taps Sign Up, the bot offers team buttons
@@ -47,8 +55,15 @@ import {
 //
 //   /signup photos   screenshot_1 (required), screenshot_2, screenshot_3.
 //                    Works in a DM with the bot or in a league server. The bot
-//                    re-posts the images into the signup channel for the
-//                    drivers' signup. Key: signup_photos (leagueOptional).
+//                    re-posts the images into the league's signup channel
+//                    (pitboss.leagues.signup_channel_id). Key: signup_photos
+//                    (leagueOptional).
+//
+// Signup channel: each league has its own, stored in
+// pitboss.leagues.signup_channel_id. Test responses and screenshots are posted
+// there. A league with no channel set posts nothing to a channel (screenshots
+// are still saved). Set one with:
+//   update pitboss.leagues set signup_channel_id = '<channel id>' where slug = '<slug>';
 //
 // Tables: pitboss.signup_rounds (one open round per season),
 //         pitboss.league_signups (one row per member per round),
@@ -64,9 +79,6 @@ import {
 // Owners only (the /signups commands): is_owner / is_co_owner / is_commissioner.
 
 const OWNER_FLAGS = ["is_owner", "is_co_owner", "is_commissioner"] as const;
-
-// VRC #driver-signups (where test responses and signup screenshots are posted)
-const SIGNUP_CHANNEL_ID = process.env.PITBOSS_SIGNUP_CHANNEL_ID ?? "1559261744470163556";
 
 async function findOpenRound(leagueId: string) {
   const supabase = createAdminClient();
@@ -425,9 +437,53 @@ registerCommand("signups_close", async (ctx) => {
   };
 });
 
+// ─── /signups invite ─────────────────────────────────────────────────────
+// Invites ONE racer to the league's open round. Real invite: the answer is
+// saved to league_signups like any other signup. Uses the round's own invite
+// text, so track pictures are requested only if the round asked for them.
+
+registerCommand("signups_invite", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
+  if (!hasAnyFlag(membership, [...OWNER_FLAGS])) {
+    return { content: "Only league owners can send signup invites.", ephemeral: true };
+  }
+
+  const target = ctx.options.user as string | undefined;
+  if (!target) {
+    return { content: "Pick a racer to invite.", ephemeral: true };
+  }
+
+  return {
+    defer: true,
+    ephemeral: true,
+    background: async () => {
+      const res = await sendIndividualInvite({
+        leagueId,
+        invitedByDiscordId: ctx.discordUserId,
+        targetDiscordId: target,
+      });
+      if (!res.ok) return { content: `Invite failed: ${res.error}` };
+
+      const lines = [
+        `Invited **${res.driverName}** (<@${target}>) to **${res.roundName}**.`,
+        res.tracksRequested > 0
+          ? `Pictures requested: ${res.tracksRequested} track${res.tracksRequested === 1 ? "" : "s"}.`
+          : "No track pictures requested for this round.",
+        "Their answer is saved like any other signup. Check `/signups status` or `/signups list`.",
+      ];
+      return { content: lines.join("\n") };
+    },
+  };
+});
+
 // ─── /signups test ───────────────────────────────────────────────────────
 // Sends ONE test invite DM to the chosen user. No rows are written, so an
-// existing signup for that person is untouched.
+// existing signup for that person is untouched. Works in any league.
 
 registerCommand("signups_test", async (ctx) => {
   const leagueId = ctx.leagueId;
@@ -454,8 +510,11 @@ registerCommand("signups_test", async (ctx) => {
     return { content: "season must be a season number (e.g. 2).", ephemeral: true };
   }
 
-  // Optional owner-chosen tracks; omitted = 3 random ones.
-  const tracks = parseTracks(ctx.options.tracks as string | undefined);
+  // Optional track pictures, same as /signups open: a list of up to 3 tracks,
+  // or "random" for 3 random F1 25 tracks. Omitted = no pictures requested.
+  const tracksInput = (ctx.options.tracks as string | undefined)?.trim();
+  const randomTracks = tracksInput?.toLowerCase() === "random";
+  const tracks = randomTracks ? [] : parseTracks(tracksInput);
 
   return {
     defer: true,
@@ -467,14 +526,21 @@ registerCommand("signups_test", async (ctx) => {
         targetDiscordId: target,
         seasonNumber,
         tracks,
+        randomTracks,
       });
       if (!res.ok) return { content: `Test invite failed: ${res.error}` };
-      return {
-        content:
-          `Test invite for Season ${seasonNumber} sent to <@${target}>.\n` +
-          `Tracks requested: ${res.tracks.join(", ")}.\n` +
-          `Their button response will post in <#${SIGNUP_CHANNEL_ID}>. Nothing is saved.`,
-      };
+
+      const channelId = await signupChannelId(leagueId);
+      const lines = [
+        `Test invite for Season ${seasonNumber} sent to <@${target}>.`,
+        res.tracks.length > 0
+          ? `Pictures requested: ${res.tracks.join(", ")}.`
+          : "No track pictures requested.",
+        channelId
+          ? `Their button response will post in <#${channelId}>. Nothing is saved.`
+          : "This league has no signup channel set, so their response won't be posted anywhere. Nothing is saved.",
+      ];
+      return { content: lines.join("\n") };
     },
   };
 });
@@ -483,7 +549,8 @@ registerCommand("signups_test", async (ctx) => {
 // Driver-facing (NOT owner-only). The signup invite asks for screenshots, but
 // the signup channel is private, so drivers can't post there themselves. This
 // lets them send the images to the bot instead — from the invite DM or from
-// the league server — and the bot re-posts them into the signup channel.
+// the league server — and the bot re-posts them into the league's signup
+// channel.
 //
 // The bot only receives slash commands and button clicks, not ordinary DM
 // messages, so this has to be a command (same approach as /steward respond
@@ -795,7 +862,7 @@ registerCommand(
           };
         }
 
-        // 3. Re-post to the signup channel.
+        // 3. Re-post to the league's signup channel.
         const name = driver.display_name || driver.discord_username || "A driver";
         const trackLines = tracks.length
           ? "\n" +
@@ -809,7 +876,10 @@ registerCommand(
           `signup screenshot${photos.length === 1 ? "" : "s"} for **${round.name}**.` +
           trackLines;
 
-        const posted = await postSignupPhotos(SIGNUP_CHANNEL_ID, content, photos);
+        const channelId = await signupChannelId(round.league_id);
+        const posted = channelId
+          ? await postSignupPhotos(channelId, content, photos)
+          : false;
         if (!posted) {
           return {
             content:
