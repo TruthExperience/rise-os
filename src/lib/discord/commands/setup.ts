@@ -26,6 +26,13 @@
 //  4. Now also manages the appeals channel and steward role (previously
 //     /setup never set either, so every league it created had both empty).
 //
+//  5. Now also manages the DRIVER SIGNUP channel (signup_channel). It lives
+//     in pitboss.leagues.signup_channel_id (not rise_os.leagues), because
+//     that is where the signup code (src/lib/discord-signups.ts) reads it.
+//     Auto-detect picks a text channel whose name contains "signup" or
+//     "sign-up" (e.g. #driver-signups). It is optional: a league that
+//     doesn't run signups can ignore it.
+//
 // Everything else is the same as before: sim_racing only, writes
 // rise_os.leagues (source of truth for Discord config) and then mirrors the
 // shared columns into pitboss.leagues so FK-dependent pitboss tables
@@ -35,8 +42,10 @@
 //
 // NOTE: the slash command definition on Discord's side must be updated to
 // match: name / fia_category / reports_channel must NOT be required, and
-// appeals_channel (CHANNEL, type 7) and steward_role (ROLE, type 8) must be
-// added. Until it is, Discord will keep forcing the old required options.
+// appeals_channel (CHANNEL, type 7), steward_role (ROLE, type 8) and
+// signup_channel (CHANNEL, type 7, text channels only) must be added. Until
+// it is, Discord will keep forcing the old required options and won't show
+// the signup_channel picker (auto-detect still works without it).
 
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
@@ -60,6 +69,7 @@ const TICKET_CATEGORY_RE = /ticket|fia|steward/;
 const INCIDENT_CHANNEL_RE = /incident|report/;
 const TRANSCRIPT_CHANNEL_RE = /transcript/;
 const APPEALS_CHANNEL_RE = /appeal/;
+const SIGNUP_CHANNEL_RE = /sign-?ups?/;
 const STEWARD_ROLE_RE = /steward|fia/;
 
 interface GuildChannel {
@@ -88,6 +98,7 @@ interface SetupInput {
   reportsChannel?: string;
   transcriptChannel?: string;
   appealsChannel?: string;
+  signupChannel?: string;
   stewardRole?: string;
   financialSystem: boolean;
 }
@@ -210,6 +221,9 @@ function resolveSetting(
 // league immediately. Only the columns that actually exist on both tables
 // are carried over; pitboss.leagues has no discord_ticket_category_id /
 // discord_steward_role_id / etc. columns, so those stay rise_os-only.
+//
+// signup_channel_id is NOT in this column list on purpose, so a mirror never
+// overwrites it. It is written separately by saveSignupChannel() below.
 async function mirrorToPitbossLeagues(
   supabase: ReturnType<typeof createAdminClient>,
   leagueId: string
@@ -245,6 +259,27 @@ async function mirrorToPitbossLeagues(
   }
 }
 
+// Writes the driver signup channel onto pitboss.leagues. Must run AFTER the
+// mirror, so the pitboss.leagues row exists on a brand-new league. Returns
+// false if the write failed (logged; the reply says so).
+async function saveSignupChannel(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  channelId: string
+): Promise<boolean> {
+  const { error } = await supabase
+    .schema("pitboss")
+    .from("leagues")
+    .update({ signup_channel_id: channelId })
+    .eq("id", leagueId);
+
+  if (error) {
+    console.error("[setup] failed to save signup_channel_id:", error);
+    return false;
+  }
+  return true;
+}
+
 function sourceLabel(r: Resolved): string {
   if (r.source === "chosen") return "you picked this";
   if (r.source === "kept") return "already saved";
@@ -275,6 +310,19 @@ async function runSetup(guildId: string, input: SetupInput): Promise<string> {
 
   if (existingError) {
     return `Something went wrong checking for an existing league: ${existingError.message}`;
+  }
+
+  // The signup channel is stored on pitboss.leagues, not rise_os.leagues.
+  let keptSignupChannel: string | null = null;
+  if (existing) {
+    const { data: pitbossLeague } = await supabase
+      .schema("pitboss")
+      .from("leagues")
+      .select("signup_channel_id")
+      .eq("id", existing.id)
+      .maybeSingle();
+    keptSignupChannel =
+      ((pitbossLeague as any)?.signup_channel_id as string | null | undefined) ?? null;
   }
 
   // Read the server. Failure here is not fatal — explicit options still work.
@@ -308,6 +356,11 @@ async function runSetup(guildId: string, input: SetupInput): Promise<string> {
     input.appealsChannel,
     existing?.discord_appeals_channel_id,
     detectByName(textChannels, APPEALS_CHANNEL_RE)
+  );
+  const signup = resolveSetting(
+    input.signupChannel,
+    keptSignupChannel,
+    detectByName(textChannels, SIGNUP_CHANNEL_RE)
   );
   const steward = resolveSetting(
     input.stewardRole,
@@ -356,6 +409,14 @@ async function runSetup(guildId: string, input: SetupInput): Promise<string> {
     await mirrorToPitbossLeagues(supabase, leagueId);
   }
 
+  // Save the signup channel AFTER the mirror, so the pitboss.leagues row
+  // exists even for a league created by this very run.
+  let signupSaveFailed = false;
+  if (leagueId && signup.id) {
+    const saved = await saveSignupChannel(supabase, leagueId, signup.id);
+    signupSaveFailed = !saved;
+  }
+
   const lines: string[] = [
     existing
       ? `**${finalName}** setup updated.`
@@ -364,8 +425,15 @@ async function runSetup(guildId: string, input: SetupInput): Promise<string> {
     settingLine("Reports channel", incident.id ? `<#${incident.id}>` : null, incident, "pick it with `reports_channel`"),
     settingLine("Transcripts", transcript.id ? `<#${transcript.id}>` : null, transcript, "optional, pick with `transcript_channel`"),
     settingLine("Appeals", appeals.id ? `<#${appeals.id}>` : null, appeals, "optional, pick with `appeals_channel`"),
+    settingLine("Driver signups", signup.id ? `<#${signup.id}>` : null, signup, "optional, pick with `signup_channel`"),
     settingLine("Steward role", steward.id ? `<@&${steward.id}>` : null, steward, "pick it with `steward_role`"),
   ];
+
+  if (signupSaveFailed) {
+    lines.push(
+      "⚠️ I couldn't save the driver signup channel. Run `/setup` again, and tell the PitBoss admin if it keeps failing."
+    );
+  }
 
   if (!info) {
     lines.push(
@@ -413,6 +481,7 @@ registerCommand(
       reportsChannel: ctx.options.reports_channel as string | undefined,
       transcriptChannel: ctx.options.transcript_channel as string | undefined,
       appealsChannel: ctx.options.appeals_channel as string | undefined,
+      signupChannel: ctx.options.signup_channel as string | undefined,
       stewardRole: ctx.options.steward_role as string | undefined,
       financialSystem: Boolean(ctx.options.financial_system),
     };
