@@ -4,9 +4,15 @@
 // members answer with Sign Up / No Thanks buttons. Results land in
 // pitboss.league_signups, tied to the season via pitboss.signup_rounds.season_id.
 //
-// Owners can also request pictures of specific tracks (time trial screenshots)
-// as part of signup. Drivers send them to the bot with /signup photos, from
-// the invite DM, and the bot posts them into the signup channel.
+// Owners can also invite ONE racer to the open round (sendIndividualInvite),
+// which saves exactly like a normal signup.
+//
+// Owners can request pictures of specific tracks (time trial screenshots) as
+// part of signup. This is optional per round: leave `tracks` off when a season
+// doesn't need them (e.g. VRC season 2) and set it when it does (season 3).
+// Drivers send them to the bot with /signup photos, from the invite DM, and
+// the bot posts them into the league's signup channel
+// (pitboss.leagues.signup_channel_id).
 //
 // Team requests: after tapping Sign Up, a driver picks up to three teams in
 // order of preference (button taps, one message per choice). Picks land in
@@ -59,6 +65,26 @@ async function discord(path: string, body: unknown, attempt = 0): Promise<any> {
 export type ButtonResponse = {
   type: number
   data: { content: string; components: any[] }
+}
+
+// ---------------------------------------------------------------------------
+// Signup channel (per league)
+// ---------------------------------------------------------------------------
+
+// Where test responses and signup screenshots are posted for a league. Read
+// from pitboss.leagues.signup_channel_id. Returns null when the league has no
+// channel set, in which case nothing is posted to a channel.
+export async function signupChannelId(leagueId: string): Promise<string | null> {
+  const { data, error } = await db()
+    .from('leagues')
+    .select('signup_channel_id')
+    .eq('id', leagueId)
+    .maybeSingle()
+  if (error) {
+    console.error('[signups] signup channel lookup failed:', error)
+    return null
+  }
+  return ((data as any)?.signup_channel_id as string | null | undefined) || null
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +621,49 @@ export async function closeSignupRound(roundId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Invite DM (shared by the bulk sender and the individual invite)
+// ---------------------------------------------------------------------------
+
+function defaultInviteContent(leagueName: string, roundName: string): string {
+  return `**${leagueName}: ${roundName}**\nSeason signups are open. Do you want to race this season?`
+}
+
+// Sends one invite DM with the real Sign Up / No Thanks buttons for a round.
+// Throws on Discord errors (err.code 50007 = the user has DMs closed).
+async function sendInviteDm(
+  roundId: string,
+  discordId: string,
+  content: string
+): Promise<{ channelId: string; messageId: string }> {
+  const channel = await discord('/users/@me/channels', {
+    recipient_id: discordId,
+  })
+  const msg = await discord(`/channels/${channel.id}/messages`, {
+    content,
+    components: [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 3, // green
+            label: 'Sign Up',
+            custom_id: `signup:${roundId}:yes`,
+          },
+          {
+            type: 2,
+            style: 2, // grey
+            label: 'No Thanks',
+            custom_id: `signup:${roundId}:no`,
+          },
+        ],
+      },
+    ],
+  })
+  return { channelId: channel.id as string, messageId: msg.id as string }
+}
+
+// ---------------------------------------------------------------------------
 // Sending DMs (call repeatedly until remaining === 0)
 // ---------------------------------------------------------------------------
 
@@ -615,8 +684,7 @@ export async function sendPendingDms(
 
   const leagueName = (round as any).leagues?.name ?? 'the league'
   const content =
-    round.message?.trim() ||
-    `**${leagueName}: ${round.name}**\nSeason signups are open. Do you want to race this season?`
+    round.message?.trim() || defaultInviteContent(leagueName, round.name)
 
   const { data: pending } = await db()
     .from('league_signups')
@@ -639,35 +707,11 @@ export async function sendPendingDms(
     if (!discordId) continue
 
     try {
-      const channel = await discord('/users/@me/channels', {
-        recipient_id: discordId,
-      })
-      const msg = await discord(`/channels/${channel.id}/messages`, {
-        content,
-        components: [
-          {
-            type: 1,
-            components: [
-              {
-                type: 2,
-                style: 3, // green
-                label: 'Sign Up',
-                custom_id: `signup:${roundId}:yes`,
-              },
-              {
-                type: 2,
-                style: 2, // grey
-                label: 'No Thanks',
-                custom_id: `signup:${roundId}:no`,
-              },
-            ],
-          },
-        ],
-      })
+      const dm = await sendInviteDm(roundId, discordId, content)
 
       await db()
         .from('league_signups')
-        .update({ dm_channel_id: channel.id, dm_message_id: msg.id })
+        .update({ dm_channel_id: dm.channelId, dm_message_id: dm.messageId })
         .eq('id', row.id)
       sent++
     } catch (e: any) {
@@ -688,15 +732,130 @@ export async function sendPendingDms(
 }
 
 // ---------------------------------------------------------------------------
-// Test invite: one individual DM, no DB writes
+// Individual invite: one racer, real signup (saved like any other signup)
 // ---------------------------------------------------------------------------
 
-const SIGNUP_CHANNEL_ID =
-  process.env.PITBOSS_SIGNUP_CHANNEL_ID ?? '1559261744470163556' // VRC #driver-signups
+export type IndividualInviteResult =
+  | { ok: true; roundName: string; driverName: string; tracksRequested: number }
+  | { ok: false; error: string }
+
+// Invites ONE racer to the league's currently open round. Uses the round's own
+// invite text (so track pictures are requested only if the round asked for
+// them) and the real Sign Up / No Thanks buttons, so the answer is saved to
+// pitboss.league_signups and counts in /signups status and /signups list.
+// Works for racers who joined after the round opened. Re-sending to someone
+// who declined or never answered resets their row to "invited".
+export async function sendIndividualInvite(params: {
+  leagueId: string
+  invitedByDiscordId: string
+  targetDiscordId: string
+}): Promise<IndividualInviteResult> {
+  const { leagueId, invitedByDiscordId, targetDiscordId } = params
+
+  if (!(await canOpenSignups(invitedByDiscordId, leagueId))) {
+    return { ok: false, error: 'Only league owners can send signup invites.' }
+  }
+
+  const { data: round } = await db()
+    .from('signup_rounds')
+    .select('id, name, message, season_id, leagues!inner(name)')
+    .eq('league_id', leagueId)
+    .eq('status', 'open')
+    .order('opened_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (!round) {
+    return {
+      ok: false,
+      error: 'No signup round is open for this league. Open one with `/signups open` first.',
+    }
+  }
+
+  const { data: driver } = await db()
+    .from('drivers')
+    .select('id, display_name, discord_username')
+    .eq('discord_id', targetDiscordId)
+    .maybeSingle()
+  if (!driver) {
+    return {
+      ok: false,
+      error:
+        `I can't find a driver record for <@${targetDiscordId}>. ` +
+        `Run \`/members-sync\` first, or check they're in the league server.`,
+    }
+  }
+  const driverName = driver.display_name || driver.discord_username || 'that driver'
+
+  // Already signed up this season (any round of it)? Nothing to do.
+  const roundIds = await seasonRoundIds(round.id)
+  const { data: done } = await db()
+    .from('league_signups')
+    .select('id')
+    .eq('driver_id', driver.id)
+    .eq('status', 'signed_up')
+    .in('round_id', roundIds)
+    .limit(1)
+  if (done && done.length > 0) {
+    return { ok: false, error: `${driverName} has already signed up for ${round.name}.` }
+  }
+
+  // (Re)queue their row for this round
+  const { error: upsertErr } = await db()
+    .from('league_signups')
+    .upsert(
+      {
+        round_id: round.id,
+        league_id: leagueId,
+        driver_id: driver.id,
+        status: 'invited',
+        dm_channel_id: null,
+        dm_message_id: null,
+        error: null,
+        responded_at: null,
+      },
+      { onConflict: 'round_id,driver_id' }
+    )
+  if (upsertErr) return { ok: false, error: upsertErr.message }
+
+  const leagueName = (round as any).leagues?.name ?? 'the league'
+  const content =
+    round.message?.trim() || defaultInviteContent(leagueName, round.name)
+
+  try {
+    const dm = await sendInviteDm(round.id, targetDiscordId, content)
+    await db()
+      .from('league_signups')
+      .update({ dm_channel_id: dm.channelId, dm_message_id: dm.messageId })
+      .eq('round_id', round.id)
+      .eq('driver_id', driver.id)
+  } catch (e: any) {
+    const reason = e?.code ? `${e.code}: ${e.message}` : String(e?.message ?? e)
+    await db()
+      .from('league_signups')
+      .update({ status: 'dm_failed', error: reason })
+      .eq('round_id', round.id)
+      .eq('driver_id', driver.id)
+    return {
+      ok: false,
+      error: `Couldn't DM ${driverName} (${reason}). They may have DMs closed.`,
+    }
+  }
+
+  return {
+    ok: true,
+    roundName: round.name,
+    driverName,
+    tracksRequested: requestedTracksFromMessage(round.message).length,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test invite: one individual DM, no DB writes (works in any league)
+// ---------------------------------------------------------------------------
 
 // F1 25 base game + 2026 Season Pack (Madring). Three distinct circuits are
-// drawn per test invite when the owner doesn't name any. Circuits with a
-// reverse layout get a 50/50 flip.
+// drawn when the owner asks for `random`. Circuits with a reverse layout get a
+// 50/50 flip.
 const TRACK_POOL: { name: string; hasReverse?: boolean }[] = [
   { name: 'Albert Park Circuit (Melbourne)' },
   { name: 'Shanghai International Circuit' },
@@ -736,12 +895,17 @@ function pickTracks(n = 3): string[] {
   )
 }
 
+// Track pictures are optional, same as /signups open:
+//   - `tracks` given        -> request those tracks
+//   - `randomTracks: true`  -> request 3 random F1 25 tracks
+//   - neither               -> plain invite, no pictures requested
 export async function sendTestSignup(params: {
   leagueId: string
   openedByDiscordId: string
   targetDiscordId: string
   seasonNumber?: number // defaults to 2
-  tracks?: string[] // owner-chosen tracks; omit for 3 random ones
+  tracks?: string[] // owner-chosen tracks
+  randomTracks?: boolean // draw 3 random tracks instead
 }): Promise<{ ok: true; tracks: string[] } | { ok: false; error: string }> {
   const { leagueId, openedByDiscordId, targetDiscordId } = params
   const seasonNumber = params.seasonNumber ?? 2
@@ -765,16 +929,20 @@ export async function sendTestSignup(params: {
   const name = driver?.display_name || driver?.discord_username || 'driver'
   const leagueName = league?.name ?? 'the league'
   const requested = (params.tracks ?? []).slice(0, MAX_REQUESTED_TRACKS)
-  const tracks = requested.length > 0 ? requested : pickTracks(3)
+  const tracks =
+    requested.length > 0 ? requested : params.randomTracks ? pickTracks(3) : []
 
   const content =
     `**${leagueName}: Season ${seasonNumber} Driver Signup** *(test invite)*\n\n` +
     `Hi ${name}, we'd be delighted to have you on the grid for **Season ${seasonNumber}**. ` +
     `Your pace and sportsmanship have been a big part of what makes this league fun, ` +
     `and we'd love to see you back out there.\n\n` +
-    `If you're in, tap **Sign Up** below. ` +
-    trackRequestBlock(tracks) +
+    `If you're in, tap **Sign Up** below.` +
+    (tracks.length > 0 ? ` ${trackRequestBlock(tracks)}` : '') +
     `\n\nNot this time? Tap **No Thanks**, no hard feelings. Thanks for racing with us!`
+
+  // custom_id: signuptest:<leagueId>:<season>:<yes|no>:<1 if pictures requested>
+  const photosFlag = tracks.length > 0 ? '1' : '0'
 
   try {
     const channel = await discord('/users/@me/channels', {
@@ -790,13 +958,13 @@ export async function sendTestSignup(params: {
               type: 2,
               style: 3,
               label: 'Sign Up',
-              custom_id: `signuptest:${seasonNumber}:yes`,
+              custom_id: `signuptest:${leagueId}:${seasonNumber}:yes:${photosFlag}`,
             },
             {
               type: 2,
               style: 2,
               label: 'No Thanks',
-              custom_id: `signuptest:${seasonNumber}:no`,
+              custom_id: `signuptest:${leagueId}:${seasonNumber}:no:${photosFlag}`,
             },
           ],
         },
@@ -811,37 +979,46 @@ export async function sendTestSignup(params: {
   }
 }
 
-// Test button clicks: reply in the DM and post the result to the signups
-// channel so feedback lands where you'll see it. Nothing is saved to the DB.
+// Test button clicks: reply in the DM and post the result to the league's
+// signup channel (if it has one) so feedback lands where owners will see it.
+// Nothing is saved to the DB. leagueId is null for old-format test buttons.
 async function handleTestButton(
+  leagueId: string | null,
   seasonNumber: string,
   answer: string,
+  wantsPhotos: boolean,
   discordUserId: string
 ): Promise<ButtonResponse> {
   const signedUp = answer === 'yes'
-  try {
-    await discord(`/channels/${SIGNUP_CHANNEL_ID}/messages`, {
-      content:
-        `🧪 Test signup response: <@${discordUserId}> chose ` +
-        `**${signedUp ? 'Sign Up' : 'No Thanks'}** for Season ${seasonNumber}. ` +
-        `Nothing was saved.`,
-      allowed_mentions: { parse: [] },
-    })
-  } catch (e) {
-    console.error('[signuptest] channel post failed:', e)
+
+  const channelId = leagueId ? await signupChannelId(leagueId) : null
+  if (channelId) {
+    try {
+      await discord(`/channels/${channelId}/messages`, {
+        content:
+          `🧪 Test signup response: <@${discordUserId}> chose ` +
+          `**${signedUp ? 'Sign Up' : 'No Thanks'}** for Season ${seasonNumber}. ` +
+          `Nothing was saved.`,
+        allowed_mentions: { parse: [] },
+      })
+    } catch (e) {
+      console.error('[signuptest] channel post failed:', e)
+    }
   }
-  return {
-    type: 7,
-    data: {
-      content: signedUp
-        ? `Thanks! You're signed up for Season ${seasonNumber} *(test, nothing saved)*. ` +
-          `Send your pictures right here in this DM with \`/signup photos\` ` +
-          `(attach up to ${MAX_REQUESTED_TRACKS} images). League owners can try that now, ` +
-          `and it will post to the signup channel marked as a test.`
-        : `Got it, no problem *(test, nothing saved)*.`,
-      components: [],
-    },
+
+  let content: string
+  if (!signedUp) {
+    content = `Got it, no problem *(test, nothing saved)*.`
+  } else {
+    content = `Thanks! You're signed up for Season ${seasonNumber} *(test, nothing saved)*.`
+    if (wantsPhotos) {
+      content +=
+        ` In a real signup you'd now send your pictures right here in this DM ` +
+        `with \`/signup photos\` (attach up to ${MAX_REQUESTED_TRACKS} images).`
+    }
   }
+
+  return { type: 7, data: { content, components: [] } }
 }
 
 // ---------------------------------------------------------------------------
@@ -860,9 +1037,18 @@ export async function handleSignupButton(
     return handleTeamButton(roundId, answer, extra, discordUserId)
   }
 
-  // Test invites: no DB writes (roundId slot carries the season number)
-  if (prefix === 'signuptest' && ['yes', 'no'].includes(answer)) {
-    return handleTestButton(roundId, answer, discordUserId)
+  // Test invites: no DB writes.
+  //   new: signuptest:<leagueId>:<season>:<yes|no>:<1|0 pictures requested>
+  //   old: signuptest:<season>:<yes|no>   (no league, so no channel post)
+  if (prefix === 'signuptest') {
+    const p = customId.split(':')
+    const legacy = p.length === 3
+    const leagueId = legacy ? null : p[1]
+    const seasonNumber = legacy ? p[1] : p[2]
+    const testAnswer = legacy ? p[2] : p[3]
+    const wantsPhotos = legacy ? false : p[4] === '1'
+    if (!seasonNumber || !['yes', 'no'].includes(testAnswer)) return null
+    return handleTestButton(leagueId, seasonNumber, testAnswer, wantsPhotos, discordUserId)
   }
 
   if (prefix !== 'signup' || !roundId || !['yes', 'no'].includes(answer)) {
