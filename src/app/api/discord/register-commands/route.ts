@@ -101,6 +101,49 @@ const SIGNUPS_COMMAND = {
   ],
 };
 
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 11 = ATTACHMENT
+const TIMETRIAL_COMMAND = {
+  name: "timetrial",
+  description: "Log and compare time trial laps",
+  options: [
+    {
+      type: 1,
+      name: "submit",
+      description: "Submit a lap with a screenshot or clip (works in DMs too)",
+      options: [
+        { type: 3, name: "track", description: "Track name", required: true },
+        {
+          type: 3,
+          name: "time",
+          description: "Lap time, e.g. 1:23.456 or 83.456",
+          required: true,
+        },
+        {
+          type: 11,
+          name: "screenshot",
+          description: "Screenshot or clip proving the lap",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "car_class",
+          description: "Car class (optional)",
+          required: false,
+        },
+        { type: 3, name: "notes", description: "Notes (optional)", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "leaderboard",
+      description: "Top 10 best laps for a track",
+      options: [
+        { type: 3, name: "track", description: "Track name", required: true },
+      ],
+    },
+  ],
+};
+
 async function register(): Promise<NextResponse> {
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
   const appId =
@@ -122,29 +165,48 @@ async function register(): Promise<NextResponse> {
     ? `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`
     : `https://discord.com/api/v10/applications/${appId}/commands`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bot ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(SIGNUPS_COMMAND),
-  });
+  const results: {
+    command: string;
+    commandId: string;
+    subcommands: string[];
+  }[] = [];
 
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    console.error("[register-commands] failed:", res.status, json);
-    return NextResponse.json(
-      { error: "Registration failed", status: res.status, details: json },
-      { status: 502 }
-    );
+  for (const command of [SIGNUPS_COMMAND, TIMETRIAL_COMMAND]) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(command),
+    });
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error("[register-commands] failed:", command.name, res.status, json);
+      return NextResponse.json(
+        {
+          error: "Registration failed",
+          command: command.name,
+          status: res.status,
+          details: json,
+          registeredSoFar: results,
+        },
+        { status: 502 }
+      );
+    }
+
+    results.push({
+      command: command.name,
+      commandId: json.id,
+      subcommands: (json.options ?? []).map((o: { name: string }) => o.name),
+    });
   }
 
   return NextResponse.json({
     ok: true,
     scope: guildId ? `guild ${guildId}` : "global",
-    commandId: json.id,
-    subcommands: (json.options ?? []).map((o: { name: string }) => o.name),
+    commands: results,
   });
 }
 
