@@ -7,6 +7,12 @@
 // Owners can also request pictures of specific tracks (time trial screenshots)
 // as part of signup. Drivers send them to the bot with /signup photos, from
 // the invite DM, and the bot posts them into the signup channel.
+//
+// Team requests: after tapping Sign Up, a driver picks up to three teams in
+// order of preference (button taps, one message per choice). Picks land in
+// pitboss.signup_team_choices and, once the driver finishes, each team's
+// principal(s) get a DM. Teams and principals come from pitboss.team_rosters
+// (latest season on file for the league). No roster rows = no team step.
 
 import { supabaseAdmin } from '@/lib/supabase/admin'
 
@@ -49,6 +55,12 @@ async function discord(path: string, body: unknown, attempt = 0): Promise<any> {
   return json
 }
 
+// Interaction response body returned to the router (type 7 = update in place).
+export type ButtonResponse = {
+  type: number
+  data: { content: string; components: any[] }
+}
+
 // ---------------------------------------------------------------------------
 // Requested tracks (time trial pictures)
 // ---------------------------------------------------------------------------
@@ -84,6 +96,316 @@ export function requestedTracksFromMessage(
     .split('\n')
     .map((line) => line.match(/^\d+\.\s+(.+)$/)?.[1]?.trim())
     .filter((t): t is string => !!t)
+}
+
+// Turns the owner's `tracks` option ("Monza, Suzuka; Spa") into a clean list:
+// split on commas / semicolons / new lines, trimmed, de-duplicated, max 3.
+export function parseTracks(input: string | null | undefined): string[] {
+  if (!input) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of input.split(/[;,\n]/)) {
+    const t = raw.trim()
+    if (!t || seen.has(t.toLowerCase())) continue
+    seen.add(t.toLowerCase())
+    out.push(t)
+    if (out.length === MAX_REQUESTED_TRACKS) break
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Team requests
+// ---------------------------------------------------------------------------
+
+export const MAX_TEAM_CHOICES = 3
+const ORDINAL = ['1st', '2nd', '3rd']
+
+export interface TeamOption {
+  id: string // pitboss.car_class_teams.id
+  name: string
+  principalDiscordIds: string[]
+}
+
+// Teams a driver can request in this league, plus each team's principal(s).
+// Read from pitboss.team_rosters, using the latest season on file for the
+// league. Returns [] when the league has no roster rows (team step is skipped).
+export async function leagueTeamOptions(leagueId: string): Promise<TeamOption[]> {
+  const { data: rosterRows } = await db()
+    .from('team_rosters')
+    .select('driver_id, car_class_team_id, season, is_team_principal')
+    .eq('league_id', leagueId)
+  const rosters: any[] = rosterRows ?? []
+  if (rosters.length === 0) return []
+
+  const seasonKey = (r: any) => String(r.season ?? '')
+  const latest = rosters
+    .map(seasonKey)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    .pop()
+  const current = rosters.filter(
+    (r) => seasonKey(r) === latest && r.car_class_team_id
+  )
+
+  const teamIds = Array.from(new Set(current.map((r) => r.car_class_team_id as string)))
+  if (teamIds.length === 0) return []
+
+  const principalRows = current.filter((r) => r.is_team_principal)
+  const principalIds = Array.from(
+    new Set(principalRows.map((r) => r.driver_id as string))
+  )
+
+  const { data: teams } = await db()
+    .from('car_class_teams')
+    .select('id, team_name, short_name')
+    .in('id', teamIds)
+
+  const discordByDriver = new Map<string, string>()
+  if (principalIds.length) {
+    const { data: principalDrivers } = await db()
+      .from('drivers')
+      .select('id, discord_id')
+      .in('id', principalIds)
+    for (const d of (principalDrivers ?? []) as any[]) {
+      if (d.discord_id) discordByDriver.set(d.id, d.discord_id)
+    }
+  }
+
+  return ((teams ?? []) as any[])
+    .map((t) => ({
+      id: t.id as string,
+      name: ((t.team_name || t.short_name || 'Unknown team') as string).slice(0, 80),
+      principalDiscordIds: Array.from(
+        new Set(
+          principalRows
+            .filter((r) => r.car_class_team_id === t.id)
+            .map((r) => discordByDriver.get(r.driver_id))
+            .filter((id): id is string => !!id)
+        )
+      ),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// One message per choice: a button per team (minus teams already picked) and a
+// "no preference" / "that's all" button. Discord allows 25 buttons per message,
+// so at most 24 teams are shown.
+function teamPrompt(
+  roundId: string,
+  rank: number,
+  teams: TeamOption[],
+  chosenIds: string[]
+): { content: string; components: any[] } {
+  const remaining = teams.filter((t) => !chosenIds.includes(t.id)).slice(0, 24)
+
+  const buttons: any[] = remaining.map((t) => ({
+    type: 2,
+    style: 2, // grey
+    label: t.name,
+    custom_id: `signupteam:${roundId}:${rank}:${t.id}`,
+  }))
+  buttons.push({
+    type: 2,
+    style: 1, // blurple
+    label: rank === 1 ? 'No preference' : "That's all",
+    custom_id: `signupteam:${roundId}:${rank}:none`,
+  })
+
+  const components: any[] = []
+  for (let i = 0; i < buttons.length; i += 5) {
+    components.push({ type: 1, components: buttons.slice(i, i + 5) })
+  }
+
+  const content =
+    rank === 1
+      ? `**Team request** — which team would you like to drive for? Tap your **1st choice**. ` +
+        `You can add up to ${MAX_TEAM_CHOICES} in order of preference.`
+      : `Got it. Tap your **${ORDINAL[rank - 1]} choice**, or **That's all** to send your requests.`
+
+  return { content, components }
+}
+
+// Sends the driver's picks to each team's principal (one DM per principal per
+// driver), marks them notified, and returns the text shown back to the driver.
+async function finalizeTeamChoices(params: {
+  round: any
+  driver: any
+  discordUserId: string
+  teams: TeamOption[]
+}): Promise<string> {
+  const { round, driver, discordUserId, teams } = params
+
+  const { data: picks } = await db()
+    .from('signup_team_choices')
+    .select('id, choice_rank, car_class_team_id, principal_notified_at')
+    .eq('round_id', round.id)
+    .eq('driver_id', driver.id)
+    .order('choice_rank')
+  const rows: any[] = picks ?? []
+  if (rows.length === 0) return "No team preference noted. You're all set."
+
+  const teamName = (id: string) => teams.find((t) => t.id === id)?.name ?? 'Unknown team'
+  const summary = rows
+    .map((r) => `${ORDINAL[r.choice_rank - 1]}: ${teamName(r.car_class_team_id)}`)
+    .join('\n')
+
+  // Only picks the principals haven't been told about yet
+  const fresh = rows.filter((r) => !r.principal_notified_at)
+  const byPrincipal = new Map<string, { team: string; rank: number }[]>()
+  for (const r of fresh) {
+    const team = teams.find((t) => t.id === r.car_class_team_id)
+    for (const pid of team?.principalDiscordIds ?? []) {
+      if (pid === discordUserId) continue // don't DM someone about themselves
+      const list = byPrincipal.get(pid) ?? []
+      list.push({ team: team!.name, rank: r.choice_rank })
+      byPrincipal.set(pid, list)
+    }
+  }
+
+  const leagueName = (round as any).leagues?.name ?? 'the league'
+  const name = driver.display_name || driver.discord_username || 'A driver'
+  const fullList = rows
+    .map((r) => `${r.choice_rank}. ${teamName(r.car_class_team_id)}`)
+    .join(' · ')
+
+  const results = await Promise.allSettled(
+    Array.from(byPrincipal.entries()).map(async ([principalId, entries]) => {
+      const content =
+        `🏁 **${leagueName}: ${round.name}** — team request\n` +
+        `**${name}** (<@${discordUserId}>) signed up and asked to drive for your team:\n` +
+        entries.map((e) => `• **${e.team}** — ${ORDINAL[e.rank - 1]} choice`).join('\n') +
+        `\nTheir full list: ${fullList}`
+      const channel = await discord('/users/@me/channels', { recipient_id: principalId })
+      await discord(`/channels/${channel.id}/messages`, {
+        content,
+        allowed_mentions: { parse: [] },
+      })
+    })
+  )
+  const reached = results.filter((r) => r.status === 'fulfilled').length
+  const failed = results.length - reached
+  for (const r of results) {
+    if (r.status === 'rejected') console.error('[signupteam] principal DM failed:', r.reason)
+  }
+
+  if (fresh.length > 0) {
+    await db()
+      .from('signup_team_choices')
+      .update({ principal_notified_at: new Date().toISOString() })
+      .in('id', fresh.map((r) => r.id))
+  }
+
+  let note: string
+  if (byPrincipal.size === 0) {
+    note = fresh.length > 0 ? "I couldn't find a team principal to notify, but league owners can see your picks." : ''
+  } else if (failed === 0) {
+    note = `Team principal${reached === 1 ? '' : 's'} notified.`
+  } else {
+    note = `Notified ${reached} of ${byPrincipal.size} team principals (${failed} couldn't be reached).`
+  }
+
+  return `**Your team requests**\n${summary}${note ? `\n\n${note}` : ''}`
+}
+
+async function handleTeamButton(
+  roundId: string,
+  rankStr: string,
+  teamId: string,
+  discordUserId: string
+): Promise<ButtonResponse> {
+  const reply = (content: string, components: any[] = []): ButtonResponse => ({
+    type: 7,
+    data: { content, components },
+  })
+
+  const rank = Number(rankStr)
+  if (!roundId || !teamId || !Number.isInteger(rank) || rank < 1 || rank > MAX_TEAM_CHOICES) {
+    return reply('That choice is no longer valid.')
+  }
+
+  const { data: round } = await db()
+    .from('signup_rounds')
+    .select('id, name, status, league_id, leagues!inner(name)')
+    .eq('id', roundId)
+    .single()
+  if (!round || round.status !== 'open') {
+    return reply('Signups for this season are closed.')
+  }
+
+  const { data: driver } = await db()
+    .from('drivers')
+    .select('id, display_name, discord_username')
+    .eq('discord_id', discordUserId)
+    .maybeSingle()
+  if (!driver) return reply('I could not find your driver profile.')
+
+  // Team requests only count for drivers who tapped Sign Up (any round of the
+  // season, same rule as the signup list).
+  const roundIds = await seasonRoundIds(round.id)
+  const { data: signedUp } = await db()
+    .from('league_signups')
+    .select('id')
+    .eq('driver_id', driver.id)
+    .eq('status', 'signed_up')
+    .in('round_id', roundIds)
+    .limit(1)
+  if (!signedUp || signedUp.length === 0) {
+    return reply('Tap **Sign Up** on your invite first, then pick your teams.')
+  }
+
+  const teams = await leagueTeamOptions(round.league_id)
+
+  if (teamId !== 'none') {
+    if (!teams.some((t) => t.id === teamId)) {
+      return reply("That team isn't available any more. Ask a league owner.")
+    }
+
+    // Replace this rank and anything after it, and drop the team if it was
+    // already picked at another rank, so picks stay unique and ordered.
+    await db()
+      .from('signup_team_choices')
+      .delete()
+      .eq('round_id', roundId)
+      .eq('driver_id', driver.id)
+      .gte('choice_rank', rank)
+    await db()
+      .from('signup_team_choices')
+      .delete()
+      .eq('round_id', roundId)
+      .eq('driver_id', driver.id)
+      .eq('car_class_team_id', teamId)
+
+    const { error } = await db().from('signup_team_choices').insert({
+      round_id: roundId,
+      league_id: round.league_id,
+      driver_id: driver.id,
+      choice_rank: rank,
+      car_class_team_id: teamId,
+    })
+    if (error) {
+      console.error('[signupteam] insert failed:', error)
+      return reply('Something went wrong saving that pick. Tap your team again.')
+    }
+
+    const { data: chosen } = await db()
+      .from('signup_team_choices')
+      .select('car_class_team_id')
+      .eq('round_id', roundId)
+      .eq('driver_id', driver.id)
+    const chosenIds = ((chosen ?? []) as any[]).map((c) => c.car_class_team_id as string)
+
+    const stillAvailable = teams.filter((t) => !chosenIds.includes(t.id)).length
+    if (rank < MAX_TEAM_CHOICES && stillAvailable > 0) {
+      const next = teamPrompt(roundId, rank + 1, teams, chosenIds)
+      const picked = chosenIds
+        .map((id, i) => `${ORDINAL[i]}: ${teams.find((t) => t.id === id)?.name ?? 'Unknown team'}`)
+        .join('\n')
+      return reply(`${picked}\n\n${next.content}`, next.components)
+    }
+  }
+
+  const text = await finalizeTeamChoices({ round, driver, discordUserId, teams })
+  return reply(text)
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +817,7 @@ async function handleTestButton(
   seasonNumber: string,
   answer: string,
   discordUserId: string
-) {
+): Promise<ButtonResponse> {
   const signedUp = answer === 'yes'
   try {
     await discord(`/channels/${SIGNUP_CHANNEL_ID}/messages`, {
@@ -517,7 +839,7 @@ async function handleTestButton(
           `(attach up to ${MAX_REQUESTED_TRACKS} images). League owners can try that now, ` +
           `and it will post to the signup channel marked as a test.`
         : `Got it, no problem *(test, nothing saved)*.`,
-      components: [] as [],
+      components: [],
     },
   }
 }
@@ -530,8 +852,13 @@ async function handleTestButton(
 export async function handleSignupButton(
   customId: string,
   discordUserId: string
-): Promise<{ type: number; data: { content: string; components: [] } } | null> {
-  const [prefix, roundId, answer] = customId.split(':')
+): Promise<ButtonResponse | null> {
+  const [prefix, roundId, answer, extra] = customId.split(':')
+
+  // Team request taps: signupteam:<roundId>:<rank>:<teamId | none>
+  if (prefix === 'signupteam') {
+    return handleTeamButton(roundId, answer, extra, discordUserId)
+  }
 
   // Test invites: no DB writes (roundId slot carries the season number)
   if (prefix === 'signuptest' && ['yes', 'no'].includes(answer)) {
@@ -542,14 +869,14 @@ export async function handleSignupButton(
     return null
   }
 
-  const reply = (content: string) => ({
+  const reply = (content: string, components: any[] = []): ButtonResponse => ({
     type: 7,
-    data: { content, components: [] as [] },
+    data: { content, components },
   })
 
   const { data: round } = await db()
     .from('signup_rounds')
-    .select('id, name, status, message, leagues!inner(name)')
+    .select('id, name, status, message, league_id, leagues!inner(name)')
     .eq('id', roundId)
     .single()
   if (!round || round.status !== 'open') {
@@ -578,18 +905,24 @@ export async function handleSignupButton(
     )
   }
 
-  // This reply replaces the invite, so repeat the requested tracks here.
+  // This reply replaces the invite, so repeat the requested tracks here and
+  // start the team request step (if the league has teams on file).
   const tracks = requestedTracksFromMessage((round as any).message)
-  const signedUp = `You are signed up for **${leagueName}: ${round.name}**.`
-  if (tracks.length === 0) return reply(signedUp)
+  const teams = await leagueTeamOptions(round.league_id)
 
-  return reply(
-    `${signedUp}\n\n` +
-      `Next, send a picture of ${tracks.length === 1 ? 'this track' : 'each of these tracks'} ` +
+  let content = `You are signed up for **${leagueName}: ${round.name}**.`
+  if (tracks.length > 0) {
+    content +=
+      `\n\nNext, send a picture of ${tracks.length === 1 ? 'this track' : 'each of these tracks'} ` +
       `right here in this DM with \`/signup photos\` (attach up to ` +
       `${MAX_REQUESTED_TRACKS} images):\n` +
       tracks.map((t, i) => `${i + 1}. ${t}`).join('\n')
-  )
+  }
+
+  if (teams.length === 0) return reply(content)
+
+  const prompt = teamPrompt(roundId, 1, teams, [])
+  return reply(`${content}\n\n${prompt.content}`, prompt.components)
 }
 
 // ---------------------------------------------------------------------------
