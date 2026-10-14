@@ -17,8 +17,11 @@
 // Team requests: after tapping Sign Up, a driver picks up to three teams in
 // order of preference (button taps, one message per choice). Picks land in
 // pitboss.signup_team_choices and, once the driver finishes, each team's
-// principal(s) get a DM. Teams and principals come from pitboss.team_rosters
-// (latest season on file for the league). No roster rows = no team step.
+// principal(s) get a DM. Where the teams come from (see leagueTeamOptions):
+//   1. pitboss.signup_team_options, scoped to ONE season number (a league can
+//      offer teams for season 2 only, with a default principal per team)
+//   2. otherwise pitboss.team_rosters (latest season on file for the league)
+// No teams from either source = no team step.
 
 import { supabaseAdmin } from '@/lib/supabase/admin'
 
@@ -153,10 +156,87 @@ export interface TeamOption {
   principalDiscordIds: string[]
 }
 
+// The season number a signup round belongs to (rise_os.seasons.season_number),
+// or null if it can't be worked out.
+async function seasonNumberForSeasonId(
+  seasonId: string | null | undefined
+): Promise<number | null> {
+  if (!seasonId) return null
+  const { data } = await riseOs()
+    .from('seasons')
+    .select('season_number')
+    .eq('id', seasonId)
+    .maybeSingle()
+  const n = (data as any)?.season_number
+  return typeof n === 'number' ? n : null
+}
+
 // Teams a driver can request in this league, plus each team's principal(s).
-// Read from pitboss.team_rosters, using the latest season on file for the
-// league. Returns [] when the league has no roster rows (team step is skipped).
-export async function leagueTeamOptions(leagueId: string): Promise<TeamOption[]> {
+//
+// `seasonId` is the season of the round being answered. When omitted it is
+// taken from the league's newest open round (the /signups open summary calls
+// it without one, right after opening a round).
+//
+// 1. pitboss.signup_team_options rows for THIS season number only. This is how
+//    a league offers teams for one season (e.g. VRC season 2) with a default
+//    principal per team, without a team_rosters row per team. A different
+//    season number gets nothing from this table.
+// 2. Otherwise pitboss.team_rosters, using the latest season on file for the
+//    league (the original behaviour).
+// Returns [] when neither has anything, and the team step is skipped.
+export async function leagueTeamOptions(
+  leagueId: string,
+  seasonId?: string | null
+): Promise<TeamOption[]> {
+  let effectiveSeasonId = seasonId ?? null
+  if (!effectiveSeasonId) {
+    const { data: openRound } = await db()
+      .from('signup_rounds')
+      .select('season_id')
+      .eq('league_id', leagueId)
+      .eq('status', 'open')
+      .order('opened_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    effectiveSeasonId = (openRound as any)?.season_id ?? null
+  }
+
+  // 1. League-level options for this season only.
+  const seasonNumber = await seasonNumberForSeasonId(effectiveSeasonId)
+  if (seasonNumber !== null) {
+    const { data: optionRows } = await db()
+      .from('signup_team_options')
+      .select('car_class_team_id, principal_discord_id')
+      .eq('league_id', leagueId)
+      .eq('season_number', seasonNumber)
+    const options: any[] = optionRows ?? []
+
+    if (options.length > 0) {
+      const optionTeamIds = Array.from(
+        new Set(options.map((o) => o.car_class_team_id as string))
+      )
+      const { data: optionTeams } = await db()
+        .from('car_class_teams')
+        .select('id, team_name, short_name')
+        .in('id', optionTeamIds)
+
+      return ((optionTeams ?? []) as any[])
+        .map((t) => ({
+          id: t.id as string,
+          name: ((t.team_name || t.short_name || 'Unknown team') as string).slice(0, 80),
+          principalDiscordIds: Array.from(
+            new Set(
+              options
+                .filter((o) => o.car_class_team_id === t.id && o.principal_discord_id)
+                .map((o) => o.principal_discord_id as string)
+            )
+          ),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    }
+  }
+
+  // 2. Fall back to rosters.
   const { data: rosterRows } = await db()
     .from('team_rosters')
     .select('driver_id, car_class_team_id, season, is_team_principal')
@@ -351,7 +431,7 @@ async function handleTeamButton(
 
   const { data: round } = await db()
     .from('signup_rounds')
-    .select('id, name, status, league_id, leagues!inner(name)')
+    .select('id, name, status, league_id, season_id, leagues!inner(name)')
     .eq('id', roundId)
     .single()
   if (!round || round.status !== 'open') {
@@ -379,7 +459,7 @@ async function handleTeamButton(
     return reply('Tap **Sign Up** on your invite first, then pick your teams.')
   }
 
-  const teams = await leagueTeamOptions(round.league_id)
+  const teams = await leagueTeamOptions(round.league_id, (round as any).season_id)
 
   if (teamId !== 'none') {
     if (!teams.some((t) => t.id === teamId)) {
@@ -1062,7 +1142,7 @@ export async function handleSignupButton(
 
   const { data: round } = await db()
     .from('signup_rounds')
-    .select('id, name, status, message, league_id, leagues!inner(name)')
+    .select('id, name, status, message, league_id, season_id, leagues!inner(name)')
     .eq('id', roundId)
     .single()
   if (!round || round.status !== 'open') {
@@ -1092,9 +1172,9 @@ export async function handleSignupButton(
   }
 
   // This reply replaces the invite, so repeat the requested tracks here and
-  // start the team request step (if the league has teams on file).
+  // start the team request step (if this season has teams on offer).
   const tracks = requestedTracksFromMessage((round as any).message)
-  const teams = await leagueTeamOptions(round.league_id)
+  const teams = await leagueTeamOptions(round.league_id, (round as any).season_id)
 
   let content = `You are signed up for **${leagueName}: ${round.name}**.`
   if (tracks.length > 0) {
