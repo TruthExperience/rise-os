@@ -8,6 +8,9 @@ import {
   signupSummary,
   seasonRoundIds,
   sendTestSignup,
+  parseTracks,
+  leagueTeamOptions,
+  requestedTracksFromMessage,
 } from "@/lib/discord-signups";
 
 // Season signup commands. An owner opens a round for a season; the bot DMs
@@ -22,15 +25,23 @@ import {
 // the router can't find them).
 //
 //   /signups open    season (optional season number; defaults to the league's
-//                    latest "upcoming" season), message (optional custom DM text)
+//                    latest "upcoming" season), message (optional custom DM
+//                    text), tracks (optional, up to 3 tracks to request
+//                    pictures of, separated by commas)
 //   /signups resume  continues sending queued DMs after a timeout
 //   /signups status  counts for the open round
 //   /signups list    names for the open round; show = signed_up (default) |
 //                    declined | pending | dm_failed | all
 //   /signups close   closes the open round
-//   /signups test    user (required), season (optional, defaults to 2).
-//                    Sends ONE test invite DM with 3 random F1 25 tracks.
+//   /signups test    user (required), season (optional, defaults to 2),
+//                    tracks (optional; omit for 3 random F1 25 tracks).
+//                    Sends ONE test invite DM.
 //                    Writes nothing to signup_rounds / league_signups.
+//
+// Team requests: after a driver taps Sign Up, the bot offers team buttons
+// (1st / 2nd / 3rd choice) when the league has team_rosters on file, then DMs
+// each requested team's principal(s). That flow lives in discord-signups.ts
+// (handleSignupButton); /signups open just reports whether it is on.
 //
 // Driver-facing, registered as its own command so it can be used from a DM:
 //
@@ -41,6 +52,9 @@ import {
 //
 // Tables: pitboss.signup_rounds (one open round per season),
 //         pitboss.league_signups (one row per member per round),
+//         pitboss.signup_team_choices (team requests, one row per pick),
+//         pitboss.signup_photos (screenshot log; files live in the
+//         "time-trials" storage bucket),
 //         rise_os.seasons.
 //
 // Who gets DM'd: every pitboss.driver_leagues member of the league with a
@@ -112,6 +126,11 @@ registerCommand("signups_open", async (ctx) => {
 
   const message = ctx.options.message as string | undefined;
 
+  // Optional tracks to request pictures of (max 3, comma separated).
+  const tracksInput = ctx.options.tracks as string | undefined;
+  const tracks = parseTracks(tracksInput);
+  const trackCount = (tracksInput ?? "").split(/[;,\n]/).filter((t) => t.trim()).length;
+
   return {
     defer: true,
     ephemeral: true,
@@ -121,6 +140,7 @@ registerCommand("signups_open", async (ctx) => {
         openedByDiscordId: ctx.discordUserId,
         seasonId,
         message,
+        tracks,
       });
       if (!opened.ok) return { content: opened.error };
 
@@ -134,6 +154,7 @@ registerCommand("signups_open", async (ctx) => {
       }
 
       const sent = await sendPendingDms(opened.roundId);
+      const teams = await leagueTeamOptions(leagueId);
 
       const lines = [
         `Signups are open for **${opened.seasonName}**.`,
@@ -142,6 +163,13 @@ registerCommand("signups_open", async (ctx) => {
             ? ` (${opened.skippedAlreadySignedUp} already signed up, skipped).`
             : "."),
         `DMs: ${sent.sent} sent, ${sent.failed} couldn't be reached (DMs closed).`,
+        tracks.length > 0
+          ? `Pictures requested: ${tracks.join(", ")}` +
+            (trackCount > tracks.length ? ` (only the first ${tracks.length} are used).` : ".")
+          : "No track pictures requested.",
+        teams.length > 0
+          ? `Team requests: on (${teams.length} teams). Principals are DM'd when a driver finishes picking.`
+          : "Team requests: off (no team rosters on file for this league).",
       ];
       if (sent.remaining > 0) {
         lines.push(`${sent.remaining} still queued — run \`/signups resume\` to keep sending.`);
@@ -426,6 +454,9 @@ registerCommand("signups_test", async (ctx) => {
     return { content: "season must be a season number (e.g. 2).", ephemeral: true };
   }
 
+  // Optional owner-chosen tracks; omitted = 3 random ones.
+  const tracks = parseTracks(ctx.options.tracks as string | undefined);
+
   return {
     defer: true,
     ephemeral: true,
@@ -435,6 +466,7 @@ registerCommand("signups_test", async (ctx) => {
         openedByDiscordId: ctx.discordUserId,
         targetDiscordId: target,
         seasonNumber,
+        tracks,
       });
       if (!res.ok) return { content: `Test invite failed: ${res.error}` };
       return {
@@ -459,8 +491,11 @@ registerCommand("signups_test", async (ctx) => {
 // where there is no guild to resolve a league from.
 //
 // A driver can use it once they have tapped Sign Up for an open round.
-// Nothing is written to the database; the channel post is the record.
+// Each image is saved to the private "time-trials" storage bucket under
+// signups/<league>/<round>/<driver>/ and logged in pitboss.signup_photos
+// (slot N = the Nth requested track), then re-posted to the signup channel.
 
+const PHOTO_BUCKET = "time-trials";
 const PHOTO_SLOTS = ["screenshot_1", "screenshot_2", "screenshot_3"] as const;
 const PHOTO_MAX_BYTES = 8 * 1024 * 1024; // 8 MB per image, 24 MB for all three
 const PHOTO_TYPE = /^image\/(png|jpe?g|webp|gif)$/i;
@@ -638,7 +673,7 @@ registerCommand(
         const { data: openRounds, error: roundsError } = await supabase
           .schema("pitboss")
           .from("signup_rounds")
-          .select("id, name, league_id")
+          .select("id, name, league_id, message")
           .in("league_id", leagueIds)
           .eq("status", "open");
         if (roundsError) {
@@ -651,7 +686,12 @@ registerCommand(
 
         // Only drivers who have tapped Sign Up. Checked across every round of
         // the season, so someone who signed up in an earlier round still counts.
-        const signedUpRounds: { id: string; name: string }[] = [];
+        const signedUpRounds: {
+          id: string;
+          name: string;
+          league_id: string;
+          message: string | null;
+        }[] = [];
         for (const round of openRounds) {
           const roundIds = await seasonRoundIds(round.id);
           const { data: rows } = await supabase
@@ -662,7 +702,14 @@ registerCommand(
             .eq("status", "signed_up")
             .in("round_id", roundIds)
             .limit(1);
-          if (rows && rows.length > 0) signedUpRounds.push({ id: round.id, name: round.name });
+          if (rows && rows.length > 0) {
+            signedUpRounds.push({
+              id: round.id,
+              name: round.name,
+              league_id: round.league_id,
+              message: (round as any).message ?? null,
+            });
+          }
         }
 
         if (signedUpRounds.length === 0) {
@@ -688,24 +735,93 @@ registerCommand(
           photos.push(result);
         }
 
+        // Slot N is matched to the Nth track the round asked for (if any).
+        const tracks = requestedTracksFromMessage(round.message);
+
+        // 1. Save every image to storage first, so the record exists even if
+        //    the channel post fails.
+        const stamp = Date.now();
+        const basePath = `signups/${round.league_id}/${round.id}/${driver.id}`;
+        const uploaded: { path: string; photo: DownloadedPhoto; slot: number }[] = [];
+
+        for (let i = 0; i < photos.length; i++) {
+          const photo = photos[i];
+          const path = `${basePath}/${stamp}-${photo.filename}`;
+          const { error: uploadError } = await supabase.storage
+            .from(PHOTO_BUCKET)
+            .upload(path, photo.data, { contentType: photo.contentType, upsert: false });
+
+          if (uploadError) {
+            console.error("[signup_photos] storage upload failed:", uploadError);
+            if (uploaded.length > 0) {
+              await supabase.storage
+                .from(PHOTO_BUCKET)
+                .remove(uploaded.map((u) => u.path));
+            }
+            return {
+              content:
+                "I couldn't save your screenshots, so nothing was sent. " +
+                "Try again in a moment, and tell a league owner if it keeps happening.",
+            };
+          }
+          uploaded.push({ path, photo, slot: i + 1 });
+        }
+
+        // 2. Log them against the signup.
+        const { error: logError } = await supabase
+          .schema("pitboss")
+          .from("signup_photos")
+          .insert(
+            uploaded.map((u) => ({
+              round_id: round.id,
+              league_id: round.league_id,
+              driver_id: driver.id,
+              slot: u.slot,
+              track: tracks[u.slot - 1] ?? null,
+              storage_bucket: PHOTO_BUCKET,
+              storage_path: u.path,
+              filename: u.photo.filename,
+              content_type: u.photo.contentType,
+              size_bytes: u.photo.data.byteLength,
+            }))
+          );
+        if (logError) {
+          console.error("[signup_photos] log insert failed:", logError);
+          await supabase.storage.from(PHOTO_BUCKET).remove(uploaded.map((u) => u.path));
+          return {
+            content:
+              "I couldn't record your screenshots, so nothing was sent. " +
+              "Try again in a moment, and tell a league owner if it keeps happening.",
+          };
+        }
+
+        // 3. Re-post to the signup channel.
         const name = driver.display_name || driver.discord_username || "A driver";
+        const trackLines = tracks.length
+          ? "\n" +
+            photos
+              .map((_, i) => (tracks[i] ? `${i + 1}. ${tracks[i]}` : null))
+              .filter(Boolean)
+              .join("\n")
+          : "";
         const content =
           `📸 **${name}** (<@${ctx.discordUserId}>) sent ${photos.length} ` +
-          `signup screenshot${photos.length === 1 ? "" : "s"} for **${round.name}**.`;
+          `signup screenshot${photos.length === 1 ? "" : "s"} for **${round.name}**.` +
+          trackLines;
 
         const posted = await postSignupPhotos(SIGNUP_CHANNEL_ID, content, photos);
         if (!posted) {
           return {
             content:
-              "I couldn't post your screenshots to the signup channel. " +
-              "Tell a league owner — nothing was sent.",
+              "Your screenshots are saved, but I couldn't post them to the signup channel. " +
+              "Tell a league owner.",
           };
         }
 
         return {
           content:
-            `Sent ${photos.length} screenshot${photos.length === 1 ? "" : "s"} to the ` +
-            `signup channel for **${round.name}**. You're all set.`,
+            `Saved and sent ${photos.length} screenshot${photos.length === 1 ? "" : "s"} ` +
+            `for **${round.name}**. You're all set.`,
         };
       },
     };
