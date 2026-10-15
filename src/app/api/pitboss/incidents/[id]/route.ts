@@ -1,12 +1,22 @@
+// FILE: src/app/api/pitboss/incidents/[id]/route.ts   (replace the whole file)
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 import { pbSteward, pbInfer } from '@/lib/pitboss-llm'
 import type { RuleArticle } from '@/lib/pitboss-llm'
 import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
+import { applyPositionDrop } from '@/lib/pitboss/applyResultPenalty'
 
 
 const MAX_URLS = 10
+
+// incidents.season is text, penalty_ledger.applies_season is an integer.
+// Returns null for anything that isn't a whole number.
+function toIntOrNull(v: unknown): number | null {
+  if (v == null || String(v).trim() === '') return null
+  const n = Number(v)
+  return Number.isInteger(n) ? n : null
+}
 // Returns a cleaned string[] (or null when none), or 'invalid' if any entry is
 // not an http(s) URL — keeps javascript:/data: links out of the incident record.
 function cleanUrls(input: unknown): string[] | null | 'invalid' {
@@ -227,10 +237,14 @@ export async function POST(
   if (action === 'resolve') {
     const {
       verdict,
-      penalty         = null,
-      penalty_points  = 0,
-      steward_notes   = null,
-      override_reason = null,
+      penalty              = null,
+      penalty_points       = 0,
+      time_penalty_seconds = 0,
+      position_drop        = 0,
+      grid_penalty_places  = 0,
+      grid_penalty_back    = false,
+      steward_notes        = null,
+      override_reason      = null,
     } = body
 
     if (!verdict || typeof verdict !== 'string' || verdict.length > 50) {
@@ -238,6 +252,17 @@ export async function POST(
     }
     if (typeof penalty_points !== 'number' || !Number.isFinite(penalty_points) || penalty_points < 0 || penalty_points > 1000) {
       return NextResponse.json({ error: 'penalty_points must be a number between 0 and 1000' }, { status: 400 })
+    }
+    if (typeof time_penalty_seconds !== 'number' || !Number.isFinite(time_penalty_seconds) || time_penalty_seconds < 0 || time_penalty_seconds > 3600) {
+      return NextResponse.json({ error: 'time_penalty_seconds must be a number between 0 and 3600' }, { status: 400 })
+    }
+    for (const [k, v] of [['position_drop', position_drop], ['grid_penalty_places', grid_penalty_places]] as const) {
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 30) {
+        return NextResponse.json({ error: `${k} must be a whole number between 0 and 30` }, { status: 400 })
+      }
+    }
+    if (typeof grid_penalty_back !== 'boolean') {
+      return NextResponse.json({ error: 'grid_penalty_back must be true or false' }, { status: 400 })
     }
     for (const [k, v] of [['penalty', penalty], ['steward_notes', steward_notes], ['override_reason', override_reason]] as const) {
       if (v != null && (typeof v !== 'string' || v.length > 4000)) {
@@ -253,6 +278,14 @@ export async function POST(
       )
     }
 
+    // Time, position and grid penalties only mean something on a guilty
+    // verdict. Store zeros otherwise so a stale value can't be picked up later.
+    const isGuilty   = verdict === 'guilty'
+    const timeSecs   = isGuilty ? time_penalty_seconds : 0
+    const posDrop    = isGuilty ? position_drop : 0
+    const gridPlaces = isGuilty ? grid_penalty_places : 0
+    const gridBack   = isGuilty ? grid_penalty_back : false
+
     const now = new Date().toISOString()
 
     // Only an unresolved incident can be resolved here, and only one request
@@ -262,14 +295,18 @@ export async function POST(
       .schema('pitboss')
       .from('incidents')
       .update({
-        status:          'resolved',
+        status:               'resolved',
         verdict,
         penalty,
         penalty_points,
+        time_penalty_seconds: timeSecs,
+        position_drop:        posDrop,
+        grid_penalty_places:  gridPlaces,
+        grid_penalty_back:    gridBack,
         steward_notes,
         override_reason,
-        resolved_by:     requestingDriver.id,
-        resolved_at:     now,
+        resolved_by:          requestingDriver.id,
+        resolved_at:          now,
       })
       .eq('id', params.id)
       .neq('status', 'resolved')
@@ -285,34 +322,88 @@ export async function POST(
       return NextResponse.json({ error: 'This incident has already been resolved' }, { status: 409 })
     }
 
-    if (verdict === 'guilty' && penalty_points > 0 && incident.accused_driver_id) {
+    if (isGuilty && incident.accused_driver_id) {
       // pp_total is NOT written here — pitboss.fn_recalc_driver_pp_total()
       // recomputes drivers.pp_total automatically via trg_penalty_ledger_pp_total
-      // the moment this insert lands. Do not add a manual pp_total update.
-      const { error: ledgerError } = await supabase
-        .schema('pitboss')
-        .from('penalty_ledger')
-        .insert({
-          driver_id:   incident.accused_driver_id,
-          league_id:   incident.league_id,
-          incident_id: incident.id,
-          points:      penalty_points,
-          reason:      penalty ?? `Incident: ${incident.incident_type}`,
-          issued_at:   now,
-          issued_by:   requestingDriver.id,
-          source:      'incident',
-        })
+      // the moment these rows land. It sums `points` only, so the time and
+      // grid rows below (points = 0) don't move it. Do not add a manual
+      // pp_total update.
+      const appliesSeason = toIntOrNull(incident.season)
+      const reason = penalty ?? `Incident: ${incident.incident_type}`
+      const base = {
+        driver_id:   incident.accused_driver_id,
+        league_id:   incident.league_id,
+        incident_id: incident.id,
+        issued_at:   now,
+        issued_by:   requestingDriver.id,
+        source:      'incident',
+        reason,
+      }
 
-      if (ledgerError) {
-        console.error('[incidents/id POST] penalty ledger insert', ledgerError)
-        return NextResponse.json(
-          { error: 'Incident was resolved, but penalty ledger entry failed: ' + ledgerError.message },
-          { status: 500 }
-        )
+      const ledgerRows: Record<string, unknown>[] = []
+      if (penalty_points > 0) {
+        ledgerRows.push({ ...base, penalty_type: 'pp', points: penalty_points })
+      }
+      if (timeSecs > 0) {
+        ledgerRows.push({
+          ...base,
+          penalty_type:         'time',
+          points:               0,
+          time_penalty_seconds: timeSecs,
+          time_label:           `+${timeSecs}s`,
+          applies_season:       appliesSeason,
+          applies_round:        incident.round ?? null,
+        })
+      }
+      if (gridPlaces > 0 || gridBack) {
+        ledgerRows.push({
+          ...base,
+          penalty_type:   'grid',
+          points:         0,
+          grid_places:    gridPlaces > 0 ? gridPlaces : null,
+          grid_back:      gridBack,
+          applies_season: appliesSeason,
+          applies_round:  incident.round ?? null,
+        })
+      }
+
+      if (ledgerRows.length > 0) {
+        const { error: ledgerError } = await supabase
+          .schema('pitboss')
+          .from('penalty_ledger')
+          .insert(ledgerRows)
+
+        if (ledgerError) {
+          console.error('[incidents/id POST] penalty ledger insert', ledgerError)
+          return NextResponse.json(
+            { error: 'Incident was resolved, but penalty ledger entry failed: ' + ledgerError.message },
+            { status: 500 }
+          )
+        }
       }
     }
 
-    return NextResponse.json({ success: true })
+    // Time penalty -> move the driver down the classification and re-point
+    // standings. A failure here does not undo the ruling; the steward gets a
+    // note instead.
+    let resultsUpdated = false
+    let resultsNote: string | undefined
+    if (isGuilty && posDrop > 0) {
+      try {
+        const outcome = await applyPositionDrop(supabase, incident, posDrop)
+        resultsUpdated = outcome.applied
+        resultsNote = outcome.note
+      } catch (err) {
+        console.error('[incidents/id POST] position drop', err)
+        resultsNote = "Ruling saved, but the results couldn't be updated. Check this round's results by hand."
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      ...(posDrop > 0 ? { results_updated: resultsUpdated } : {}),
+      ...(resultsNote ? { results_note: resultsNote } : {}),
+    })
   }
 
   // ── Action: analyse ──────────────────────────────────────────────────────
