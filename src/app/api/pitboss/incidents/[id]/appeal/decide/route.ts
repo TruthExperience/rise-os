@@ -1,7 +1,16 @@
+// FILE: src/app/api/pitboss/incidents/[id]/appeal/decide/route.ts   (replace the whole file)
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
+import { applyPositionDrop, revertIncidentAdjustments } from '@/lib/pitboss/applyResultPenalty'
+
+// incidents.season is text, penalty_ledger.applies_season is an integer.
+function toIntOrNull(v: unknown): number | null {
+  if (v == null || String(v).trim() === '') return null
+  const n = Number(v)
+  return Number.isInteger(n) ? n : null
+}
 
 export async function POST(
   req: NextRequest,
@@ -87,7 +96,17 @@ export async function POST(
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
-  const { action, new_verdict, new_penalty, new_penalty_points, review_notes = null } = body ?? {}
+  const {
+    action,
+    new_verdict,
+    new_penalty,
+    new_penalty_points,
+    new_time_penalty_seconds = 0,
+    new_position_drop        = 0,
+    new_grid_penalty_places  = 0,
+    new_grid_penalty_back    = false,
+    review_notes             = null,
+  } = body ?? {}
 
   if (!['uphold', 'overturn', 'dismiss'].includes(action)) {
     return NextResponse.json({ error: 'action must be "uphold", "overturn", or "dismiss"' }, { status: 400 })
@@ -97,6 +116,20 @@ export async function POST(
     (typeof new_penalty_points !== 'number' || !Number.isFinite(new_penalty_points) || new_penalty_points < 0 || new_penalty_points > 1000)
   ) {
     return NextResponse.json({ error: 'new_penalty_points must be a number between 0 and 1000' }, { status: 400 })
+  }
+  if (
+    typeof new_time_penalty_seconds !== 'number' || !Number.isFinite(new_time_penalty_seconds) ||
+    new_time_penalty_seconds < 0 || new_time_penalty_seconds > 3600
+  ) {
+    return NextResponse.json({ error: 'new_time_penalty_seconds must be a number between 0 and 3600' }, { status: 400 })
+  }
+  for (const [k, v] of [['new_position_drop', new_position_drop], ['new_grid_penalty_places', new_grid_penalty_places]] as const) {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 30) {
+      return NextResponse.json({ error: `${k} must be a whole number between 0 and 30` }, { status: 400 })
+    }
+  }
+  if (typeof new_grid_penalty_back !== 'boolean') {
+    return NextResponse.json({ error: 'new_grid_penalty_back must be true or false' }, { status: 400 })
   }
   if (typeof review_notes === 'string' && review_notes.length > 4000) {
     return NextResponse.json({ error: 'review_notes is too long (max 4000 characters)' }, { status: 400 })
@@ -173,7 +206,15 @@ export async function POST(
 
   const finalPenaltyPoints = new_penalty_points ?? 0
 
-  // Soft-delete the original penalty_ledger entry tied to this incident, if any.
+  // Time, position and grid penalties only apply if the new verdict is guilty.
+  const stillGuilty = new_verdict === 'guilty'
+  const timeSecs    = stillGuilty ? new_time_penalty_seconds : 0
+  const posDrop     = stillGuilty ? new_position_drop : 0
+  const gridPlaces  = stillGuilty ? new_grid_penalty_places : 0
+  const gridBack    = stillGuilty ? new_grid_penalty_back : false
+
+  // Soft-delete every original penalty_ledger entry tied to this incident
+  // (pp, time and grid rows alike), if any.
   // pp_total recalculates automatically via trg_penalty_ledger_pp_total.
   const { error: removeOldLedgerError } = await supabase
     .schema('pitboss')
@@ -188,26 +229,57 @@ export async function POST(
     return NextResponse.json({ error: removeOldLedgerError.message }, { status: 500 })
   }
 
-  // If the new verdict still carries a penalty, write a fresh ledger row.
-  if (new_verdict === 'guilty' && finalPenaltyPoints > 0 && incident.accused_driver_id) {
-    const { error: newLedgerError } = await supabase
-      .schema('pitboss')
-      .from('penalty_ledger')
-      .insert({
-        driver_id:   incident.accused_driver_id,
-        league_id:   incident.league_id,
-        incident_id: incident.id,
-        points:      finalPenaltyPoints,
-        reason:      new_penalty ?? `Incident (appeal overturn): ${incident.incident_type}`,
-        issued_at:   now,
-        issued_by:   requestingDriver.id,
-        source:      'incident',
-      })
+  // If the new verdict still carries a penalty, write fresh ledger rows.
+  if (stillGuilty && incident.accused_driver_id) {
+    const appliesSeason = toIntOrNull(incident.season)
+    const base = {
+      driver_id:   incident.accused_driver_id,
+      league_id:   incident.league_id,
+      incident_id: incident.id,
+      issued_at:   now,
+      issued_by:   requestingDriver.id,
+      source:      'incident',
+      reason:      new_penalty ?? `Incident (appeal overturn): ${incident.incident_type}`,
+    }
 
-    if (newLedgerError) {
-      console.error('[appeal/decide POST] new ledger row', newLedgerError)
-      await releaseClaim()
-      return NextResponse.json({ error: newLedgerError.message }, { status: 500 })
+    const ledgerRows: Record<string, unknown>[] = []
+    if (finalPenaltyPoints > 0) {
+      ledgerRows.push({ ...base, penalty_type: 'pp', points: finalPenaltyPoints })
+    }
+    if (timeSecs > 0) {
+      ledgerRows.push({
+        ...base,
+        penalty_type:         'time',
+        points:               0,
+        time_penalty_seconds: timeSecs,
+        time_label:           `+${timeSecs}s`,
+        applies_season:       appliesSeason,
+        applies_round:        incident.round ?? null,
+      })
+    }
+    if (gridPlaces > 0 || gridBack) {
+      ledgerRows.push({
+        ...base,
+        penalty_type:   'grid',
+        points:         0,
+        grid_places:    gridPlaces > 0 ? gridPlaces : null,
+        grid_back:      gridBack,
+        applies_season: appliesSeason,
+        applies_round:  incident.round ?? null,
+      })
+    }
+
+    if (ledgerRows.length > 0) {
+      const { error: newLedgerError } = await supabase
+        .schema('pitboss')
+        .from('penalty_ledger')
+        .insert(ledgerRows)
+
+      if (newLedgerError) {
+        console.error('[appeal/decide POST] new ledger row', newLedgerError)
+        await releaseClaim()
+        return NextResponse.json({ error: newLedgerError.message }, { status: 500 })
+      }
     }
   }
 
@@ -215,10 +287,14 @@ export async function POST(
     .schema('pitboss')
     .from('incidents')
     .update({
-      status:         'resolved',
-      verdict:        new_verdict,
-      penalty:        new_penalty ?? null,
-      penalty_points: finalPenaltyPoints,
+      status:               'resolved',
+      verdict:              new_verdict,
+      penalty:              new_penalty ?? null,
+      penalty_points:       finalPenaltyPoints,
+      time_penalty_seconds: timeSecs,
+      position_drop:        posDrop,
+      grid_penalty_places:  gridPlaces,
+      grid_penalty_back:    gridBack,
     })
     .eq('id', incident.id)
 
@@ -226,6 +302,32 @@ export async function POST(
     console.error('[appeal/decide POST] incident overturn update', incidentUpdateError)
     await releaseClaim()
     return NextResponse.json({ error: incidentUpdateError.message }, { status: 500 })
+  }
+
+  // Results: put back whatever the original ruling moved, then apply the new
+  // position drop (if any) from the restored classification. Standings are
+  // recomputed once, at the end. A failure here does not undo the decision;
+  // the steward gets a note instead.
+  const resultsNotes: string[] = []
+  let resultsChanged = false
+  try {
+    const reverted = await revertIncidentAdjustments(supabase, incident.id, { recompute: false })
+    resultsChanged = resultsChanged || reverted.applied
+    if (reverted.note) resultsNotes.push(reverted.note)
+
+    if (posDrop > 0) {
+      const applied = await applyPositionDrop(supabase, incident, posDrop, { recompute: false })
+      resultsChanged = resultsChanged || applied.applied
+      if (applied.note) resultsNotes.push(applied.note)
+    }
+
+    if (resultsChanged) {
+      const rc = await supabase.schema('pitboss').rpc('recompute_driver_standings')
+      if (rc.error) resultsNotes.push(`Standings recompute failed: ${rc.error.message}`)
+    }
+  } catch (err) {
+    console.error('[appeal/decide POST] results adjustment', err)
+    resultsNotes.push("Appeal decided, but the results couldn't be updated. Check this round's results by hand.")
   }
 
   const { error: appealUpdateError } = await supabase
@@ -247,5 +349,10 @@ export async function POST(
     return NextResponse.json({ error: appealUpdateError.message }, { status: 500 })
   }
 
-  return NextResponse.json({ success: true, outcome: 'overturn' })
+  return NextResponse.json({
+    success: true,
+    outcome: 'overturn',
+    ...(resultsChanged ? { results_updated: true } : {}),
+    ...(resultsNotes.length ? { results_note: resultsNotes.join(' ') } : {}),
+  })
 }
