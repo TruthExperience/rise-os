@@ -3,10 +3,17 @@
 import { Suspense, useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { penaltyDisplay } from '@/lib/pitboss/penaltyDisplay'
 
 interface Penalty {
   id: string
   points: number
+  penalty_type?: string | null
+  time_penalty_seconds?: number | null
+  time_label?: string | null
+  grid_places?: number | null
+  grid_back?: boolean | null
+  applies_round?: number | null
   reason: string
   source: string
   issued_at: string
@@ -199,9 +206,9 @@ function MyPenaltiesInner() {
                   <p className="text-white text-sm flex-1">{p.reason}</p>
                   <div className="text-right flex-shrink-0">
                     <span className={`text-lg font-black ${p.is_active && !p.removed_at ? 'text-orange-400' : 'text-gray-600'}`}>
-                      +{p.points}
+                      {penaltyDisplay(p).value}
                     </span>
-                    <p className="text-gray-600 text-xs">PP</p>
+                    <p className="text-gray-600 text-xs">{penaltyDisplay(p).unit}</p>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2">
