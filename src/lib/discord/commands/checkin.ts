@@ -110,9 +110,13 @@ export async function getOrCreateDriver(
   return { driver } as const;
 }
 
+// What a driver or admin can type in `round` to mean the preseason test round.
+const PRESEASON_INPUT = /^(pre|pre-?season|preseason testing|testing|test)$/i;
+
 /**
  * Resolves a round from a free-text `round` option (matched against
- * round_number if numeric, else name), or falls back to the next
+ * round_number if numeric, `pre`/`preseason` for the preseason test round,
+ * else name), or falls back to the next
  * upcoming round for the league/season if none was given.
  *
  * Pass `divisionId` whenever it's known — D1 and D2 rows share
@@ -137,7 +141,13 @@ export async function resolveRound(
     .eq("league_id", leagueId);
 
   if (divisionId) {
-    query = query.eq("division_id", divisionId);
+    // Rounds with no division_id belong to the whole league (e.g. VRC's
+    // calendar, or a shared preseason test), so they match every division.
+    // A division's own row is preferred when both exist for the same round
+    // (see the ordering below).
+    query = query
+      .or(`division_id.eq.${divisionId},division_id.is.null`)
+      .order("division_id", { ascending: true, nullsFirst: false });
   }
 
   if (seasonInput) {
@@ -148,10 +158,20 @@ export async function resolveRound(
   }
 
   if (roundInput) {
-    const asNumber = Number(roundInput);
-    query = Number.isFinite(asNumber)
-      ? query.eq("round_number", asNumber)
-      : query.ilike("name", `%${roundInput}%`);
+    const trimmed = roundInput.trim();
+    const asNumber = Number(trimmed);
+    if (PRESEASON_INPUT.test(trimmed)) {
+      // "pre" / "preseason" / "testing" -> the preseason test round (type
+      // "testing", no round_number). Newest season first when no season given.
+      query = query
+        .eq("type", "testing")
+        .order("season_number", { ascending: false })
+        .order("race_date", { ascending: true, nullsFirst: false });
+    } else {
+      query = Number.isFinite(asNumber)
+        ? query.eq("round_number", asNumber)
+        : query.ilike("name", `%${trimmed}%`);
+    }
     const { data, error } = await query.limit(1).maybeSingle();
     if (error) return { error: error.message } as const;
     if (!data) return { error: `No round matching "${roundInput}" found.` } as const;
