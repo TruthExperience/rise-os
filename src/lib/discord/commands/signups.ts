@@ -61,10 +61,14 @@ import {
 //
 // Driver-facing, registered as its own command so it can be used from a DM:
 //
-//   /signup photos   screenshot_1 (required), screenshot_2, screenshot_3.
-//                    Works in a DM with the bot or in a league server. The bot
-//                    re-posts the images into the league's signup channel
-//                    (pitboss.leagues.signup_channel_id). Key: signup_photos
+//   /signup photos   screenshot_1 (required), screenshot_2, screenshot_3,
+//                    league (optional). Works in a DM with the bot or in a
+//                    league server. The bot re-posts the images into the
+//                    league's signup channel (pitboss.leagues.signup_channel_id).
+//                    In a DM, a driver signed up in MORE than one league
+//                    types `league` (name, slug or initials, e.g. "wsc") to
+//                    say which one; it is ignored in a league server, where
+//                    the league is already known. Key: signup_photos
 //                    (leagueOptional).
 //
 // Signup channel: each league has its own, stored in
@@ -637,6 +641,10 @@ registerCommand("signups_test", async (ctx) => {
 // Each image is saved to the private "time-trials" storage bucket under
 // signups/<league>/<round>/<driver>/ and logged in pitboss.signup_photos
 // (slot N = the Nth requested track), then re-posted to the signup channel.
+//
+// In a DM there is no guild to say which league this is for. If the driver is
+// signed up in only one, that's the one. If they're signed up in several, they
+// pick with the optional `league` option (see pickSignupByLeague below).
 
 const PHOTO_BUCKET = "time-trials";
 const PHOTO_SLOTS = ["screenshot_1", "screenshot_2", "screenshot_3"] as const;
@@ -751,6 +759,89 @@ async function postSignupPhotos(
   return true;
 }
 
+// ─── League choice for /signup photos in a DM ────────────────────────────
+
+interface SignedUpRound {
+  id: string;
+  name: string;
+  league_id: string;
+  message: string | null;
+}
+
+interface SignupChoice extends SignedUpRound {
+  league_name: string;
+  slug: string;
+}
+
+// "World Series Championship" -> "wsc"
+function leagueInitials(name: string): string {
+  return name
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w[0].toLowerCase())
+    .join("");
+}
+
+// Lower-case and drop everything that isn't a letter or digit, so "WSC",
+// "wsc", "Vector Racing" and "vector-racing" all compare on equal footing.
+function leagueKey(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function choiceLabel(c: SignupChoice): string {
+  return `${c.league_name} (${c.name})`;
+}
+
+// Adds each round's league name and slug so a typed `league` can be matched.
+async function describeSignupChoices(
+  supabase: ReturnType<typeof createAdminClient>,
+  rounds: SignedUpRound[]
+): Promise<SignupChoice[]> {
+  const ids = Array.from(new Set(rounds.map((r) => r.league_id)));
+  const { data, error } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("id, name, slug")
+    .in("id", ids);
+  if (error) {
+    console.error("[signup_photos] league name lookup failed:", error);
+  }
+
+  const byId = new Map<string, { name: string | null; slug: string | null }>(
+    (data ?? []).map((l: any) => [l.id as string, { name: l.name, slug: l.slug }])
+  );
+
+  return rounds.map((r) => {
+    const l = byId.get(r.league_id);
+    return { ...r, league_name: l?.name ?? r.name, slug: l?.slug ?? "" };
+  });
+}
+
+// Matches what the driver typed against the leagues they're signed up in.
+// Accepts the league name, its slug, its initials (e.g. "wsc" for World
+// Series Championship) or the round name, in any case. An exact match wins;
+// otherwise a partial match counts if it points at exactly one signup.
+function pickSignupByLeague(
+  input: string,
+  choices: SignupChoice[]
+): { choice: SignupChoice } | { error: "none" | "ambiguous"; matches: SignupChoice[] } {
+  const key = leagueKey(input);
+  if (key.length < 2) return { error: "none", matches: [] };
+
+  const candidates = (c: SignupChoice) =>
+    [c.league_name, c.slug, leagueInitials(c.league_name), c.name]
+      .map(leagueKey)
+      .filter(Boolean);
+
+  const exact = choices.filter((c) => candidates(c).includes(key));
+  if (exact.length === 1) return { choice: exact[0] };
+  if (exact.length > 1) return { error: "ambiguous", matches: exact };
+
+  const partial = choices.filter((c) => candidates(c).some((k) => k.includes(key)));
+  if (partial.length === 1) return { choice: partial[0] };
+  return { error: partial.length > 1 ? "ambiguous" : "none", matches: partial };
+}
+
 registerCommand(
   "signup_photos",
   async (ctx) => {
@@ -767,6 +858,10 @@ registerCommand(
         ephemeral: true,
       };
     }
+
+    // Optional. Only used in a DM, to say which league when the driver is
+    // signed up in more than one. In a league server the league is known.
+    const leagueInput = ((ctx.options.league as string | undefined) ?? "").trim();
 
     // Always deferred: downloading and re-uploading images can outlast
     // Discord's 3-second ACK window.
@@ -829,14 +924,9 @@ registerCommand(
 
         // Only drivers who have tapped Sign Up. Checked across every round of
         // the season, so someone who signed up in an earlier round still counts.
-        const signedUpRounds: {
-          id: string;
-          name: string;
-          league_id: string;
-          message: string | null;
-        }[] = [];
-        for (const round of openRounds) {
-          const roundIds = await seasonRoundIds(round.id);
+        const signedUpRounds: SignedUpRound[] = [];
+        for (const openRound of openRounds) {
+          const roundIds = await seasonRoundIds(openRound.id);
           const { data: rows } = await supabase
             .schema("pitboss")
             .from("league_signups")
@@ -847,10 +937,10 @@ registerCommand(
             .limit(1);
           if (rows && rows.length > 0) {
             signedUpRounds.push({
-              id: round.id,
-              name: round.name,
-              league_id: round.league_id,
-              message: (round as any).message ?? null,
+              id: openRound.id,
+              name: openRound.name,
+              league_id: openRound.league_id,
+              message: (openRound as any).message ?? null,
             });
           }
         }
@@ -862,14 +952,41 @@ registerCommand(
               "then send the screenshots again.",
           };
         }
-        if (signedUpRounds.length > 1) {
+
+        // Settle which signup these screenshots belong to.
+        let round: SignedUpRound;
+        if (leagueInput && !ctx.leagueId) {
+          // In a DM with a league typed: match it against the leagues they
+          // actually signed up in.
+          const choices = await describeSignupChoices(supabase, signedUpRounds);
+          const picked = pickSignupByLeague(leagueInput, choices);
+          if ("error" in picked) {
+            const list = (picked.matches.length > 0 ? picked.matches : choices)
+              .map(choiceLabel)
+              .join(", ");
+            return {
+              content:
+                picked.error === "ambiguous"
+                  ? `"${leagueInput}" matches more than one of your signups: ${list}. ` +
+                    "Type more of the league's name."
+                  : `I don't see a signup from you in a league matching "${leagueInput}". ` +
+                    `You're signed up in: ${list}.`,
+            };
+          }
+          round = picked.choice;
+        } else if (signedUpRounds.length > 1) {
+          const choices = await describeSignupChoices(supabase, signedUpRounds);
+          const example = choices.find((c) => c.slug)?.slug ?? "wsc";
           return {
             content:
-              "You have signups open in more than one league, so run `/signup photos` " +
-              "in the league's server instead of a DM.",
+              `You're signed up in more than one league: ${choices.map(choiceLabel).join(", ")}. ` +
+              `Run \`/signup photos\` again and fill in the \`league\` option ` +
+              `(for example \`league: ${example}\`), or run it in that league's server. ` +
+              "Nothing was posted.",
           };
+        } else {
+          round = signedUpRounds[0];
         }
-        const round = signedUpRounds[0];
 
         const photos: DownloadedPhoto[] = [];
         for (let i = 0; i < attachments.length; i++) {
