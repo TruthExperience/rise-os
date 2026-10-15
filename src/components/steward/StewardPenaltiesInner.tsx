@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
+import { penaltyDisplay } from '@/lib/pitboss/penaltyDisplay'
 
 interface Driver {
   id: string
@@ -16,6 +17,12 @@ interface Penalty {
   id: string
   driver_id: string
   points: number
+  penalty_type?: string | null
+  time_penalty_seconds?: number | null
+  time_label?: string | null
+  grid_places?: number | null
+  grid_back?: boolean | null
+  applies_round?: number | null
   reason: string
   source: string
   issued_at: string
@@ -333,8 +340,13 @@ export function StewardPenaltiesInner() {
                   </div>
                   <div className="shrink-0 flex flex-col items-end gap-2">
                     <span className={`text-2xl font-black ${p.is_active && !p.removed_at ? 'text-orange-400' : 'text-white/20'}`}>
-                      +{p.points}
+                      {penaltyDisplay(p).value}
                     </span>
+                    {penaltyDisplay(p).unit !== 'PP' && (
+                      <span className="text-[10px] text-white/40">
+                        {penaltyDisplay(p).unit}{penaltyDisplay(p).detail ? ` · ${penaltyDisplay(p).detail}` : ''}
+                      </span>
+                    )}
                     {p.source === 'manual' && !p.removed_at && (
                       <button
                         onClick={() => handleRemove(p.id)}
