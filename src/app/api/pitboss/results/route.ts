@@ -1,6 +1,8 @@
+// FILE: src/app/api/pitboss/results/route.ts   (replace the whole file)
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthedDriver, getSupabaseUserId } from '@/lib/getSupabaseUserId'
 import { createAdminClient } from '@/lib/supabase/server'
+import { applyPositionDrop } from '@/lib/pitboss/applyResultPenalty'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
 
@@ -22,6 +24,52 @@ async function resolveDriverAndCheckSteward(driverId: string, leagueId: string) 
   return { supabase, driver, licence }
 }
 
+
+// A guilty ruling can be made before the round's results are entered. When
+// the results arrive, apply any position drops that are still waiting. Each
+// incident is applied at most once (active adjustments are skipped). Standings
+// are NOT recomputed here; the caller does that once for the whole request.
+async function applyPendingPositionDrops(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  rows: any[]
+): Promise<{ applied: number; notes: string[] }> {
+  const rounds = new Map<string, { season: string; round: number }>()
+  for (const r of rows) {
+    rounds.set(`${r.season}|${r.round}`, { season: String(r.season), round: Number(r.round) })
+  }
+
+  let applied = 0
+  const notes: string[] = []
+  for (const { season, round } of rounds.values()) {
+    const { data: incidents } = await supabase
+      .schema('pitboss')
+      .from('incidents')
+      .select('id, league_id, season, round, accused_driver_id, position_drop')
+      .eq('league_id', leagueId)
+      .eq('season', season)
+      .eq('round', round)
+      .eq('status', 'resolved')
+      .eq('verdict', 'guilty')
+      .gt('position_drop', 0)
+
+    for (const inc of incidents ?? []) {
+      const { data: active } = await supabase
+        .schema('pitboss')
+        .from('result_adjustments')
+        .select('id')
+        .eq('incident_id', inc.id)
+        .is('reverted_at', null)
+        .limit(1)
+      if (active && active.length > 0) continue
+
+      const outcome = await applyPositionDrop(supabase, inc, inc.position_drop, { recompute: false })
+      if (outcome.applied) applied++
+      if (outcome.note) notes.push(outcome.note)
+    }
+  }
+  return { applied, notes }
+}
 
 const NUMERIC_FIELDS = [
   'round', 'qualifying_position', 'finish_position', 'points_earned', 'penalty_points_added',
@@ -204,15 +252,38 @@ export async function POST(req: NextRequest) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  const { error: recomputeError } = await supabase.schema('pitboss').rpc('recompute_driver_standings')
-  if (recomputeError) {
-    return NextResponse.json(
-      { results: data, warning: `Results saved, but standings recompute failed: ${recomputeError.message}` },
-      { status: 201 }
-    )
+  // Rulings made before these results existed may carry a position drop.
+  // A failure here never undoes the saved results; it comes back as a note.
+  let pending: { applied: number; notes: string[] } = { applied: 0, notes: [] }
+  try {
+    pending = await applyPendingPositionDrops(supabase, league_id, inserts)
+  } catch (err) {
+    console.error('[results POST] pending position drops', err)
+    pending.notes.push("Results saved, but waiting position drops couldn't be applied. Check the round's penalties.")
   }
 
-  return NextResponse.json({ results: data }, { status: 201 })
+  // One recompute for the whole request. It covers every league.
+  const { error: recomputeError } = await supabase.schema('pitboss').rpc('recompute_driver_standings')
+
+  // If a drop moved rows, send back the current values, not the inserted ones.
+  let responseRows = data
+  if (pending.applied > 0 && data?.length) {
+    const { data: fresh } = await supabase
+      .schema('pitboss')
+      .from('results')
+      .select('*')
+      .in('id', data.map((r: any) => r.id))
+    if (fresh) responseRows = fresh
+  }
+
+  const warnings: string[] = []
+  if (recomputeError) warnings.push(`Results saved, but standings recompute failed: ${recomputeError.message}`)
+  warnings.push(...pending.notes)
+
+  return NextResponse.json(
+    { results: responseRows, ...(warnings.length ? { warning: warnings.join(' ') } : {}) },
+    { status: 201 }
+  )
 }
 
 // PUT — edit a single result
