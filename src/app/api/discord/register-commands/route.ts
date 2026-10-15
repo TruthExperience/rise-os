@@ -32,6 +32,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+// Allow time for rate-limit waits while registering several commands.
+export const maxDuration = 60;
 
 // /setup. Every option is optional: the handler (src/lib/discord/commands/
 // setup.ts) auto-detects channels/roles by name and keeps saved values.
@@ -651,16 +653,28 @@ async function register(): Promise<NextResponse> {
     STEWARD_COMMAND,
     APPEAL_COMMAND,
   ]) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bot ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(command),
-    });
+    // Discord rate-limits command writes (a 429 comes back with
+    // retry_after in seconds). Wait that long and try again, up to 4 times,
+    // instead of failing the whole registration part-way through.
+    let res: Response;
+    let json: any = {};
+    for (let attempt = 0; ; attempt++) {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bot ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(command),
+      });
+      json = await res.json().catch(() => ({}));
 
-    const json = await res.json().catch(() => ({}));
+      if (res.status !== 429 || attempt >= 4) break;
+
+      const waitSeconds = Math.min(Number(json?.retry_after ?? 2) + 0.5, 10);
+      await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+    }
+
     if (!res.ok) {
       console.error("[register-commands] failed:", command.name, res.status, json);
       return NextResponse.json(
