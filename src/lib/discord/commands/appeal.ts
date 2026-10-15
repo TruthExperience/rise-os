@@ -4,6 +4,8 @@ import { createAdminClient } from "@/lib/supabase/server";
 import { postTicketMessage, sendDirectMessage, createAppealTicket } from "../tickets";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 import { getTicketLabel } from "./steward";
+import { applyPositionDrop, revertIncidentAdjustments } from "@/lib/pitboss/applyResultPenalty";
+import { buildIncidentLedgerRows } from "@/lib/pitboss/incidentPenaltyRows";
 import {
   addEvidenceFile,
   addEvidenceLink,
@@ -111,7 +113,7 @@ async function findIncidentByShortId(leagueId: string, shortId: string) {
     .schema("pitboss")
     .from("incidents")
     .select(
-      "id, status, verdict, penalty, penalty_points, accused_driver_id, evidence_urls, accused_evidence_urls, ticket_number, drivers!incidents_reported_by_fkey(discord_id)"
+      "id, league_id, season, round, status, verdict, penalty, penalty_points, accused_driver_id, evidence_urls, accused_evidence_urls, ticket_number, drivers!incidents_reported_by_fkey(discord_id)"
     )
     .eq("league_id", leagueId);
 
@@ -551,6 +553,18 @@ registerCommand("appeal_review", async (ctx) => {
   const newPoints = ctx.options.new_points as number | undefined;
   const notes = ctx.options.notes as string | undefined;
 
+  // Time, position and grid penalties only apply when the revised verdict is
+  // "guilty" (same rule as the web appeal route).
+  const stillGuilty = (newVerdict ?? "").trim().toLowerCase() === "guilty";
+  const rawTime = (ctx.options.new_time_penalty_seconds as number | undefined) ?? 0;
+  const rawDrop = (ctx.options.new_position_drop as number | undefined) ?? 0;
+  const rawGridPlaces = (ctx.options.new_grid_penalty_places as number | undefined) ?? 0;
+  const rawGridBack = (ctx.options.new_grid_penalty_back as boolean | undefined) ?? false;
+  const timeSecs = stillGuilty ? rawTime : 0;
+  const posDrop = stillGuilty ? rawDrop : 0;
+  const gridPlaces = stillGuilty ? rawGridPlaces : 0;
+  const gridBack = stillGuilty ? rawGridBack : false;
+
   const incident = await findIncidentByShortId(leagueId, rawInput);
   if (!incident) {
     return {
@@ -607,6 +621,10 @@ registerCommand("appeal_review", async (ctx) => {
     incidentUpdate.verdict = newVerdict ?? incident.verdict;
     incidentUpdate.penalty = newPenalty ?? incident.penalty;
     incidentUpdate.penalty_points = newPoints ?? 0;
+    incidentUpdate.time_penalty_seconds = timeSecs;
+    incidentUpdate.position_drop = posDrop;
+    incidentUpdate.grid_penalty_places = gridPlaces;
+    incidentUpdate.grid_penalty_back = gridBack;
   }
 
   const { error: incidentUpdateError } = await supabase
@@ -639,20 +657,55 @@ registerCommand("appeal_review", async (ctx) => {
         .in("id", existingLedgerRows.map((r) => r.id));
     }
 
-    if ((newPoints ?? 0) > 0) {
+    const ledgerRows = buildIncidentLedgerRows({
+      driverId: incident.accused_driver_id,
+      leagueId,
+      incidentId: incident.id,
+      issuedBy: reviewerId,
+      issuedAt: new Date().toISOString(),
+      reason: `Appeal overturned — ${newVerdict ?? "revised verdict"} — ${newPenalty ?? "revised penalty"}`,
+      season: incident.season,
+      round: incident.round,
+      points: newPoints ?? 0,
+      timeSeconds: timeSecs,
+      gridPlaces,
+      gridBack,
+    });
+    if (ledgerRows.length > 0) {
       const { error: ledgerError } = await supabase
         .schema("pitboss")
         .from("penalty_ledger")
-        .insert({
-          driver_id: incident.accused_driver_id,
-          league_id: leagueId,
-          incident_id: incident.id,
-          points: newPoints,
-          reason: `Appeal overturned — ${newVerdict ?? "revised verdict"} — ${newPenalty ?? "revised penalty"}`,
-        });
+        .insert(ledgerRows);
       if (ledgerError) {
         console.error("[appeal_review] penalty_ledger insert failed:", ledgerError);
       }
+    }
+  }
+
+  // Results: put back whatever the original ruling moved, then apply the
+  // revised position drop (if any) from the restored classification.
+  // Standings are recomputed once at the end. A failure here does not undo
+  // the decision; the steward gets a note instead.
+  const resultsNotes: string[] = [];
+  if (decision === "overturned") {
+    try {
+      const reverted = await revertIncidentAdjustments(supabase, incident.id, { recompute: false });
+      let resultsChanged = reverted.applied;
+      if (reverted.note) resultsNotes.push(reverted.note);
+
+      if (posDrop > 0 && incident.accused_driver_id) {
+        const applied = await applyPositionDrop(supabase, incident, posDrop, { recompute: false });
+        resultsChanged = resultsChanged || applied.applied;
+        if (applied.note) resultsNotes.push(applied.note);
+      }
+
+      if (resultsChanged) {
+        const rc = await supabase.schema("pitboss").rpc("recompute_driver_standings");
+        if (rc.error) resultsNotes.push(`Standings recompute failed: ${rc.error.message}`);
+      }
+    } catch (err) {
+      console.error("[appeal_review] results adjustment failed:", err);
+      resultsNotes.push("Appeal decided, but the results couldn't be updated. Check this round's results by hand.");
     }
   }
 
@@ -674,6 +727,14 @@ registerCommand("appeal_review", async (ctx) => {
       ? `New verdict: ${newVerdict ?? "—"}${newPenalty ? ` — ${newPenalty}` : ""}${
           newPoints !== undefined ? ` (${newPoints} pts)` : ""
         }`
+      : null,
+    decision === "overturned" && (timeSecs > 0 || posDrop > 0 || gridPlaces > 0 || gridBack)
+      ? `Sporting penalties: ${[
+          timeSecs > 0 ? `+${timeSecs}s time penalty` : null,
+          posDrop > 0 ? `${posDrop}-place position drop` : null,
+          gridPlaces > 0 ? `${gridPlaces}-place grid penalty` : null,
+          gridBack ? "back-of-grid start" : null,
+        ].filter(Boolean).join(", ")}`
       : null,
     notes ? `Steward notes: ${notes}` : null,
   ].filter(Boolean);
@@ -708,7 +769,10 @@ registerCommand("appeal_review", async (ctx) => {
   }
 
   return {
-    content: `Appeal on incident **${ticketLabel}** marked **${decision}**.`,
+    content: [
+      `Appeal on incident **${ticketLabel}** marked **${decision}**.`,
+      ...resultsNotes,
+    ].join("\n"),
     ephemeral: true,
   };
 });
