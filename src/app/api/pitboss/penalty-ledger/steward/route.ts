@@ -60,7 +60,7 @@ export async function GET(req: NextRequest) {
   let query = supabase
     .schema('pitboss')
     .from('penalty_ledger')
-    .select('id, driver_id, league_id, points, reason, source, incident_id, issued_by, issued_at, expires_at, removed_at, removed_by')
+    .select('id, driver_id, league_id, points, reason, source, incident_id, issued_by, issued_at, expires_at, removed_at, removed_by, penalty_type, time_penalty_seconds, time_label, grid_places, grid_back, applies_season, applies_round')
     .eq('league_id', leagueId)
     .order('issued_at', { ascending: false })
 
