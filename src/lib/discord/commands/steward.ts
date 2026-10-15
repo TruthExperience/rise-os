@@ -15,6 +15,8 @@ import {
   sendAppealPromptDM,
 } from "../tickets";
 import { hasDiscordStewardAccess } from "../permissions";
+import { applyPositionDrop } from "@/lib/pitboss/applyResultPenalty";
+import { buildIncidentLedgerRows } from "@/lib/pitboss/incidentPenaltyRows";
 import {
   copyDiscordAttachmentToStorage,
   recordIncidentEvidence,
@@ -1435,6 +1437,20 @@ registerCommand("steward_verdict", async (ctx) => {
   const stewardNotes = ctx.options.notes as string | undefined;
   const overrideReason = ctx.options.override_reason as string | undefined;
 
+  // Time, position and grid penalties only mean something on a guilty
+  // verdict (same rule as the web resolve route). On any other verdict they
+  // are stored as zero and the steward is told they were ignored.
+  const isGuilty = verdict.trim().toLowerCase() === "guilty";
+  const rawTime = (ctx.options.time_penalty_seconds as number | undefined) ?? 0;
+  const rawDrop = (ctx.options.position_drop as number | undefined) ?? 0;
+  const rawGridPlaces = (ctx.options.grid_penalty_places as number | undefined) ?? 0;
+  const rawGridBack = (ctx.options.grid_penalty_back as boolean | undefined) ?? false;
+  const timeSecs = isGuilty ? rawTime : 0;
+  const posDrop = isGuilty ? rawDrop : 0;
+  const gridPlaces = isGuilty ? rawGridPlaces : 0;
+  const gridBack = isGuilty ? rawGridBack : false;
+  const ignoredExtras = !isGuilty && (rawTime > 0 || rawDrop > 0 || rawGridPlaces > 0 || rawGridBack);
+
   const resolverId = await getOrCreateDriverId(ctx.discordUserId);
   const supabase = createAdminClient();
 
@@ -1445,6 +1461,10 @@ registerCommand("steward_verdict", async (ctx) => {
       verdict,
       penalty: penalty ?? null,
       penalty_points: penaltyPoints,
+      time_penalty_seconds: timeSecs,
+      position_drop: posDrop,
+      grid_penalty_places: gridPlaces,
+      grid_penalty_back: gridBack,
       steward_notes: stewardNotes ?? null,
       override_reason: overrideReason ?? null,
       status: "resolved",
@@ -1463,28 +1483,63 @@ registerCommand("steward_verdict", async (ctx) => {
     };
   }
 
-  if (penaltyPoints > 0 && updated.accused_driver_id) {
+  const ledgerRows = updated.accused_driver_id
+    ? buildIncidentLedgerRows({
+        driverId: updated.accused_driver_id,
+        leagueId: updated.league_id,
+        incidentId: incident.id,
+        issuedBy: resolverId,
+        issuedAt: new Date().toISOString(),
+        reason: `${verdict} — ${penalty ?? "Penalty issued"}`,
+        season: updated.season,
+        round: updated.round,
+        points: penaltyPoints,
+        timeSeconds: timeSecs,
+        gridPlaces,
+        gridBack,
+      })
+    : [];
+
+  if (ledgerRows.length > 0) {
     const { error: ledgerError } = await supabase
       .schema("pitboss")
       .from("penalty_ledger")
-      .insert({
-        driver_id: updated.accused_driver_id,
-        league_id: updated.league_id,
-        incident_id: incident.id,
-        points: penaltyPoints,
-        reason: `${verdict} — ${penalty ?? "Penalty issued"}`,
-      });
+      .insert(ledgerRows);
 
     if (ledgerError) {
       console.error("[steward_verdict] penalty_ledger insert failed:", ledgerError);
     }
   }
 
+  // Position drop: move the driver down the classification and re-point
+  // standings. A failure here does not undo the ruling; the steward gets a
+  // note instead.
+  let resultsNote: string | undefined;
+  if (posDrop > 0 && updated.accused_driver_id) {
+    try {
+      const outcome = await applyPositionDrop(supabase, updated, posDrop);
+      resultsNote = outcome.applied
+        ? `Results updated: driver moved down ${posDrop} place${posDrop === 1 ? "" : "s"}.`
+        : outcome.note;
+    } catch (err) {
+      console.error("[steward_verdict] position drop failed:", err);
+      resultsNote = "Verdict saved, but the results couldn't be updated. Check this round's results by hand.";
+    }
+  }
+
+  const extraPenaltyLines = [
+    timeSecs > 0 ? `+${timeSecs}s time penalty` : null,
+    posDrop > 0 ? `${posDrop}-place position drop` : null,
+    gridPlaces > 0 ? `${gridPlaces}-place grid penalty` : null,
+    gridBack ? "back-of-grid start" : null,
+  ].filter(Boolean);
+
   await postTicketMessage(
     channelId,
     [
       `**Verdict:** ${verdict}`,
       penalty ? `**Penalty:** ${penalty}${penaltyPoints ? ` (${penaltyPoints} pts)` : ""}` : null,
+      extraPenaltyLines.length ? `**Sporting penalties:** ${extraPenaltyLines.join(", ")}` : null,
       stewardNotes ? `**Notes:** ${stewardNotes}` : null,
       overrideReason ? `**Override reason:** ${overrideReason}` : null,
     ]
@@ -1492,7 +1547,13 @@ registerCommand("steward_verdict", async (ctx) => {
       .join("\n")
   );
 
-  return { content: "Verdict recorded and posted to the ticket.", ephemeral: false };
+  const replyLines = [
+    "Verdict recorded and posted to the ticket.",
+    ignoredExtras ? "Time, position and grid penalties were ignored because the verdict isn't \"guilty\"." : null,
+    resultsNote ?? null,
+  ].filter(Boolean);
+
+  return { content: replyLines.join("\n"), ephemeral: false };
 });
 
 registerCommand("steward_assign", async (ctx) => {
