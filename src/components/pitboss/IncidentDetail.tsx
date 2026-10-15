@@ -1,3 +1,4 @@
+// FILE: src/components/pitboss/IncidentDetail.tsx   (replace the whole file)
 'use client'
 
 import { useEffect, useState } from 'react'
@@ -13,6 +14,10 @@ interface Incident {
   verdict: string | null
   penalty: string | null
   penalty_points: number | null
+  time_penalty_seconds?: number | null
+  position_drop?: number | null
+  grid_penalty_places?: number | null
+  grid_penalty_back?: boolean | null
   steward_notes: string | null
   override_reason: string | null
   season: string | null
@@ -63,6 +68,25 @@ interface Appeal {
 const TIME_PENALTIES = ['+3s', '+5s', '+10s', '+15s', 'Drive-Through', 'Pit Lane Start']
 const GRID_PENALTIES = ['3 places', '5 places', '10 places', 'Back of Grid']
 const BAN_PENALTIES  = ['Race Ban', 'Season Ban', 'Permanent Ban']
+
+// "+5s" -> 5. Labels like "Drive-Through" carry no seconds.
+function secondsFromLabel(label: string): number {
+  const m = /^\+(\d+(?:\.\d+)?)s$/.exec(label.trim())
+  return m ? Number(m[1]) : 0
+}
+
+// "5 places" -> 5 places, "Back of Grid" -> back of the grid.
+function gridFromLabel(label: string): { places: number; back: boolean } {
+  if (label === 'Back of Grid') return { places: 0, back: true }
+  const m = /^(\d+) places$/.exec(label.trim())
+  return { places: m ? Number(m[1]) : 0, back: false }
+}
+
+// Whole number between 0 and 30 (what the API accepts), from a text input.
+function toPlaces(v: string): number {
+  const n = Math.floor(Number(v))
+  return Number.isFinite(n) ? Math.min(30, Math.max(0, n)) : 0
+}
 
 type PenaltyType = 'none' | 'time' | 'grid' | 'ban' | 'reprimand' | 'warning' | 'dsq'
 type AppealAction = 'uphold' | 'overturn' | 'dismiss' | ''
@@ -149,6 +173,8 @@ export function IncidentDetail({ id }: { id: string }) {
   const [gridPenalty, setGridPenalty]         = useState('')
   const [banPenalty, setBanPenalty]           = useState('')
   const [penaltyPoints, setPenaltyPoints]     = useState('0')
+  const [positionDrop, setPositionDrop]       = useState('0')
+  const [resultsNote, setResultsNote]         = useState('')
   const [stewardNotes, setStewardNotes]       = useState('')
   const [overrideReason, setOverrideReason]   = useState('')
   const [resolving, setResolving]             = useState(false)
@@ -170,6 +196,10 @@ export function IncidentDetail({ id }: { id: string }) {
   const [decideVerdict, setDecideVerdict]             = useState('')
   const [decidePenalty, setDecidePenalty]             = useState('')
   const [decidePenaltyPoints, setDecidePenaltyPoints] = useState('0')
+  const [decideTimeSeconds, setDecideTimeSeconds]     = useState('0')
+  const [decidePositionDrop, setDecidePositionDrop]   = useState('0')
+  const [decideGridPlaces, setDecideGridPlaces]       = useState('0')
+  const [decideGridBack, setDecideGridBack]           = useState(false)
   const [decideNotes, setDecideNotes]                 = useState('')
   const [decideSubmitting, setDecideSubmitting]       = useState(false)
   const [decideError, setDecideError]                 = useState('')
@@ -259,12 +289,17 @@ export function IncidentDetail({ id }: { id: string }) {
           verdict,
           penalty:         penaltyType !== 'none' ? penaltySummary : null,
           penalty_points:  penaltyPoints ? Number(penaltyPoints) : 0,
+          time_penalty_seconds: penaltyType === 'time' ? secondsFromLabel(timePenalty) : 0,
+          position_drop:        penaltyType === 'time' ? toPlaces(positionDrop) : 0,
+          grid_penalty_places:  penaltyType === 'grid' ? gridFromLabel(gridPenalty).places : 0,
+          grid_penalty_back:    penaltyType === 'grid' ? gridFromLabel(gridPenalty).back : false,
           steward_notes:   stewardNotes  || null,
           override_reason: overrideReason || null,
         }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed to resolve incident')
+      setResultsNote(data.results_note ?? '')
       await loadIncident()
       setShowResolve(false)
     } catch (err: any) {
@@ -334,11 +369,16 @@ export function IncidentDetail({ id }: { id: string }) {
           new_verdict:        decideAction === 'overturn' ? decideVerdict : undefined,
           new_penalty:        decideAction === 'overturn' ? (decidePenalty || null) : undefined,
           new_penalty_points: decideAction === 'overturn' ? (decidePenaltyPoints ? Number(decidePenaltyPoints) : 0) : undefined,
+          new_time_penalty_seconds: decideAction === 'overturn' ? Math.max(0, Number(decideTimeSeconds) || 0) : undefined,
+          new_position_drop:        decideAction === 'overturn' ? toPlaces(decidePositionDrop) : undefined,
+          new_grid_penalty_places:  decideAction === 'overturn' ? toPlaces(decideGridPlaces) : undefined,
+          new_grid_penalty_back:    decideAction === 'overturn' ? decideGridBack : undefined,
           review_notes:       decideNotes || null,
         }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Failed to decide appeal')
+      setResultsNote(data.results_note ?? '')
       await loadIncident()
       setShowDecide(false)
     } catch (err: any) {
@@ -668,6 +708,15 @@ export function IncidentDetail({ id }: { id: string }) {
                 <span className="text-white/40 text-sm">Penalty Points</span>
                 <span className="text-orange-400 font-bold text-sm">{incident.penalty_points ?? 0} PP</span>
               </div>
+              {(incident.position_drop ?? 0) > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-white/40 text-sm">Results</span>
+                  <span className="text-white text-sm font-semibold">Moved down {incident.position_drop} place{incident.position_drop === 1 ? '' : 's'}</span>
+                </div>
+              )}
+              {resultsNote && (
+                <p className="text-yellow-400/80 text-xs leading-relaxed">{resultsNote}</p>
+              )}
               {incident.steward_notes && (
                 <div>
                   <p className="text-white/40 text-xs mb-1">Steward Notes</p>
@@ -773,6 +822,33 @@ export function IncidentDetail({ id }: { id: string }) {
                                 placeholder="0" min="0" max="12"
                                 className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-blue-400/50 focus:outline-none placeholder-white/20" />
                             </div>
+                            {decideVerdict === 'guilty' && (
+                              <>
+                                <div>
+                                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">New Time Penalty (seconds)</p>
+                                  <input type="number" value={decideTimeSeconds} onChange={(e) => setDecideTimeSeconds(e.target.value)}
+                                    placeholder="0" min="0"
+                                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-blue-400/50 focus:outline-none placeholder-white/20" />
+                                </div>
+                                <div>
+                                  <p className="text-white/40 text-xs uppercase tracking-widest mb-1">New Positions Lost in Results</p>
+                                  <p className="text-white/30 text-xs mb-2">The original drop is put back first, then this one is applied. 0 leaves results as they were.</p>
+                                  <input type="number" value={decidePositionDrop} onChange={(e) => setDecidePositionDrop(e.target.value)}
+                                    placeholder="0" min="0" max="30"
+                                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-blue-400/50 focus:outline-none placeholder-white/20" />
+                                </div>
+                                <div>
+                                  <p className="text-white/40 text-xs uppercase tracking-widest mb-2">New Grid Penalty (places)</p>
+                                  <input type="number" value={decideGridPlaces} onChange={(e) => setDecideGridPlaces(e.target.value)}
+                                    placeholder="0" min="0" max="30"
+                                    className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-blue-400/50 focus:outline-none placeholder-white/20" />
+                                  <label className="flex items-center gap-2 mt-2 text-white/50 text-xs">
+                                    <input type="checkbox" checked={decideGridBack} onChange={(e) => setDecideGridBack(e.target.checked)} />
+                                    Back of grid
+                                  </label>
+                                </div>
+                              </>
+                            )}
                           </>
                         )}
 
@@ -886,6 +962,21 @@ export function IncidentDetail({ id }: { id: string }) {
                           {t}
                         </button>
                       ))}
+                    </div>
+                    <div className="mt-4">
+                      <p className="text-white/40 text-xs uppercase tracking-widest mb-1">Positions Lost in Results</p>
+                      <p className="text-white/30 text-xs mb-2">Read the new position off the timing screen. 0 leaves the results as they are.</p>
+                      <div className="grid grid-cols-6 gap-2 mb-2">
+                        {[0, 1, 2, 3, 4, 5].map((n) => (
+                          <button key={n} onClick={() => setPositionDrop(String(n))}
+                            className={`py-2.5 rounded-xl text-xs font-bold transition-colors ${positionDrop === String(n) ? 'bg-rise-red text-white' : 'bg-white/5 text-white/50'}`}>
+                            {n}
+                          </button>
+                        ))}
+                      </div>
+                      <input type="number" value={positionDrop} onChange={(e) => setPositionDrop(e.target.value)}
+                        placeholder="Custom" min="0" max="30"
+                        className="w-full bg-white/5 text-white text-sm px-4 py-3 rounded-xl border border-white/10 focus:border-rise-red/50 focus:outline-none placeholder-white/20" />
                     </div>
                   </div>
                 )}
