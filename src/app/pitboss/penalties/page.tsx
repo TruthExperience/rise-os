@@ -1,21 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { Suspense, useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { penaltyDisplay } from '@/lib/pitboss/penaltyDisplay'
-
-interface Driver {
-  id: string
-  discord_username: string
-  display_name: string | null
-  pp_total: number
-  tier: string | null
-}
 
 interface Penalty {
   id: string
-  driver_id: string
   points: number
   penalty_type?: string | null
   time_penalty_seconds?: number | null
@@ -29,19 +20,36 @@ interface Penalty {
   expires_at: string | null
   removed_at: string | null
   is_active: boolean
-  driver: Driver | null
+  league_id: string
 }
 
-interface League {
+interface Driver {
   id: string
-  name: string
-  slug: string
+  pp_total: number
+  discord_username: string
+  display_name: string | null
 }
 
-function ppColor(total: number) {
-  if (total >= 10) return 'text-red-400'
-  if (total >= 6)  return 'text-yellow-400'
+const PP_WARNING = 6
+const PP_DANGER = 10
+const PP_MAX = 12
+
+function ppBarColor(total: number) {
+  if (total >= PP_DANGER) return 'bg-red-500'
+  if (total >= PP_WARNING) return 'bg-yellow-400'
+  return 'bg-green-400'
+}
+
+function ppTextColor(total: number) {
+  if (total >= PP_DANGER) return 'text-red-400'
+  if (total >= PP_WARNING) return 'text-yellow-400'
   return 'text-green-400'
+}
+
+function ppLabel(total: number) {
+  if (total >= PP_DANGER) return 'Danger — suspension risk'
+  if (total >= PP_WARNING) return 'Warning — approaching limit'
+  return 'Clean standing'
 }
 
 function formatDate(iso: string | null) {
@@ -49,319 +57,197 @@ function formatDate(iso: string | null) {
   return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-export function StewardPenaltiesInner() {
-  const router       = useRouter()
+function MyPenaltiesInner() {
+  const { data: session, status } = useSession()
+  const router = useRouter()
   const searchParams = useSearchParams()
-  const { status }   = useSession()
+  const leagueId = searchParams.get('league_id')
 
-  const [leagues, setLeagues]         = useState<League[]>([])
-  const [league, setLeague]           = useState<League | null>(null)
-  const [penalties, setPenalties]     = useState<Penalty[]>([])
-  const [drivers, setDrivers]         = useState<Driver[]>([])
-  const [loading, setLoading]         = useState(true)
-  const [loadingPen, setLoadingPen]   = useState(false)
-  const [error, setError]             = useState<string | null>(null)
-  const [showForm, setShowForm]       = useState(false)
-  const [submitting, setSubmitting]   = useState(false)
-
-  // Issue form state
-  const [formDriverId, setFormDriverId]   = useState('')
-  const [formPoints, setFormPoints]       = useState(1)
-  const [formReason, setFormReason]       = useState('')
-  const [formExpires, setFormExpires]     = useState('')
+  const [penalties, setPenalties] = useState<Penalty[]>([])
+  const [driver, setDriver] = useState<Driver | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [filter, setFilter] = useState<'all' | 'active' | 'expired'>('all')
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
-  }, [status, router])
+    if (status === 'authenticated') loadData()
+  }, [status, leagueId])
 
-  useEffect(() => {
-    if (status !== 'authenticated') return
-    fetch('/api/leagues')
-      .then(r => r.json())
-      .then(data => {
-        const all = (data.leagues ?? data) as League[]
-        setLeagues(all)
-        const paramId = searchParams.get('league_id')
-        if (paramId) {
-          const match = all.find(l => l.id === paramId)
-          if (match) loadLeague(match)
+  async function loadData() {
+    setLoading(true)
+    try {
+      const driverRes = await fetch('/api/pitboss/drivers/me')
+      const driverData = await driverRes.json()
+      if (!driverRes.ok) throw new Error(driverData.error ?? 'Failed to load driver')
+      setDriver(driverData.driver)
+
+      if (!leagueId) {
+        const leaguesRes = await fetch('/api/pitboss/drivers/me/leagues')
+        const leaguesData = await leaguesRes.json()
+        const firstLeague = leaguesData.leagues?.[0]?.league_id
+        if (firstLeague) {
+          router.replace(`/pitboss/penalties?league_id=${firstLeague}`)
+          return
         }
-      })
-      .catch(() => setError('Failed to load leagues'))
-      .finally(() => setLoading(false))
-  }, [status])
+      }
 
-  async function loadLeague(l: League) {
-    setLeague(l)
-    setLoadingPen(true)
-    setError(null)
-    try {
-      const [penRes, driversRes] = await Promise.all([
-        fetch(`/api/pitboss/penalty-ledger/steward?league_id=${l.id}`),
-        fetch(`/api/pitboss/drivers/me/leagues`), // fallback; fetch all league drivers below
-      ])
-      const penData = await penRes.json()
-      if (!penRes.ok) throw new Error(penData.error ?? 'Failed to load penalties')
-      setPenalties(penData.penalties ?? [])
-
-      // Pull unique drivers from penalties + fetch full driver list for form
-      const res2 = await fetch(`/api/pitboss/penalty-ledger/steward?league_id=${l.id}&active_only=false`)
-      const d2 = await res2.json()
-      const seen = new Map<string, Driver>()
-      ;(d2.penalties ?? []).forEach((p: Penalty) => {
-        if (p.driver && !seen.has(p.driver_id)) seen.set(p.driver_id, p.driver)
-      })
-      setDrivers(Array.from(seen.values()))
-    } catch (e: any) {
-      setError(e.message)
+      if (leagueId) {
+        const penRes = await fetch(`/api/pitboss/penalty-ledger?league_id=${leagueId}&driver_id=${driverData.driver.id}`)
+        const penData = await penRes.json()
+        if (!penRes.ok) throw new Error(penData.error ?? 'Failed to load penalties')
+        setPenalties(penData.penalties ?? [])
+      }
+    } catch (err: any) {
+      setError(err.message)
     } finally {
-      setLoadingPen(false)
+      setLoading(false)
     }
   }
 
-  async function handleIssue() {
-    if (!league || !formDriverId || !formReason.trim()) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      const res = await fetch('/api/pitboss/penalty-ledger/steward', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          league_id:  league.id,
-          driver_id:  formDriverId,
-          points:     formPoints,
-          reason:     formReason.trim(),
-          expires_at: formExpires || null,
-        }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Failed to issue penalty')
-      setShowForm(false)
-      setFormDriverId('')
-      setFormPoints(1)
-      setFormReason('')
-      setFormExpires('')
-      await loadLeague(league)
-    } catch (e: any) {
-      setError(e.message)
-    } finally {
-      setSubmitting(false)
-    }
-  }
+  const activePenalties = penalties.filter(p => p.is_active && !p.removed_at)
+  const activePP = activePenalties.reduce((sum, p) => sum + p.points, 0)
+  const barWidth = Math.min(100, (activePP / PP_MAX) * 100)
 
-  async function handleRemove(penaltyId: string) {
-    if (!league) return
-    setError(null)
-    try {
-      const res = await fetch('/api/pitboss/penalty-ledger/steward', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ penalty_id: penaltyId, league_id: league.id }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Failed to remove penalty')
-      await loadLeague(league)
-    } catch (e: any) {
-      setError(e.message)
-    }
-  }
+  const filtered = penalties.filter(p => {
+    if (filter === 'active') return p.is_active && !p.removed_at
+    if (filter === 'expired') return !p.is_active || !!p.removed_at
+    return true
+  })
 
-  if (status === 'loading' || loading) {
+  if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-rise-black">
-        <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
-      </main>
+      <div className="min-h-screen bg-[#1A1A1A] flex items-center justify-center">
+        <p className="text-white animate-pulse">Loading penalties…</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-[#1A1A1A] flex flex-col items-center justify-center gap-4 px-6">
+        <p className="text-[#E8284A] text-center">{error}</p>
+        <button onClick={() => router.back()} className="text-gray-400 underline text-sm">Go back</button>
+      </div>
     )
   }
 
   return (
-    <main className="min-h-screen bg-rise-black px-4 py-8 pb-24">
-      <button
-        onClick={() => {
-          if (league) { setLeague(null); setPenalties([]) }
-          else router.back()
-        }}
-        className="flex items-center gap-2 text-white/40 text-sm mb-6"
-      >
-        ← Back
-      </button>
-
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-black text-white">Penalty Ledger</h1>
-          <p className="text-xs text-white/30 uppercase tracking-widest mt-1">
-            {league ? league.name : 'Select a league'}
-          </p>
-        </div>
-        {league && (
-          <button
-            onClick={() => setShowForm(v => !v)}
-            className="px-4 py-2 rounded-xl bg-rise-red text-white text-sm font-bold active:scale-95 transition-transform"
-          >
-            {showForm ? 'Cancel' : '+ Issue'}
-          </button>
-        )}
+    <div className="min-h-screen bg-[#1A1A1A] pb-24">
+      <div className="px-4 pt-12 pb-6 border-b border-gray-800">
+        <button onClick={() => router.back()} className="text-white/50 text-sm mb-4 block">← Back</button>
+        <h1 className="text-white font-bold text-2xl">Penalty Points</h1>
+        <p className="text-gray-500 text-sm mt-1">
+          {driver?.display_name ?? driver?.discord_username ?? 'Your record'}
+        </p>
       </div>
 
-      {error && (
-        <div className="mb-4 rounded-xl border border-rise-red/40 bg-rise-red/10 px-4 py-3">
-          <p className="text-sm text-rise-red">{error}</p>
+      <div className="px-4 pt-5 space-y-6">
+        <div className="bg-gray-900 rounded-2xl p-5">
+          <div className="flex items-end justify-between mb-3">
+            <div>
+              <p className="text-gray-500 text-xs uppercase tracking-widest mb-1">Active PP Total</p>
+              <p className={`text-5xl font-black ${ppTextColor(activePP)}`}>{activePP}</p>
+            </div>
+            <div className="text-right">
+              <p className={`text-sm font-semibold ${ppTextColor(activePP)}`}>{ppLabel(activePP)}</p>
+              <p className="text-gray-600 text-xs mt-1">
+                {activePenalties.length} active {activePenalties.length === 1 ? 'entry' : 'entries'}
+              </p>
+            </div>
+          </div>
+          <div className="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${ppBarColor(activePP)}`}
+              style={{ width: `${barWidth}%` }}
+            />
+          </div>
+          <div className="flex justify-between mt-1.5">
+            <span className="text-gray-600 text-xs">0</span>
+            <span className="text-yellow-600 text-xs">{PP_WARNING} ⚠</span>
+            <span className="text-red-600 text-xs">{PP_DANGER} 🚨</span>
+            <span className="text-gray-600 text-xs">{PP_MAX}</span>
+          </div>
         </div>
-      )}
 
-      {/* League selector */}
-      {!league && (
-        <div className="flex flex-col gap-3">
-          {leagues.map(l => (
+        <div className="flex gap-2">
+          {(['all', 'active', 'expired'] as const).map(f => (
             <button
-              key={l.id}
-              onClick={() => loadLeague(l)}
-              className="rounded-xl border border-white/10 bg-white/5 p-4 text-left active:scale-[0.98] transition-transform"
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`flex-1 py-2 rounded-xl text-sm font-semibold capitalize transition-colors ${
+                filter === f ? 'bg-[#E8284A] text-white' : 'bg-gray-900 text-gray-500'
+              }`}
             >
-              <p className="text-sm font-bold text-white">{l.name}</p>
-              <p className="text-xs text-white/30 uppercase tracking-widest mt-0.5">{l.slug}</p>
+              {f}
             </button>
           ))}
         </div>
-      )}
 
-      {/* Issue form */}
-      {league && showForm && (
-        <div className="mb-6 rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
-          <p className="text-xs text-white/40 uppercase tracking-widest font-bold">Issue Penalty</p>
-
-          <div>
-            <label className="text-xs text-white/40 mb-1 block">Driver</label>
-            <select
-              value={formDriverId}
-              onChange={e => setFormDriverId(e.target.value)}
-              className="w-full rounded-lg bg-white/10 border border-white/10 text-white text-sm px-3 py-2"
-            >
-              <option value="">Select driver…</option>
-              {drivers.map(d => (
-                <option key={d.id} value={d.id}>
-                  {d.display_name ?? d.discord_username}
-                </option>
-              ))}
-            </select>
+        {filtered.length === 0 ? (
+          <div className="text-center py-12">
+            <p className="text-green-400 text-lg font-semibold">Clean record ✓</p>
+            <p className="text-gray-600 text-sm mt-1">No penalties found</p>
           </div>
-
-          <div>
-            <label className="text-xs text-white/40 mb-1 block">Points (1–25)</label>
-            <input
-              type="number"
-              min={1}
-              max={25}
-              value={formPoints}
-              onChange={e => setFormPoints(parseInt(e.target.value) || 1)}
-              className="w-full rounded-lg bg-white/10 border border-white/10 text-white text-sm px-3 py-2"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs text-white/40 mb-1 block">Reason</label>
-            <textarea
-              value={formReason}
-              onChange={e => setFormReason(e.target.value)}
-              rows={3}
-              placeholder="Describe the infraction…"
-              className="w-full rounded-lg bg-white/10 border border-white/10 text-white text-sm px-3 py-2 resize-none placeholder:text-white/20"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs text-white/40 mb-1 block">Expires (optional)</label>
-            <input
-              type="date"
-              value={formExpires}
-              onChange={e => setFormExpires(e.target.value)}
-              className="w-full rounded-lg bg-white/10 border border-white/10 text-white text-sm px-3 py-2"
-            />
-          </div>
-
-          <button
-            onClick={handleIssue}
-            disabled={submitting || !formDriverId || !formReason.trim()}
-            className="w-full py-2.5 rounded-xl bg-rise-red text-white text-sm font-bold disabled:opacity-40 active:scale-95 transition-transform"
-          >
-            {submitting ? 'Issuing…' : 'Issue Penalty'}
-          </button>
-        </div>
-      )}
-
-      {/* Penalty list */}
-      {league && (
-        <>
-          {loadingPen && (
-            <div className="flex justify-center mt-12">
-              <div className="h-8 w-8 rounded-full border-2 border-rise-red border-t-transparent animate-spin" />
-            </div>
-          )}
-
-          {!loadingPen && penalties.length === 0 && (
-            <p className="text-white/30 text-sm text-center mt-12">No penalties on record.</p>
-          )}
-
-          {!loadingPen && penalties.map(p => {
-            const driverName = p.driver?.display_name ?? p.driver?.discord_username ?? 'Unknown'
-            return (
+        ) : (
+          <div className="space-y-2">
+            {filtered.map(p => (
               <div
                 key={p.id}
-                className={`rounded-xl border border-white/10 bg-white/5 p-4 mb-3 ${p.removed_at ? 'opacity-40' : ''}`}
+                className={`bg-gray-900 rounded-xl px-4 py-4 border-l-4 ${
+                  p.removed_at
+                    ? 'border-gray-700 opacity-50'
+                    : p.is_active
+                    ? 'border-orange-400'
+                    : 'border-gray-700 opacity-60'
+                }`}
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <p className="text-white font-bold text-sm">{driverName}</p>
-                      {p.driver && (
-                        <span className={`text-xs font-black ${ppColor(p.driver.pp_total)}`}>
-                          {p.driver.pp_total} PP
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-white/60 text-xs">{p.reason}</p>
-                    <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
-                      <span className="text-white/20 text-[10px]">Issued {formatDate(p.issued_at)}</span>
-                      {p.expires_at && (
-                        <span className="text-white/20 text-[10px]">Expires {formatDate(p.expires_at)}</span>
-                      )}
-                      {p.removed_at && (
-                        <span className="text-white/30 text-[10px]">Removed {formatDate(p.removed_at)}</span>
-                      )}
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full ${
-                        p.source === 'manual'
-                          ? 'bg-blue-400/10 text-blue-400'
-                          : 'bg-white/10 text-white/40'
-                      }`}>
-                        {p.source}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="shrink-0 flex flex-col items-end gap-2">
-                    <span className={`text-2xl font-black ${p.is_active && !p.removed_at ? 'text-orange-400' : 'text-white/20'}`}>
+                  <p className="text-white text-sm flex-1">{p.reason}</p>
+                  <div className="text-right flex-shrink-0">
+                    <span className={`text-lg font-black ${p.is_active && !p.removed_at ? 'text-orange-400' : 'text-gray-600'}`}>
                       {penaltyDisplay(p).value}
                     </span>
-                    {penaltyDisplay(p).unit !== 'PP' && (
-                      <span className="text-[10px] text-white/40">
-                        {penaltyDisplay(p).unit}{penaltyDisplay(p).detail ? ` · ${penaltyDisplay(p).detail}` : ''}
-                      </span>
-                    )}
-                    {p.source === 'manual' && !p.removed_at && (
-                      <button
-                        onClick={() => handleRemove(p.id)}
-                        className="text-[10px] text-rise-red/70 hover:text-rise-red underline"
-                      >
-                        Remove
-                      </button>
-                    )}
+                    <p className="text-gray-600 text-xs">{penaltyDisplay(p).unit}</p>
                   </div>
                 </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2">
+                  <span className="text-gray-600 text-xs">Issued {formatDate(p.issued_at)}</span>
+                  {p.expires_at && (
+                    <span className="text-gray-600 text-xs">
+                      {new Date(p.expires_at) > new Date()
+                        ? `Expires ${formatDate(p.expires_at)}`
+                        : `Expired ${formatDate(p.expires_at)}`}
+                    </span>
+                  )}
+                  {p.removed_at && (
+                    <span className="text-gray-500 text-xs">Removed {formatDate(p.removed_at)}</span>
+                  )}
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${
+                    p.source === 'manual'
+                      ? 'bg-blue-400/10 text-blue-400'
+                      : 'bg-gray-800 text-gray-500'
+                  }`}>
+                    {p.source === 'manual' ? 'Manual' : 'Incident'}
+                  </span>
+                </div>
               </div>
-            )
-          })}
-        </>
-      )}
-    </main>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function MyPenaltiesPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#1A1A1A] flex items-center justify-center">
+        <p className="text-white animate-pulse">Loading penalties…</p>
+      </div>
+    }>
+      <MyPenaltiesInner />
+    </Suspense>
   )
 }
