@@ -10,7 +10,7 @@ export interface IncidentPenaltyInput {
   driverId: string
   leagueId: string
   incidentId: string
-  issuedBy: string
+  issuedBy: string | null
   issuedAt: string
   reason: string
   // pitboss.incidents.season is TEXT; the ledger column is an integer.
