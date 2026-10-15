@@ -1,9 +1,13 @@
 // src/app/api/discord/register-commands/route.ts
 //
 // Registers /setup, /signups (open, resume, status, list, close, invite,
-// tracks, test), /signup (photos) and /timetrial with Discord. POSTing a command with
-// an existing name overwrites it, so this contains EVERY option/subcommand of
-// each command, not just the new ones.
+// tracks, test), /signup (photos), /timetrial, /steward and /appeal with
+// Discord. Each command is POSTed BY NAME, which overwrites that one command
+// and leaves every other registered command alone, so this contains EVERY
+// option/subcommand of each command listed here, not just the new ones.
+//
+// (Do NOT replace this with a bulk PUT of the whole command list: a bulk PUT
+// deletes every command that isn't in the list.)
 //
 // Two ways to call it after deploying:
 //   1. Browser / link:
@@ -221,7 +225,9 @@ const SIGNUPS_COMMAND = {
 
 // Driver-facing. Same registration as /timetrial: no extra DM settings, so it
 // works in a DM with the bot as well as in a league server (global scope).
-// Option types: 1 = SUB_COMMAND, 11 = ATTACHMENT
+// `league` is only used in a DM, when the driver is signed up in more than one
+// league and has to say which one these screenshots are for.
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 11 = ATTACHMENT
 const SIGNUP_COMMAND = {
   name: "signup",
   description: "Signup tools for drivers",
@@ -247,6 +253,13 @@ const SIGNUP_COMMAND = {
           type: 11,
           name: "screenshot_3",
           description: "Third screenshot (optional)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "league",
+          description:
+            "Which league, e.g. wsc — only needed in a DM if you're signed up in more than one",
           required: false,
         },
       ],
@@ -297,6 +310,312 @@ const TIMETRIAL_COMMAND = {
   ],
 };
 
+// /steward: `evidence` (link) and `evidence_file` are BOTH optional on
+// report and respond. Discord enforces "required" before the bot's code runs,
+// so if `evidence` were required a file-only report would be impossible; the
+// "at least one of the two" rule is enforced in steward.ts instead.
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 4 = INTEGER, 5 = BOOLEAN,
+//               6 = USER, 11 = ATTACHMENT
+const STEWARD_COMMAND = {
+  name: "steward",
+  description: "Report and check race incidents",
+  options: [
+    {
+      type: 1,
+      name: "report",
+      description: "File an incident report",
+      options: [
+        {
+          type: 3,
+          name: "type",
+          description: "Incident type (e.g. Collision / Contact, Track Limits)",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "description",
+          description: "What happened",
+          required: true,
+        },
+        {
+          type: 6,
+          name: "accused",
+          description: "Driver the report is against",
+          required: true,
+        },
+        {
+          type: 4,
+          name: "lap",
+          description: "Lap number",
+          required: true,
+        },
+        {
+          type: 4,
+          name: "round",
+          description: "Round number",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "evidence",
+          description: "POV clip / evidence link (https://...) — provide this or evidence_file",
+          required: false,
+        },
+        {
+          type: 11,
+          name: "evidence_file",
+          description: "Screenshot or video file — provide this or evidence (link)",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "status",
+      description: "Show open incidents for this league",
+    },
+    {
+      type: 1,
+      name: "close",
+      description: "Close this incident ticket and save a transcript (run inside the ticket)",
+    },
+    {
+      type: 1,
+      name: "transcript",
+      description: "Show the transcript for this incident ticket (run inside the ticket)",
+    },
+    {
+      type: 1,
+      name: "delete",
+      description: "Delete this incident ticket channel (must be closed first)",
+    },
+    {
+      type: 1,
+      name: "respond",
+      description: "Submit your defense if you've been named in an incident (run inside the ticket)",
+      options: [
+        {
+          type: 3,
+          name: "response",
+          description: "Your side of what happened",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "evidence",
+          description: "Link to your own POV clip / evidence (https://...) — provide this or evidence_file",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "incident",
+          description:
+            "Ticket number (e.g. 0007) — required unless run inside the ticket channel",
+          required: false,
+        },
+        {
+          type: 11,
+          name: "evidence_file",
+          description: "Screenshot or video file — provide this or evidence (link)",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "analyse",
+      description: "Run AI steward analysis on this incident (run inside the ticket)",
+    },
+    {
+      type: 1,
+      name: "verdict",
+      description: "Record the final steward verdict (run inside the ticket)",
+      options: [
+        {
+          type: 3,
+          name: "verdict",
+          description: "The ruling",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "penalty",
+          description: "Penalty issued, if any",
+          required: false,
+        },
+        {
+          type: 4,
+          name: "points",
+          description: "Penalty points",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "notes",
+          description: "Steward notes",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "override_reason",
+          description: "Reason for overriding the AI suggestion, if applicable",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "assign",
+      description: "Assign this incident ticket to a steward (head steward only, run inside the ticket)",
+      options: [
+        {
+          type: 6,
+          name: "steward",
+          description: "Steward to assign this ticket to",
+          required: true,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "requesthelp",
+      description: "Flag this ticket for help from other stewards (run inside the ticket)",
+      options: [
+        {
+          type: 3,
+          name: "note",
+          description: "What you need help with",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "adduser",
+      description: "Add a user to this incident ticket channel (run inside the ticket)",
+      options: [
+        {
+          type: 6,
+          name: "user",
+          description: "User to add to the ticket",
+          required: true,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "removeuser",
+      description: "Remove a user from this incident ticket channel (run inside the ticket)",
+      options: [
+        {
+          type: 6,
+          name: "user",
+          description: "User to remove from the ticket",
+          required: true,
+        },
+        {
+          type: 5,
+          name: "force",
+          description: "Confirm removing the ticket opener (reporter) — required if removing them",
+          required: false,
+        },
+      ],
+    },
+  ],
+};
+
+// /appeal: `evidence` (link) and `evidence_file` are optional on `file`.
+const APPEAL_COMMAND = {
+  name: "appeal",
+  description: "File or review an appeal on a resolved incident",
+  options: [
+    {
+      type: 1,
+      name: "file",
+      description: "File an appeal on a resolved or dismissed incident",
+      options: [
+        {
+          type: 3,
+          name: "incident",
+          description: "Ticket number (e.g. 0007)",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "reason",
+          description: "Why you're appealing this incident",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "evidence",
+          description: "Optional new evidence link (https://...)",
+          required: false,
+        },
+        {
+          type: 11,
+          name: "evidence_file",
+          description: "Optional new evidence file (screenshot or video)",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "status",
+      description: "List open appeals for this league",
+    },
+    {
+      type: 1,
+      name: "review",
+      description: "Steward: rule on an open appeal",
+      options: [
+        {
+          type: 3,
+          name: "incident",
+          description: "Incident short ID",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "decision",
+          description: "Appeal decision",
+          required: true,
+          choices: [
+            { name: "Upheld", value: "upheld" },
+            { name: "Overturned", value: "overturned" },
+            { name: "Dismissed", value: "dismissed" },
+          ],
+        },
+        {
+          type: 3,
+          name: "new_verdict",
+          description: "Revised verdict (if overturned)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "new_penalty",
+          description: "Revised penalty (if overturned)",
+          required: false,
+        },
+        {
+          type: 4,
+          name: "new_points",
+          description: "Revised penalty points (if overturned)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "notes",
+          description: "Steward notes on the decision",
+          required: false,
+        },
+      ],
+    },
+  ],
+};
+
 async function register(): Promise<NextResponse> {
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
   const appId =
@@ -329,6 +648,8 @@ async function register(): Promise<NextResponse> {
     SIGNUPS_COMMAND,
     SIGNUP_COMMAND,
     TIMETRIAL_COMMAND,
+    STEWARD_COMMAND,
+    APPEAL_COMMAND,
   ]) {
     const res = await fetch(url, {
       method: "POST",
