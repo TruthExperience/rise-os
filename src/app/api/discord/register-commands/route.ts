@@ -1,6 +1,6 @@
 // src/app/api/discord/register-commands/route.ts
 //
-// Registers /setup, /signups (open, resume, status, list, close, invite,
+// Registers /setup, /division, /signups (open, resume, status, list, close, invite,
 // tracks, test), /signup (photos), /timetrial, /steward and /appeal with
 // Discord. Each command is POSTed BY NAME, which overwrites that one command
 // and leaves every other registered command alone, so this contains EVERY
@@ -678,6 +678,73 @@ const APPEAL_COMMAND = {
   ],
 };
 
+// /division: create | list | assign | remove | link | delete (handlers in
+// src/lib/discord/commands/division.ts, dispatched as division_<sub>).
+// `reserve` on assign/remove targets the division's reserve list instead of
+// its main drivers. Reserves don't count against max_drivers.
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 4 = INTEGER, 5 = BOOLEAN,
+//               6 = USER, 7 = CHANNEL, 8 = ROLE
+const DIVISION_COMMAND = {
+  name: "division",
+  description: "Manage league divisions (owners and commissioners)",
+  options: [
+    {
+      type: 1,
+      name: "create",
+      description: "Create a division",
+      options: [
+        { type: 3, name: "code", description: "Division code, e.g. T1", required: true },
+        { type: 3, name: "name", description: "Display name (default: the code)", required: false },
+        { type: 4, name: "max_drivers", description: "Maximum main drivers", required: false },
+        { type: 4, name: "tier_order", description: "Tier order (1 = top)", required: false },
+        { type: 5, name: "create_discord", description: "Create the Discord channel and role (default: yes)", required: false },
+      ],
+    },
+    { type: 1, name: "list", description: "List divisions with driver and reserve counts" },
+    {
+      type: 1,
+      name: "assign",
+      description: "Assign a driver to a division",
+      options: [
+        { type: 6, name: "driver", description: "Driver to assign", required: true },
+        { type: 3, name: "division", description: "Division code", required: true },
+        { type: 5, name: "reserve", description: "Add as a reserve instead of a main driver (default: no)", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "remove",
+      description: "Remove a driver from their division",
+      options: [
+        { type: 6, name: "driver", description: "Driver to remove", required: true },
+        { type: 5, name: "reserve", description: "Remove a reserve instead of a main driver (default: no)", required: false },
+        { type: 3, name: "division", description: "Division code (required when reserve is true)", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "link",
+      description: "Update a division's check-in channel, role or limits",
+      options: [
+        { type: 3, name: "code", description: "Division code", required: true },
+        { type: 7, name: "checkin_channel", description: "Check-in channel", channel_types: [0], required: false },
+        { type: 8, name: "role", description: "Division role", required: false },
+        { type: 4, name: "max_drivers", description: "Maximum main drivers", required: false },
+        { type: 3, name: "name", description: "Display name", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "delete",
+      description: "Delete a division",
+      options: [
+        { type: 3, name: "code", description: "Division code", required: true },
+        { type: 5, name: "delete_discord", description: "Also delete its Discord channel and role", required: false },
+      ],
+    },
+  ],
+};
+
 async function register(): Promise<NextResponse> {
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
   const appId =
@@ -712,6 +779,7 @@ async function register(): Promise<NextResponse> {
     TIMETRIAL_COMMAND,
     STEWARD_COMMAND,
     APPEAL_COMMAND,
+    DIVISION_COMMAND,
   ]) {
     // Discord rate-limits command writes (a 429 comes back with
     // retry_after in seconds). Wait that long and try again, up to 4 times,
