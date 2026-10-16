@@ -54,6 +54,16 @@ const DISCORD_MAX = 2000;
 
 const MANAGER_FLAGS = ["is_owner", "is_co_owner", "is_commissioner"] as const;
 
+// TEMPORARY: flags the role sync must leave alone for specific people while
+// they help set up a league. Keyed "<leagueId>:<discordId>". DELETE this block
+// (and the two isPinned() checks below) once setup is finished.
+const TEMP_PINNED_FLAGS: Record<string, string[]> = {
+  "992e968c-c0e5-4aea-9fb2-bc19c3468fc6:1047084061027471480": ["is_commissioner"], // EFRL
+};
+function isPinned(leagueId: string, discordId: string, flag: string): boolean {
+  return TEMP_PINNED_FLAGS[`${leagueId}:${discordId}`]?.includes(flag) ?? false;
+}
+
 const MAPPABLE_FLAGS = [
   "is_co_owner",
   "is_commissioner",
@@ -251,6 +261,7 @@ export async function syncMemberRoles(
     const managed = MAPPABLE_FLAGS.filter((f) => mappings.some((m) => m.flag === f));
     const patch: Record<string, boolean> = {};
     for (const flag of managed) {
+      if (isPinned(leagueId, discordUserId, flag)) continue;
       const want = mappings
         .filter((m) => m.flag === flag)
         .some((m) => memberRoles.includes(m.discord_role_id));
@@ -476,6 +487,7 @@ export async function syncLeagueRoles(
     const notes: string[] = [];
 
     for (const flag of managed) {
+      if (isPinned(leagueId, discordId, flag)) continue;
       const want = rolesForFlag(flag).some((r) => member.roles.includes(r));
       const have = row[flag] === true;
       if (want !== have) {
