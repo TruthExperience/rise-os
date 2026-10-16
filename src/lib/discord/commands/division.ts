@@ -12,7 +12,9 @@ import { getOrCreateDriver } from "./checkin";
 // registered on the row scopes /checkin, /checkin-status, etc.
 //
 // Driver membership lives in pitboss.division_members (one active
-// division per driver per league). pitboss and rise_os are separate
+// division per driver per league). Reserves live in
+// pitboss.division_reserves (many divisions per driver allowed);
+// pitboss.division_roster unions both with a `slot` column. pitboss and rise_os are separate
 // PostgREST schemas, so there are NO cross-schema embeds anywhere in this
 // file — every join is done as two queries and merged in memory.
 //
@@ -266,6 +268,21 @@ registerCommand("division_list", async (ctx) => {
     counts.set(m.division_id, (counts.get(m.division_id) ?? 0) + 1);
   }
 
+  // Reserves live in pitboss.division_reserves (a driver can reserve for
+  // several divisions, unlike main-driver membership). Shown as a count
+  // only; they don't count against max_drivers.
+  const { data: reserves } = await supabase
+    .schema("pitboss")
+    .from("division_reserves")
+    .select("division_id")
+    .eq("league_id", leagueId)
+    .eq("active", true);
+
+  const reserveCounts = new Map<string, number>();
+  for (const r of reserves ?? []) {
+    reserveCounts.set(r.division_id, (reserveCounts.get(r.division_id) ?? 0) + 1);
+  }
+
   const lines = ["**Divisions**"];
   for (const d of divisions) {
     const count = counts.get(d.id) ?? 0;
@@ -273,7 +290,9 @@ registerCommand("division_list", async (ctx) => {
     const name = d.division_name && d.division_name !== d.division_code ? ` — ${d.division_name}` : "";
     const channel = d.discord_checkin_channel_id ? `<#${d.discord_checkin_channel_id}>` : "no check-in channel";
     const role = d.discord_checkin_role_id ? ` · <@&${d.discord_checkin_role_id}>` : "";
-    lines.push(`**${d.division_code}**${name} · ${cap} drivers · ${channel}${role}`);
+    const reserveCount = reserveCounts.get(d.id) ?? 0;
+    const reserveText = reserveCount > 0 ? ` + ${reserveCount} reserves` : "";
+    lines.push(`**${d.division_code}**${name} · ${cap} drivers${reserveText} · ${channel}${role}`);
   }
 
   return { content: lines.join("\n"), ephemeral: true };
