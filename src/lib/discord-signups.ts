@@ -31,6 +31,11 @@
 // sql/2026-10-15_signup_driver_info.sql) and are also posted to the league's
 // signup channel. The form is pre-filled from the driver's last answers.
 // Submissions arrive as MODAL_SUBMIT interactions (handleSignupModalSubmit).
+//
+// Test signups (/signups test): sendTestSignup DMs one person the same invite a
+// real round sends, and the whole flow (details form, track pictures notice,
+// team requests) runs exactly like a real signup but saves nothing and never
+// DMs team principals. Custom ids: signuptest / signuptestinfo / signuptestteam.
 
 import { waitUntil } from '@vercel/functions'
 import { supabaseAdmin } from '@/lib/supabase/admin'
@@ -989,6 +994,10 @@ function pickTracks(n = 3): string[] {
 //   - `tracks` given        -> request those tracks
 //   - `randomTracks: true`  -> request 3 random F1 25 tracks
 //   - neither               -> plain invite, no pictures requested
+//
+// The invite text is the same a real round sends (default opener, plus the
+// pictures block when tracks are requested). Tapping Sign Up runs the real
+// flow (details form, pictures notice, team requests) with nothing saved.
 export async function sendTestSignup(params: {
   leagueId: string
   openedByDiscordId: string
@@ -1010,26 +1019,17 @@ export async function sendTestSignup(params: {
     .eq('id', leagueId)
     .maybeSingle()
 
-  const { data: driver } = await db()
-    .from('drivers')
-    .select('display_name, discord_username')
-    .eq('discord_id', targetDiscordId)
-    .maybeSingle()
-
-  const name = driver?.display_name || driver?.discord_username || 'driver'
+  const season = await testSeason(leagueId, seasonNumber)
+  const roundName = season?.name ?? `Season ${seasonNumber}`
   const leagueName = league?.name ?? 'the league'
   const requested = (params.tracks ?? []).slice(0, MAX_REQUESTED_TRACKS)
   const tracks =
     requested.length > 0 ? requested : params.randomTracks ? pickTracks(3) : []
 
+  // Same text a real round sends: default invite + optional pictures block.
   const content =
-    `**${leagueName}: Season ${seasonNumber} Driver Signup** *(test invite)*\n\n` +
-    `Hi ${name}, we'd be delighted to have you on the grid for **Season ${seasonNumber}**. ` +
-    `Your pace and sportsmanship have been a big part of what makes this league fun, ` +
-    `and we'd love to see you back out there.\n\n` +
-    `If you're in, tap **Sign Up** below.` +
-    (tracks.length > 0 ? ` ${trackRequestBlock(tracks)}` : '') +
-    `\n\nNot this time? Tap **No Thanks**, no hard feelings. Thanks for racing with us!`
+    `${defaultInviteContent(leagueName, roundName)}\n*(test invite, nothing is saved)*` +
+    (tracks.length > 0 ? `\n\n${trackRequestBlock(tracks)}` : '')
 
   // custom_id: signuptest:<leagueId>:<season>:<yes|no>:<1 if pictures requested>
   const photosFlag = tracks.length > 0 ? '1' : '0'
@@ -1069,9 +1069,10 @@ export async function sendTestSignup(params: {
   }
 }
 
-// Test button clicks: reply in the DM and post the result to the league's
-// signup channel (if it has one) so feedback lands where owners will see it.
-// Nothing is saved to the DB. leagueId is null for old-format test buttons.
+// Test button clicks. Sign Up opens the details form (answered by
+// handleTestSignupModalSubmit). No Thanks replies in the DM and posts the
+// result to the league's signup channel (if it has one). Nothing is saved.
+// leagueId is null for old-format test buttons, which keep the plain reply.
 async function handleTestButton(
   leagueId: string | null,
   seasonNumber: string,
@@ -1080,6 +1081,11 @@ async function handleTestButton(
   discordUserId: string
 ): Promise<ButtonResponse> {
   const signedUp = answer === 'yes'
+
+  // Real flow: Sign Up opens the details form.
+  if (signedUp && leagueId) {
+    return testSignupModal(leagueId, seasonNumber, wantsPhotos, discordUserId)
+  }
 
   const channelId = leagueId ? await signupChannelId(leagueId) : null
   if (channelId) {
@@ -1125,6 +1131,13 @@ export async function handleSignupButton(
   // Team request taps: signupteam:<roundId>:<rank>:<teamId | none>
   if (prefix === 'signupteam') {
     return handleTeamButton(roundId, answer, extra, discordUserId)
+  }
+
+  // Test team taps (no DB writes):
+  //   signuptestteam:<leagueId>:<season>:<rank>:<picked idx joined by "." or "-">:<team idx | none>
+  if (prefix === 'signuptestteam') {
+    const p = customId.split(':')
+    return handleTestTeamButton(p[1], p[2], p[3], p[4], p[5])
   }
 
   // Test invites: no DB writes.
@@ -1477,12 +1490,6 @@ export async function signupSummary(roundId: string) {
   counts.signed_up = signed.size
   return counts
 }
-// ===========================================================================
-// PASTE AT THE END of src/lib/discord-signups.ts (no new imports needed).
-// Uses helpers already in that file: db, discord, sleep, SEND_DELAY_MS,
-// REQUEST_MARKER, trackRequestBlock, defaultInviteContent, canOpenSignups,
-// seasonRoundIds, MAX_REQUESTED_TRACKS.
-// ===========================================================================
 
 // ---------------------------------------------------------------------------
 // Add / change the requested tracks on an ALREADY OPEN round
@@ -1630,4 +1637,275 @@ export async function notifySignedUpForPhotos(params: {
   }
 
   return { sent, failed, skipped, remaining: 0 }
+}
+
+// ===========================================================================
+// Test signup, full flow: details form -> pictures notice -> team requests.
+// Nothing is saved and no team principals are DM'd.
+//   signuptestinfo:<leagueId>:<season>:<1|0 pictures requested>
+//   signuptestteam:<leagueId>:<season>:<rank>:<picked idx joined by "." | "-">:<team idx | none>
+// Team picks travel as indexes into the name-sorted leagueTeamOptions list, so
+// no state is stored anywhere.
+// ===========================================================================
+
+// The season row a test signup refers to (league + season number), or null.
+async function testSeason(
+  leagueId: string,
+  seasonNumber: number
+): Promise<{ id: string; name: string } | null> {
+  const { data } = await riseOs()
+    .from('seasons')
+    .select('id, name')
+    .eq('league_id', leagueId)
+    .eq('season_number', seasonNumber)
+    .limit(1)
+    .maybeSingle()
+  if (!data) return null
+  return {
+    id: (data as any).id as string,
+    name: ((data as any).name as string) || `Season ${seasonNumber}`,
+  }
+}
+
+function signupFormComponents(prior: any) {
+  return SIGNUP_INFO_FIELDS.map((f) => {
+    const previous = (prior?.[f.key] as string | null | undefined)?.trim()
+    return {
+      type: 1,
+      components: [
+        {
+          type: 4,
+          custom_id: f.key,
+          label: f.label,
+          style: f.style,
+          min_length: 1,
+          max_length: f.max,
+          required: true,
+          placeholder: f.placeholder,
+          ...(previous ? { value: previous.slice(0, f.max) } : {}),
+        },
+      ],
+    }
+  })
+}
+
+// Same form as a real signup, pre-filled from the driver's last real answers
+// (read only).
+async function testSignupModal(
+  leagueId: string,
+  seasonNumber: string,
+  wantsPhotos: boolean,
+  discordUserId: string
+): Promise<ButtonResponse> {
+  const { data: driver } = await db()
+    .from('drivers')
+    .select('id')
+    .eq('discord_id', discordUserId)
+    .maybeSingle()
+
+  let prior: any = null
+  if (driver) {
+    const { data } = await db()
+      .from('league_signups')
+      .select('platform_names, country, time_zone, days_free, racing_experience')
+      .eq('driver_id', driver.id)
+      .eq('league_id', leagueId)
+      .not('info_submitted_at', 'is', null)
+      .order('info_submitted_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    prior = data
+  }
+
+  const { data: league } = await db()
+    .from('leagues')
+    .select('name')
+    .eq('id', leagueId)
+    .maybeSingle()
+
+  return {
+    type: 9,
+    data: {
+      custom_id: `signuptestinfo:${leagueId}:${seasonNumber}:${wantsPhotos ? '1' : '0'}`,
+      title: `${league?.name ?? 'League'} signup (test)`.slice(0, 45),
+      components: signupFormComponents(prior),
+    },
+  }
+}
+
+function testTeamPrompt(
+  leagueId: string,
+  seasonNumber: number,
+  rank: number,
+  teams: TeamOption[],
+  chosenIdx: number[]
+): { content: string; components: any[] } {
+  const base = `signuptestteam:${leagueId}:${seasonNumber}:${rank}:${chosenIdx.join('.') || '-'}`
+  const buttons: any[] = teams
+    .map((t, i) => ({ t, i }))
+    .filter(({ i }) => !chosenIdx.includes(i))
+    .slice(0, 24)
+    .map(({ t, i }) => ({ type: 2, style: 2, label: t.name, custom_id: `${base}:${i}` }))
+  buttons.push({
+    type: 2,
+    style: 1,
+    label: rank === 1 ? 'No preference' : "That's all",
+    custom_id: `${base}:none`,
+  })
+
+  const components: any[] = []
+  for (let i = 0; i < buttons.length; i += 5) {
+    components.push({ type: 1, components: buttons.slice(i, i + 5) })
+  }
+
+  const content =
+    rank === 1
+      ? `**Team request** — which team would you like to drive for? Tap your **1st choice**. ` +
+        `You can add up to ${MAX_TEAM_CHOICES} in order of preference.`
+      : `Got it. Tap your **${ORDINAL[rank - 1]} choice**, or **That's all** to send your requests.`
+  return { content, components }
+}
+
+// Test details-form submit. `originalContent` is interaction.message?.content
+// (the invite DM), used to read the requested tracks back out.
+export async function handleTestSignupModalSubmit(
+  customId: string,
+  discordUserId: string,
+  components: any[],
+  originalContent?: string | null
+): Promise<ButtonResponse | null> {
+  const [prefix, leagueId, seasonStr, photosFlag] = customId.split(':')
+  if (prefix !== 'signuptestinfo' || !leagueId || !seasonStr) return null
+  const seasonNumber = Number(seasonStr)
+
+  const problem = (content: string): ButtonResponse => ({
+    type: 4,
+    data: { content, flags: 64 },
+  })
+
+  const values: Record<string, string> = {}
+  for (const row of components ?? []) {
+    for (const c of row?.components ?? []) {
+      if (typeof c?.custom_id === 'string') values[c.custom_id] = String(c.value ?? '').trim()
+    }
+  }
+  const info = {} as SignupInfo
+  for (const f of SIGNUP_INFO_FIELDS) {
+    const v = (values[f.key] ?? '').replace(/\s+/g, ' ').trim().slice(0, f.max)
+    if (!v) return problem(`**${f.label}** can't be empty. Tap **Sign Up** again and fill in every box.`)
+    info[f.key] = v
+  }
+
+  const season = await testSeason(leagueId, seasonNumber)
+  const roundName = season?.name ?? `Season ${seasonNumber}`
+  const { data: league } = await db()
+    .from('leagues')
+    .select('name')
+    .eq('id', leagueId)
+    .maybeSingle()
+  const leagueName = league?.name ?? 'the league'
+  const tracks = requestedTracksFromMessage(originalContent)
+  const teams = season ? await leagueTeamOptions(leagueId, season.id) : []
+
+  // Channel post (nothing saved), after the reply goes out.
+  waitUntil(
+    (async () => {
+      const channelId = await signupChannelId(leagueId)
+      if (!channelId) return
+      try {
+        await discord(`/channels/${channelId}/messages`, {
+          content:
+            (`🧪 Test signup: <@${discordUserId}> submitted the form for **${roundName}**. Nothing was saved.\n` +
+              `**EA / console:** ${info.platform_names}\n` +
+              `**Country:** ${info.country}\n` +
+              `**Time zone:** ${info.time_zone}\n` +
+              `**Days free:** ${info.days_free}\n` +
+              `**Experience:** ${info.racing_experience}`).slice(0, 2000),
+          allowed_mentions: { parse: [] },
+        })
+      } catch (e) {
+        console.error('[signuptest] channel post failed:', e)
+      }
+    })()
+  )
+
+  let content =
+    `You are signed up for **${leagueName}: ${roundName}** *(test, nothing saved)*.\n\n` +
+    `**Your details**\n` +
+    `EA / console: ${info.platform_names}\n` +
+    `Country: ${info.country}\n` +
+    `Time zone: ${info.time_zone}\n` +
+    `Days free: ${info.days_free}\n` +
+    `Experience: ${info.racing_experience}`
+
+  if (tracks.length > 0) {
+    content +=
+      `\n\nNext, send a picture of ${tracks.length === 1 ? 'this track' : 'each of these tracks'} ` +
+      `right here in this DM with \`/signup photos\` (attach up to ${MAX_REQUESTED_TRACKS} images):\n` +
+      tracks.map((t, i) => `${i + 1}. ${t}`).join('\n')
+  } else if (photosFlag === '1') {
+    content +=
+      `\n\nNext, send the track pictures listed in the invite with \`/signup photos\` ` +
+      `(attach up to ${MAX_REQUESTED_TRACKS} images).`
+  }
+
+  if (teams.length === 0) {
+    return { type: 7, data: { content, components: [] } }
+  }
+  const prompt = testTeamPrompt(leagueId, seasonNumber, 1, teams, [])
+  return {
+    type: 7,
+    data: { content: `${content}\n\n${prompt.content}`, components: prompt.components },
+  }
+}
+
+async function handleTestTeamButton(
+  leagueId: string,
+  seasonStr: string,
+  rankStr: string,
+  pickedStr: string,
+  choice: string
+): Promise<ButtonResponse> {
+  const reply = (content: string, components: any[] = []): ButtonResponse => ({
+    type: 7,
+    data: { content, components },
+  })
+
+  const rank = Number(rankStr)
+  const seasonNumber = Number(seasonStr)
+  if (!leagueId || !Number.isInteger(seasonNumber) || !Number.isInteger(rank) || rank < 1 || rank > MAX_TEAM_CHOICES) {
+    return reply('That choice is no longer valid.')
+  }
+
+  const season = await testSeason(leagueId, seasonNumber)
+  if (!season) return reply('Test season not found.')
+  const teams = await leagueTeamOptions(leagueId, season.id)
+
+  const picked =
+    !pickedStr || pickedStr === '-'
+      ? []
+      : pickedStr.split('.').map(Number).filter((n) => Number.isInteger(n))
+  let chosen = picked.slice(0, rank - 1)
+
+  if (choice !== 'none') {
+    const idx = Number(choice)
+    if (!Number.isInteger(idx) || !teams[idx]) {
+      return reply("That team isn't available any more. Ask a league owner.")
+    }
+    if (!chosen.includes(idx)) chosen = [...chosen, idx]
+
+    if (rank < MAX_TEAM_CHOICES && teams.length - chosen.length > 0) {
+      const next = testTeamPrompt(leagueId, seasonNumber, rank + 1, teams, chosen)
+      const pickedText = chosen.map((i, n) => `${ORDINAL[n]}: ${teams[i].name}`).join('\n')
+      return reply(`${pickedText}\n\n${next.content}`, next.components)
+    }
+  }
+
+  if (chosen.length === 0) {
+    return reply("No team preference noted. You're all set. *(test, nothing saved)*")
+  }
+  const summary = chosen.map((i, n) => `${ORDINAL[n]}: ${teams[i].name}`).join('\n')
+  return reply(
+    `**Your team requests**\n${summary}\n\n*(test: nothing saved, no team principals were notified)*`
+  )
 }
