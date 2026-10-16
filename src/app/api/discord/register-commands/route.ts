@@ -728,6 +728,8 @@ const DIVISION_COMMAND = {
       options: [
         { type: 3, name: "code", description: "Division code", required: true },
         { type: 7, name: "checkin_channel", description: "Check-in channel", channel_types: [0], required: false },
+        { type: 7, name: "incident_channel", description: "This division's incident reports channel", channel_types: [0], required: false },
+        { type: 7, name: "transcript_channel", description: "This division's ticket transcripts channel", channel_types: [0], required: false },
         { type: 8, name: "role", description: "Division role", required: false },
         { type: 4, name: "max_drivers", description: "Maximum main drivers", required: false },
         { type: 3, name: "name", description: "Display name", required: false },
