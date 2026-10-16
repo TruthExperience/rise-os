@@ -74,7 +74,7 @@ function channelSlug(code: string) {
 }
 
 const DIVISION_COLUMNS =
-  "id, league_id, division_code, division_name, discord_checkin_channel_id, discord_checkin_role_id, discord_category_id, max_drivers, tier_order";
+  "id, league_id, division_code, division_name, discord_incident_channel_id, discord_transcript_channel_id, discord_checkin_channel_id, discord_checkin_role_id, discord_category_id, max_drivers, tier_order";
 
 async function findDivision(leagueId: string, code: string) {
   const supabase = createAdminClient();
@@ -597,7 +597,17 @@ registerCommand("division_link", async (ctx) => {
   const role = ctx.options.role as string | undefined;
   const maxDrivers = ctx.options.max_drivers as number | undefined;
   const name = (ctx.options.name as string | undefined)?.trim();
+  const incidentChannel = ctx.options.incident_channel as string | undefined;
+  const transcriptChannel = ctx.options.transcript_channel as string | undefined;
+  if (transcriptChannel) {
+    updates.discord_transcript_channel_id = transcriptChannel;
+    changed.push(`transcript channel <#${transcriptChannel}>`);
+  }
 
+  if (incidentChannel) {
+    updates.discord_incident_channel_id = incidentChannel;
+    changed.push(`incident channel <#${incidentChannel}>`);
+  }
   if (channel) {
     updates.discord_checkin_channel_id = channel;
     changed.push(`check-in channel <#${channel}>`);
@@ -617,7 +627,7 @@ registerCommand("division_link", async (ctx) => {
 
   if (changed.length === 0) {
     return {
-      content: "Nothing to change — pass at least one of checkin_channel, role, max_drivers or name.",
+      content: "Nothing to change — pass at least one of checkin_channel, incident_channel, transcript_channel, role, max_drivers or name.",
       ephemeral: true,
     };
   }
