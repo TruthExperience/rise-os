@@ -22,7 +22,17 @@
 //      offer teams for season 2 only, with a default principal per team)
 //   2. otherwise pitboss.team_rosters (latest season on file for the league)
 // No teams from either source = no team step.
+//
+// Driver details: tapping Sign Up opens a form (Discord modal) asking for EA ID
+// and/or console name, country, time zone, days free to race and racing
+// experience. The signup is only saved (status signed_up) when the form is
+// submitted, so closing the form leaves the driver "invited" and they can tap
+// Sign Up again. Answers live on pitboss.league_signups (see
+// sql/2026-10-15_signup_driver_info.sql) and are also posted to the league's
+// signup channel. The form is pre-filled from the driver's last answers.
+// Submissions arrive as MODAL_SUBMIT interactions (handleSignupModalSubmit).
 
+import { waitUntil } from '@vercel/functions'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 
 const DISCORD_API = 'https://discord.com/api/v10'
@@ -66,8 +76,8 @@ async function discord(path: string, body: unknown, attempt = 0): Promise<any> {
 
 // Interaction response body returned to the router (type 7 = update in place).
 export type ButtonResponse = {
-  type: number
-  data: { content: string; components: any[] }
+  type: number // 7 = update message, 4 = new message, 9 = open a modal
+  data: Record<string, any>
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,27 +1166,130 @@ export async function handleSignupButton(
     .maybeSingle()
   if (!driver) return reply('I could not find your driver profile.')
 
-  const status = answer === 'yes' ? 'signed_up' : 'declined'
+  // Sign Up opens the details form. The signup itself is saved when the form
+  // is submitted (handleSignupModalSubmit), not here.
+  if (answer === 'yes') {
+    return signupModal(round, driver.id)
+  }
+
   const { error } = await db()
     .from('league_signups')
-    .update({ status, responded_at: new Date().toISOString() })
+    .update({ status: 'declined', responded_at: new Date().toISOString() })
     .eq('round_id', roundId)
     .eq('driver_id', driver.id)
   if (error) return reply('Something went wrong saving your answer. Try again.')
 
   const leagueName = (round as any).leagues?.name ?? 'the league'
-  if (status !== 'signed_up') {
-    return reply(
-      `Got it, you are not signing up for **${leagueName}: ${round.name}**.`
-    )
-  }
+  return reply(`Got it, you are not signing up for **${leagueName}: ${round.name}**.`)
+}
 
-  // This reply replaces the invite, so repeat the requested tracks here and
-  // start the team request step (if this season has teams on offer).
+// ---------------------------------------------------------------------------
+// Driver details form (shown when a driver taps Sign Up)
+// ---------------------------------------------------------------------------
+
+// Discord allows at most 5 inputs in a modal, so EA ID and console name share
+// one field. `key` is both the modal input id and the league_signups column.
+const SIGNUP_INFO_FIELDS = [
+  {
+    key: 'platform_names',
+    label: 'EA ID and/or console name',
+    style: 1, // short
+    max: 100,
+    placeholder: 'e.g. EA: YourEAID / PSN: YourPSNName',
+  },
+  {
+    key: 'country',
+    label: 'Country',
+    style: 1,
+    max: 60,
+    placeholder: 'e.g. United Kingdom',
+  },
+  {
+    key: 'time_zone',
+    label: 'Time zone',
+    style: 1,
+    max: 60,
+    placeholder: 'e.g. GMT, EST, UTC+2, Europe/London',
+  },
+  {
+    key: 'days_free',
+    label: 'Days free to race',
+    style: 1,
+    max: 100,
+    placeholder: 'e.g. Tue, Thu, Sat, Sun',
+  },
+  {
+    key: 'racing_experience',
+    label: 'Racing experience',
+    style: 2, // paragraph
+    max: 500,
+    placeholder: 'Leagues, years racing, skill level',
+  },
+] as const
+
+type SignupInfoKey = (typeof SIGNUP_INFO_FIELDS)[number]['key']
+type SignupInfo = Record<SignupInfoKey, string>
+
+// Builds the modal response. Pre-fills from the driver's most recent answers
+// in this league so returning drivers only have to confirm.
+async function signupModal(round: any, driverId: string): Promise<ButtonResponse> {
+  const { data: prior } = await db()
+    .from('league_signups')
+    .select('platform_names, country, time_zone, days_free, racing_experience')
+    .eq('driver_id', driverId)
+    .eq('league_id', round.league_id)
+    .not('info_submitted_at', 'is', null)
+    .order('info_submitted_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  const leagueName = (round as any).leagues?.name ?? 'League'
+
+  return {
+    type: 9, // MODAL
+    data: {
+      custom_id: `signupinfo:${round.id}`,
+      title: `${leagueName} signup`.slice(0, 45),
+      components: SIGNUP_INFO_FIELDS.map((f) => {
+        const previous = ((prior as any)?.[f.key] as string | null | undefined)?.trim()
+        return {
+          type: 1,
+          components: [
+            {
+              type: 4, // text input
+              custom_id: f.key,
+              label: f.label,
+              style: f.style,
+              min_length: 1,
+              max_length: f.max,
+              required: true,
+              placeholder: f.placeholder,
+              ...(previous ? { value: previous.slice(0, f.max) } : {}),
+            },
+          ],
+        }
+      }),
+    },
+  }
+}
+
+// The reply that replaces the invite once a driver is signed up: confirmation,
+// their details, the requested tracks (if any) and the team request step (if
+// this season has teams on offer).
+async function signedUpReply(round: any, info: SignupInfo): Promise<ButtonResponse> {
+  const leagueName = (round as any).leagues?.name ?? 'the league'
   const tracks = requestedTracksFromMessage((round as any).message)
   const teams = await leagueTeamOptions(round.league_id, (round as any).season_id)
 
-  let content = `You are signed up for **${leagueName}: ${round.name}**.`
+  let content =
+    `You are signed up for **${leagueName}: ${round.name}**.\n\n` +
+    `**Your details**\n` +
+    `EA / console: ${info.platform_names}\n` +
+    `Country: ${info.country}\n` +
+    `Time zone: ${info.time_zone}\n` +
+    `Days free: ${info.days_free}\n` +
+    `Experience: ${info.racing_experience}`
+
   if (tracks.length > 0) {
     content +=
       `\n\nNext, send a picture of ${tracks.length === 1 ? 'this track' : 'each of these tracks'} ` +
@@ -1185,10 +1298,136 @@ export async function handleSignupButton(
       tracks.map((t, i) => `${i + 1}. ${t}`).join('\n')
   }
 
-  if (teams.length === 0) return reply(content)
+  if (teams.length === 0) {
+    return { type: 7, data: { content, components: [] } }
+  }
 
-  const prompt = teamPrompt(roundId, 1, teams, [])
-  return reply(`${content}\n\n${prompt.content}`, prompt.components)
+  const prompt = teamPrompt(round.id, 1, teams, [])
+  return {
+    type: 7,
+    data: { content: `${content}\n\n${prompt.content}`, components: prompt.components },
+  }
+}
+
+// Posts a driver's answers to the league's signup channel (if it has one).
+async function postSignupInfo(params: {
+  round: any
+  driver: { display_name: string | null; discord_username: string | null }
+  discordUserId: string
+  info: SignupInfo
+  updated: boolean
+}) {
+  const { round, driver, discordUserId, info, updated } = params
+  const channelId = await signupChannelId(round.league_id)
+  if (!channelId) return
+
+  const name = driver.display_name || driver.discord_username || 'A driver'
+  const content =
+    `📝 **${name}** (<@${discordUserId}>) ${updated ? 'updated their signup details for' : 'signed up for'} ` +
+    `**${round.name}**\n` +
+    `**EA / console:** ${info.platform_names}\n` +
+    `**Country:** ${info.country}\n` +
+    `**Time zone:** ${info.time_zone}\n` +
+    `**Days free:** ${info.days_free}\n` +
+    `**Experience:** ${info.racing_experience}`
+
+  try {
+    await discord(`/channels/${channelId}/messages`, {
+      content: content.slice(0, 2000),
+      allowed_mentions: { parse: [] },
+    })
+  } catch (e) {
+    console.error('[signupinfo] channel post failed:', e)
+  }
+}
+
+// Handles the submitted form: custom_id signupinfo:<roundId>. `components` is
+// interaction.data.components from the MODAL_SUBMIT interaction. Returns the
+// interaction response body, or null if this isn't a signup form.
+export async function handleSignupModalSubmit(
+  customId: string,
+  discordUserId: string,
+  components: any[]
+): Promise<ButtonResponse | null> {
+  const [prefix, roundId] = customId.split(':')
+  if (prefix !== 'signupinfo' || !roundId) return null
+
+  // type 4 = new message; flags 64 = only the driver sees it. Used for errors
+  // so the invite and its Sign Up button stay in place.
+  const problem = (content: string): ButtonResponse => ({
+    type: 4,
+    data: { content, flags: 64 },
+  })
+
+  const values: Record<string, string> = {}
+  for (const row of components ?? []) {
+    for (const c of row?.components ?? []) {
+      if (typeof c?.custom_id === 'string') values[c.custom_id] = String(c.value ?? '').trim()
+    }
+  }
+
+  const info = {} as SignupInfo
+  for (const f of SIGNUP_INFO_FIELDS) {
+    const v = (values[f.key] ?? '').replace(/\s+/g, ' ').trim().slice(0, f.max)
+    if (!v) return problem(`**${f.label}** can't be empty. Tap **Sign Up** again and fill in every box.`)
+    info[f.key] = v
+  }
+
+  const { data: round } = await db()
+    .from('signup_rounds')
+    .select('id, name, status, message, league_id, season_id, leagues!inner(name)')
+    .eq('id', roundId)
+    .single()
+  if (!round || round.status !== 'open') {
+    return { type: 7, data: { content: 'Signups for this season are closed.', components: [] } }
+  }
+
+  const { data: driver } = await db()
+    .from('drivers')
+    .select('id, display_name, discord_username')
+    .eq('discord_id', discordUserId)
+    .maybeSingle()
+  if (!driver) return problem('I could not find your driver profile.')
+
+  const { data: existing } = await db()
+    .from('league_signups')
+    .select('info_submitted_at')
+    .eq('round_id', roundId)
+    .eq('driver_id', driver.id)
+    .maybeSingle()
+
+  const now = new Date().toISOString()
+  const { error } = await db()
+    .from('league_signups')
+    .upsert(
+      {
+        round_id: roundId,
+        league_id: round.league_id,
+        driver_id: driver.id,
+        status: 'signed_up',
+        responded_at: now,
+        info_submitted_at: now,
+        ...info,
+      },
+      { onConflict: 'round_id,driver_id' }
+    )
+  if (error) {
+    console.error('[signupinfo] save failed:', error)
+    return problem('Something went wrong saving your signup. Tap **Sign Up** and try again.')
+  }
+
+  // Channel post runs after the reply goes out (Discord wants an answer in 3s).
+  waitUntil(
+    postSignupInfo({
+      round,
+      driver,
+      discordUserId,
+      info,
+      updated: !!(existing as any)?.info_submitted_at,
+    })
+  )
+
+  return signedUpReply(round, info)
 }
 
 // ---------------------------------------------------------------------------
