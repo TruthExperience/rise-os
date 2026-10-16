@@ -14,6 +14,7 @@ import {
   removeUserFromTicketChannel,
   sendAppealPromptDM,
 } from "../tickets";
+import { resolveIncidentChannel, resolveTranscriptChannel } from "../incident-channel";
 import { hasDiscordStewardAccess } from "../permissions";
 import { applyPositionDrop } from "@/lib/pitboss/applyResultPenalty";
 import { buildIncidentLedgerRows } from "@/lib/pitboss/incidentPenaltyRows";
@@ -323,7 +324,7 @@ registerCommand("steward_report", async (ctx) => {
     const { data: leagueConfig } = await supabase
       .schema("rise_os")
       .from("leagues")
-      .select("discord_ticket_category_id, discord_steward_role_id")
+      .select("discord_ticket_category_id, discord_steward_role_id, discord_incident_channel_id")
       .eq("id", leagueId)
       .maybeSingle();
 
@@ -374,6 +375,27 @@ registerCommand("steward_report", async (ctx) => {
       } else {
         ticketNote = `Incident **${ticketLabel}** filed (${incidentType}), but I couldn't open a ticket channel for it. Stewards can still see it via \`/steward status\`.`;
       }
+    }
+
+    // Announce the new report in this incident's tier channel (the accused's
+    // division channel, falling back to the league-wide reports channel).
+    // Never blocks or fails the filing.
+    try {
+      const reportsChannel = await resolveIncidentChannel(
+        leagueId,
+        data.id,
+        leagueConfig?.discord_incident_channel_id
+      );
+      if (reportsChannel && reportsChannel !== channelId) {
+        const ping = stewardRoleId ? `<@&${stewardRoleId}> — ` : "";
+        const against = `<@${accusedDiscordId}>`;
+        await postTicketMessage(
+          reportsChannel,
+          `${ping}**New incident ${ticketLabel}** (${incidentType}) — round ${round}, lap ${lap}, ${against} reported by <@${ctx.discordUserId}>.${channelId ? ` Ticket: <#${channelId}>` : ""}`
+        );
+      }
+    } catch (err) {
+      console.error("[steward_report] reports channel post failed:", err);
     }
 
     const dmLines = [
@@ -629,11 +651,17 @@ async function archiveTranscriptToChannel(
     .eq("id", leagueId)
     .maybeSingle();
 
-  if (!leagueConfig?.discord_transcript_channel_id) return null;
+  // Per-tier transcript channel (accused's division), else the league-wide one.
+  const transcriptChannelId = await resolveTranscriptChannel(
+    leagueId,
+    incidentId,
+    leagueConfig?.discord_transcript_channel_id
+  );
+  if (!transcriptChannelId) return null;
 
   const label = getTicketLabel({ id: incidentId, ticket_number: ticketNumber });
   const sent = await postTicketFile(
-    leagueConfig.discord_transcript_channel_id,
+    transcriptChannelId,
     `incident-${label}-transcript.txt`,
     transcript,
     `**Incident ${label}** — transcript archived from <#${ticketChannelId}>`
