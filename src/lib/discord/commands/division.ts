@@ -268,9 +268,7 @@ registerCommand("division_list", async (ctx) => {
     counts.set(m.division_id, (counts.get(m.division_id) ?? 0) + 1);
   }
 
-  // Reserves live in pitboss.division_reserves (a driver can reserve for
-  // several divisions, unlike main-driver membership). Shown as a count
-  // only; they don't count against max_drivers.
+  // Reserves: count only; they don't count against max_drivers.
   const { data: reserves } = await supabase
     .schema("pitboss")
     .from("division_reserves")
@@ -329,6 +327,43 @@ registerCommand("division_assign", async (ctx) => {
   const driverId = driverResult.driver.id;
 
   const supabase = createAdminClient();
+
+  // Reserve: separate table, a driver can reserve for many divisions, no
+  // cap check, main membership and Discord roles are left untouched.
+  if (ctx.options.reserve === true) {
+    const { data: existingReserve, error: reserveLookupError } = await supabase
+      .schema("pitboss")
+      .from("division_reserves")
+      .select("id")
+      .eq("driver_id", driverId)
+      .eq("division_id", division.id)
+      .eq("active", true)
+      .maybeSingle();
+    if (reserveLookupError) {
+      console.error("[division_assign] reserve lookup failed:", reserveLookupError);
+      return { content: `Something went wrong: ${reserveLookupError.message}`, ephemeral: true };
+    }
+    if (existingReserve) {
+      return { content: `<@${targetId}> is already a reserve for Division ${division.division_code}.`, ephemeral: true };
+    }
+    const { error: reserveInsertError } = await supabase
+      .schema("pitboss")
+      .from("division_reserves")
+      .insert({
+        division_id: division.id,
+        driver_id: driverId,
+        league_id: leagueId,
+        assigned_by: ctx.discordUserId,
+      });
+    if (reserveInsertError) {
+      console.error("[division_assign] reserve insert failed:", reserveInsertError);
+      return { content: `Couldn't add the reserve: ${reserveInsertError.message}`, ephemeral: true };
+    }
+    return {
+      content: `<@${targetId}> added as a reserve for Division **${division.division_code}**. (Reserves don't count toward the cap and no Discord role is changed.)`,
+      ephemeral: true,
+    };
+  }
 
   const { data: current, error: currentError } = await supabase
     .schema("pitboss")
@@ -451,6 +486,37 @@ registerCommand("division_remove", async (ctx) => {
 
   if (!driver) {
     return { content: "That user has no driver record.", ephemeral: true };
+  }
+
+  // Reserve removal needs the division, since a driver can reserve for several.
+  if (ctx.options.reserve === true) {
+    const code = cleanCode(ctx.options.division);
+    if (!code) {
+      return { content: "division is required when removing a reserve (e.g. T1).", ephemeral: true };
+    }
+    const divisionResult = await findDivision(leagueId, code);
+    if ("error" in divisionResult) {
+      return { content: divisionResult.error ?? "Couldn't find that division.", ephemeral: true };
+    }
+    const { data: reserveRows, error: reserveError } = await supabase
+      .schema("pitboss")
+      .from("division_reserves")
+      .update({ active: false })
+      .eq("driver_id", driver.id)
+      .eq("division_id", divisionResult.division.id)
+      .eq("active", true)
+      .select("id");
+    if (reserveError) {
+      console.error("[division_remove] reserve update failed:", reserveError);
+      return { content: `Something went wrong: ${reserveError.message}`, ephemeral: true };
+    }
+    if (!reserveRows || reserveRows.length === 0) {
+      return { content: `<@${targetId}> isn't a reserve for Division ${divisionResult.division.division_code}.`, ephemeral: true };
+    }
+    return {
+      content: `<@${targetId}> removed as a reserve from Division **${divisionResult.division.division_code}**.`,
+      ephemeral: true,
+    };
   }
 
   const { data: current } = await supabase
