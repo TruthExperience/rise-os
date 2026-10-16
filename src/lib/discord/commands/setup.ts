@@ -441,10 +441,40 @@ async function runSetup(guildId: string, input: SetupInput): Promise<string> {
     );
   }
 
-  if (!ticket.id || !incident.id) {
+  // A ticket channel needs the ticket category and the steward role. The
+  // reports and transcripts channels are only fallbacks (each tier can have
+  // its own, see below), so they don't block tickets.
+  if (!ticket.id || !steward.id) {
+    const missing = [!ticket.id ? "ticket category" : null, !steward.id ? "steward role" : null]
+      .filter(Boolean)
+      .join(" and ");
     lines.push(
-      "Steward reports won't create tickets until the ticket category and reports channel are set. Run `/setup` again with them picked."
+      `Steward reports won't create tickets until the ${missing} ${missing.includes(" and ") ? "are" : "is"} set. Run \`/setup\` again with ${missing.includes(" and ") ? "them" : "it"} picked.`
     );
+  }
+
+  // Per-division incident and transcript channels (set with /division link).
+  if (leagueId) {
+    const { data: divisions } = await supabase
+      .schema("rise_os")
+      .from("league_divisions")
+      .select("division_code, division_name, discord_incident_channel_id, discord_transcript_channel_id, tier_order")
+      .eq("league_id", leagueId)
+      .order("tier_order", { ascending: true });
+
+    if (divisions && divisions.length > 0) {
+      lines.push("**Per-division channels** (override the league-wide reports/transcripts above)");
+      for (const d of divisions) {
+        const label =
+          d.division_name && d.division_name !== d.division_code
+            ? `${d.division_code} (${d.division_name})`
+            : d.division_code;
+        const rep = d.discord_incident_channel_id ? `<#${d.discord_incident_channel_id}>` : "league reports channel";
+        const tra = d.discord_transcript_channel_id ? `<#${d.discord_transcript_channel_id}>` : "league transcripts channel";
+        lines.push(`${label}: reports ${rep} · transcripts ${tra}`);
+      }
+      lines.push("Change them with `/division link incident_channel:` / `transcript_channel:`.");
+    }
   }
 
   if (input.financialSystem) {
