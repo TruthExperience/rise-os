@@ -1,4 +1,5 @@
 // appeal.ts
+import { resolveIncidentChannel } from "../incident-channel";
 import { registerCommand, type CommandContext } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { postTicketMessage, sendDirectMessage, createAppealTicket } from "../tickets";
@@ -358,7 +359,12 @@ async function createAppealRecord(params: {
   // this league has one configured; fall back to the general incident
   // channel for leagues that haven't set one up yet.
   const appealsPointerChannel =
-    leagueConfig?.discord_appeals_channel_id ?? leagueConfig?.discord_incident_channel_id;
+    leagueConfig?.discord_appeals_channel_id ??
+    (await resolveIncidentChannel(
+      params.leagueId,
+      params.incidentId,
+      leagueConfig?.discord_incident_channel_id
+    ));
 
   if (appealsPointerChannel) {
     const pingRole = leagueConfig?.discord_steward_role_id
