@@ -11,7 +11,11 @@ import {
   type CheckinStatus,
 } from "../commands/checkin-embed";
 import { handleAppealPromptComponent } from "../commands/appeal";
-import { handleSignupButton, handleSignupModalSubmit } from "@/lib/discord-signups";
+import {
+  handleSignupButton,
+  handleSignupModalSubmit,
+  handleTestSignupModalSubmit,
+} from "@/lib/discord-signups";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
@@ -24,12 +28,17 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
  *   - "signupteam:<roundId>:<rank>:<teamId|none>" -> handleSignup (team
  *     request taps after Sign Up)
  *   - "signuptest:<leagueId>:<seasonNumber>:<yes|no>:<0|1>" -> handleSignup
- *     (test invites from /signups test; handled without any DB writes)
+ *     (test invites from /signups test; Sign Up opens the details form,
+ *     handled without any DB writes)
+ *   - "signuptestteam:<leagueId>:<season>:<rank>:<picked>:<team|none>" ->
+ *     handleSignup (team request taps in a test signup; no DB writes, no
+ *     principal DMs)
  * Anything else falls through to a generic "not wired up" reply so
  * unknown components fail loudly instead of silently.
  *
- * NOTE: "signupteam:" must be listed explicitly. It does NOT match
- * startsWith("signup:") because the character after "signup" is "t", not ":".
+ * NOTE: "signupteam:", "signuptest:" and "signuptestteam:" must each be listed
+ * explicitly. None of them matches startsWith("signup:") because the
+ * character after "signup" is not ":".
  */
 export async function routeComponent(interaction: any) {
   const customId: string = interaction.data?.custom_id ?? "";
@@ -45,7 +54,8 @@ export async function routeComponent(interaction: any) {
   if (
     customId.startsWith("signup:") ||
     customId.startsWith("signupteam:") ||
-    customId.startsWith("signuptest:")
+    customId.startsWith("signuptest:") ||
+    customId.startsWith("signuptestteam:")
   ) {
     return handleSignup(interaction, customId);
   }
@@ -61,6 +71,8 @@ export async function routeComponent(interaction: any) {
  * button). Dispatches by custom_id prefix:
  *   - "signupinfo:<roundId>" -> handleSignupModalSubmit (the details form that
  *     opens when a driver taps Sign Up)
+ *   - "signuptestinfo:<leagueId>:<season>:<0|1>" -> handleTestSignupModalSubmit
+ *     (the same form in a test invite; nothing is saved)
  * The response is type 7 (UPDATE_MESSAGE), which Discord allows for a form
  * that was opened from a button: it edits the invite DM in place.
  */
@@ -81,6 +93,21 @@ export async function routeModalSubmit(interaction: any) {
     return result;
   }
 
+  if (customId.startsWith("signuptestinfo:")) {
+    const discordUserId: string | undefined =
+      interaction.member?.user?.id ?? interaction.user?.id;
+    if (!discordUserId) return ephemeralError("Couldn't identify you for that action.");
+
+    const result = await handleTestSignupModalSubmit(
+      customId,
+      discordUserId,
+      interaction.data?.components ?? [],
+      interaction.message?.content ?? null
+    );
+    if (!result) return ephemeralError("Malformed test signup form — ping the commissioner.");
+    return result;
+  }
+
   return ephemeralError("This form isn't wired up yet.");
 }
 
@@ -89,12 +116,13 @@ export async function routeModalSubmit(interaction: any) {
  * by sendPendingDms in src/lib/discord-signups.ts (Sign Up opens the details
  * form, answered by routeModalSubmit above), the team request taps
  * that follow Sign Up (custom_id prefix "signupteam:"), and the test
- * invites sent by sendTestSignup (custom_id prefix "signuptest:"). These
- * clicks happen in a DM, so there is no guild/member — Discord puts the
- * clicker on interaction.user, which is why the id lookup falls back to it.
+ * invites sent by sendTestSignup (custom_id prefixes "signuptest:" and
+ * "signuptestteam:"). These clicks happen in a DM, so there is no
+ * guild/member — Discord puts the clicker on interaction.user, which is why
+ * the id lookup falls back to it.
  *
- * Answered inline (type 7, UPDATE_MESSAGE): handleSignupButton is a few
- * small Supabase queries (none at all for test buttons) and returns the
+ * Answered inline (type 7, UPDATE_MESSAGE, or type 9 to open the form):
+ * handleSignupButton is a few small Supabase queries and returns the
  * response body that edits the DM in place.
  */
 async function handleSignup(interaction: any, customId: string) {
