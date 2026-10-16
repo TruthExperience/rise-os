@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { InteractionType, InteractionResponseType } from "discord-interactions";
 import { verifyDiscordRequest } from "@/lib/discord/verify";
 import { routeCommand } from "@/lib/discord/commands/router";
-import { routeComponent } from "@/lib/discord/components/router";
+import { routeComponent, routeModalSubmit } from "@/lib/discord/components/router";
 
 /**
  * Single entry point for every Discord slash command / component
@@ -38,6 +38,11 @@ export async function POST(req: NextRequest) {
 
   if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
     const response = await routeComponent(interaction);
+    return NextResponse.json(response);
+  }
+
+  if (interaction.type === InteractionType.MODAL_SUBMIT) {
+    const response = await routeModalSubmit(interaction);
     return NextResponse.json(response);
   }
 
