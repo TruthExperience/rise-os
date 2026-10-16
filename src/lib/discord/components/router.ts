@@ -11,7 +11,7 @@ import {
   type CheckinStatus,
 } from "../commands/checkin-embed";
 import { handleAppealPromptComponent } from "../commands/appeal";
-import { handleSignupButton } from "@/lib/discord-signups";
+import { handleSignupButton, handleSignupModalSubmit } from "@/lib/discord-signups";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
@@ -57,8 +57,37 @@ export async function routeComponent(interaction: any) {
 }
 
 /**
+ * Single entry point for every MODAL_SUBMIT interaction (forms opened by a
+ * button). Dispatches by custom_id prefix:
+ *   - "signupinfo:<roundId>" -> handleSignupModalSubmit (the details form that
+ *     opens when a driver taps Sign Up)
+ * The response is type 7 (UPDATE_MESSAGE), which Discord allows for a form
+ * that was opened from a button: it edits the invite DM in place.
+ */
+export async function routeModalSubmit(interaction: any) {
+  const customId: string = interaction.data?.custom_id ?? "";
+
+  if (customId.startsWith("signupinfo:")) {
+    const discordUserId: string | undefined =
+      interaction.member?.user?.id ?? interaction.user?.id;
+    if (!discordUserId) return ephemeralError("Couldn't identify you for that action.");
+
+    const result = await handleSignupModalSubmit(
+      customId,
+      discordUserId,
+      interaction.data?.components ?? []
+    );
+    if (!result) return ephemeralError("Malformed signup form — ping the commissioner.");
+    return result;
+  }
+
+  return ephemeralError("This form isn't wired up yet.");
+}
+
+/**
  * Handles the Sign Up / No Thanks buttons on the season signup DMs sent
- * by sendPendingDms in src/lib/discord-signups.ts, the team request taps
+ * by sendPendingDms in src/lib/discord-signups.ts (Sign Up opens the details
+ * form, answered by routeModalSubmit above), the team request taps
  * that follow Sign Up (custom_id prefix "signupteam:"), and the test
  * invites sent by sendTestSignup (custom_id prefix "signuptest:"). These
  * clicks happen in a DM, so there is no guild/member — Discord puts the
