@@ -1,3 +1,4 @@
+import { resolveIncidentChannel } from "./incident-channel";
 import { createAdminClient } from "@/lib/supabase/server";
 import {
   createAppealTicket,
@@ -268,7 +269,9 @@ export async function openDiscordAppealTicket(appealId: string): Promise<OpenTic
         : "League has no Discord server, ticket category or steward role configured.";
     }
 
-    const pointerChannel = config?.discord_appeals_channel_id ?? config?.discord_incident_channel_id;
+    const pointerChannel =
+      config?.discord_appeals_channel_id ??
+      (await resolveIncidentChannel(appeal.league_id, incident.id, config?.discord_incident_channel_id));
     if (pointerChannel) {
       const pingRole = config?.discord_steward_role_id ? `<@&${config.discord_steward_role_id}> — ` : "";
       const who = appellant?.discord_id ? `<@${appellant.discord_id}>` : appellant?.name ?? "a driver";
