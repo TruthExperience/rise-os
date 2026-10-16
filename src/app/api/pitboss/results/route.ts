@@ -129,6 +129,25 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'League not found' }, { status: 404 })
   }
 
+  // Seasons that actually have results for this league (newest first). When the
+  // caller doesn't ask for a season, default to the latest one rather than a
+  // hard-coded year — season is a free-text label ('1', '2', '2026', ...).
+  const { data: seasonRows } = await supabase
+    .schema('pitboss')
+    .from('results')
+    .select('season')
+    .eq('league_id', leagueId)
+    .limit(5000)
+
+  const seasons = [...new Set((seasonRows ?? []).map((r: any) => String(r.season)))]
+    .sort((a, b) => {
+      const na = Number(a)
+      const nb = Number(b)
+      if (Number.isNaN(na) || Number.isNaN(nb)) return b.localeCompare(a)
+      return nb - na
+    })
+  const activeSeason = season || seasons[0] || null
+
   let query = supabase
     .schema('pitboss')
     .from('results')
@@ -144,8 +163,8 @@ export async function GET(req: NextRequest) {
     .eq('league_id', leagueId)
     .order('finish_position', { ascending: true })
 
-  if (season) query = query.eq('season', season)
-  if (round)  query = query.eq('round', parseInt(round))
+  if (activeSeason) query = query.eq('season', activeSeason)
+  if (round)        query = query.eq('round', parseInt(round))
 
   const { data: results, error } = await query
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
@@ -171,6 +190,8 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     league_name: league.name,
     league_logo_url: league.logo_url,
+    season: activeSeason,
+    seasons,
     results: enriched,
   })
 }
