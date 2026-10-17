@@ -18,6 +18,8 @@ export async function GET(req: NextRequest) {
 
   const leagueId = req.nextUrl.searchParams.get("league_id");
   let season = req.nextUrl.searchParams.get("season");
+  // "latest" (or blank) means "newest season with results", not a literal season value.
+  if (season === "latest" || season === "") season = null;
   const view = req.nextUrl.searchParams.get("view") === "teams" ? "teams" : "drivers";
   // Optional race switcher: standings as they stood after this round.
   const roundParam = req.nextUrl.searchParams.get("round");
