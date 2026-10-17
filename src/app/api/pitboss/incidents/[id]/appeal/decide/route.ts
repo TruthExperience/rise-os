@@ -4,6 +4,7 @@ import { getSession } from '@/lib/session'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
 import { applyPositionDrop, revertIncidentAdjustments } from '@/lib/pitboss/applyResultPenalty'
+import { syncStandingsToDiscord, postRoundResultsToDiscord } from '@/lib/discord/standings-post'
 
 // incidents.season is text, penalty_ledger.applies_season is an integer.
 function toIntOrNull(v: unknown): number | null {
@@ -324,6 +325,10 @@ export async function POST(
     if (resultsChanged) {
       const rc = await supabase.schema('pitboss').rpc('recompute_driver_standings')
       if (rc.error) resultsNotes.push(`Standings recompute failed: ${rc.error.message}`)
+      else {
+        if (incident.season != null && incident.round != null) await postRoundResultsToDiscord(incident.league_id, incident.season, incident.round)
+        await syncStandingsToDiscord(incident.league_id)
+      }
     }
   } catch (err) {
     console.error('[appeal/decide POST] results adjustment', err)
