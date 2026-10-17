@@ -17,7 +17,7 @@ import { getOrCreateDriver } from "./checkin";
 // instead of editing results.
 //
 // Points for results come from pitboss.league_points_table (position ->
-// points, fastest_lap_bonus, sprint_points). A league with no points table
+// points, fastest_lap_bonus, pole_bonus, sprint_points). A league with no points table
 // gets 0 points unless `points` is given explicitly.
 //
 // calendar_rounds has no unique key, and break rows share round_number with
@@ -586,6 +586,7 @@ interface PointsRow {
 interface PointsTable {
   byPosition: Map<number, PointsRow>;
   fastestLapBonus: number;
+  poleBonus: number;
 }
 
 async function loadPointsTable(leagueId: string): Promise<PointsTable> {
@@ -593,19 +594,21 @@ async function loadPointsTable(leagueId: string): Promise<PointsTable> {
   const { data } = await supabase
     .schema("pitboss")
     .from("league_points_table")
-    .select("position, points, fastest_lap_bonus, sprint_points")
+    .select("position, points, fastest_lap_bonus, pole_bonus, sprint_points")
     .eq("league_id", leagueId);
 
   const byPosition = new Map<number, PointsRow>();
   let fastestLapBonus = 0;
+  let poleBonus = 0;
   for (const row of data ?? []) {
     byPosition.set(row.position as number, {
       points: Number(row.points ?? 0),
       sprintPoints: Number(row.sprint_points ?? 0),
     });
     fastestLapBonus = Math.max(fastestLapBonus, Number(row.fastest_lap_bonus ?? 0));
+    poleBonus = Math.max(poleBonus, Number(row.pole_bonus ?? 0));
   }
-  return { byPosition, fastestLapBonus };
+  return { byPosition, fastestLapBonus, poleBonus };
 }
 
 interface ResultInput {
@@ -637,6 +640,7 @@ async function saveResult(input: ResultInput, table: PointsTable) {
   } else if (!input.dnf && input.finish !== null) {
     points = table.byPosition.get(input.finish)?.points ?? 0;
     if (input.fastestLap) points += table.fastestLapBonus;
+    if (input.quali === 1) points += table.poleBonus;
   }
 
   const sprintPoints =
