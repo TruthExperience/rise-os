@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthedDriver, getSupabaseUserId } from '@/lib/getSupabaseUserId'
 import { createAdminClient } from '@/lib/supabase/server'
 import { applyPositionDrop } from '@/lib/pitboss/applyResultPenalty'
+import { syncStandingsToDiscord, postRoundResultsToDiscord } from '@/lib/discord/standings-post'
 
 const STEWARD_ROLES = ['STW', 'HEAD_STW', 'BSAC_CHIEF']
 
@@ -106,8 +107,10 @@ export async function GET(req: NextRequest) {
   }
 
   const leagueId = req.nextUrl.searchParams.get('league_id')
-  const season   = req.nextUrl.searchParams.get('season')
+  let season     = req.nextUrl.searchParams.get('season')
   const round    = req.nextUrl.searchParams.get('round')
+  // "latest" (or blank) means "newest season with results", not a literal season.
+  if (season === 'latest' || season === '') season = null
 
   if (!leagueId) {
     return NextResponse.json({ error: 'league_id required' }, { status: 400 })
@@ -304,6 +307,19 @@ export async function POST(req: NextRequest) {
   // One recompute for the whole request. It covers every league.
   const { error: recomputeError } = await supabase.schema('pitboss').rpc('recompute_driver_standings')
 
+  // Post the round's results and the updated standings to Discord (leagues
+  // with channels configured in pitboss.standings_discord_sync). Never throws.
+  if (!recomputeError) {
+    const seen = new Set<string>()
+    for (const r of inserts) {
+      const k = `${r.season}|${r.round}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      await postRoundResultsToDiscord(league_id, r.season, r.round)
+    }
+    await syncStandingsToDiscord(league_id)
+  }
+
   // If a drop moved rows, send back the current values, not the inserted ones.
   let responseRows = data
   if (pending.applied > 0 && data?.length) {
@@ -387,6 +403,10 @@ export async function PUT(req: NextRequest) {
       { result: data, warning: `Result updated, but standings recompute failed: ${recomputeError.message}` }
     )
   }
+
+  // Refresh the round's Discord post and the standings. Never throws.
+  await postRoundResultsToDiscord(league_id, (data as any).season, (data as any).round)
+  await syncStandingsToDiscord(league_id)
 
   return NextResponse.json({ result: data })
 }
