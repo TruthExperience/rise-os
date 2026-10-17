@@ -124,7 +124,9 @@ registerCommand("gamertags_import", async (ctx) => {
     ephemeral: true,
     background: async () => {
       const fetched = await fetchChannelMessages(channelId);
-      if ("error" in fetched) return { content: fetched.error };
+      if (!fetched.messages) {
+        return { content: fetched.error ?? "Couldn't read that channel." };
+      }
 
       // Oldest first so a person's later message wins.
       const messages = fetched.messages
