@@ -20,6 +20,7 @@
 // request pass { recompute: false } and call it themselves once at the end.
 
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { syncStandingsToDiscord, postRoundResultsToDiscord } from '@/lib/discord/standings-post'
 
 interface IncidentLike {
   id: string
@@ -191,6 +192,8 @@ export async function applyPositionDrop(
     if (rc.error) {
       return { applied: true, note: `Results moved, but standings recompute failed: ${rc.error.message}` }
     }
+    await postRoundResultsToDiscord(incident.league_id, incident.season as string, incident.round as number)
+    await syncStandingsToDiscord(incident.league_id)
   }
   return { applied: true }
 }
