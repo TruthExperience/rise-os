@@ -26,6 +26,8 @@ function ResultsContent() {
   const [season, setSeason] = useState("");
   const [activeSeason, setActiveSeason] = useState("");
   const [seasons, setSeasons] = useState<string[]>([]);
+  const [rounds, setRounds] = useState<{ round: number; track: string | null }[]>([]);
+  const [roundChosen, setRoundChosen] = useState(false);
   const [round, setRound] = useState<string>("");
   const [leagueName, setLeagueName] = useState("");
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
@@ -53,6 +55,12 @@ function ResultsContent() {
           setLogoUrl(data.league_logo_url);
           setActiveSeason(data.season ?? "");
           setSeasons(data.seasons ?? []);
+          setRounds(data.rounds ?? []);
+          // First load: jump to the most recent race instead of every race at once.
+          if (!roundChosen && data.rounds?.length > 0) {
+            setRoundChosen(true);
+            setRound(String(data.rounds[data.rounds.length - 1].round));
+          }
           setResults(data.results);
         }
       })
@@ -81,17 +89,47 @@ function ResultsContent() {
         </p>
 
         {seasons.length > 1 && (
-          <select
-            value={activeSeason}
-            onChange={(e) => setSeason(e.target.value)}
-            className="mb-4 rounded-lg border border-neutral-800 bg-black/60 px-3 py-2 text-sm"
-          >
+          <div className="flex gap-2 mb-3 overflow-x-auto">
             {seasons.map((s) => (
-              <option key={s} value={s}>
+              <button
+                key={s}
+                onClick={() => {
+                  setSeason(s);
+                  setRound("");
+                  setRoundChosen(false);
+                }}
+                className={`px-3 py-1 rounded-full text-xs border whitespace-nowrap ${
+                  s === activeSeason ? "bg-white text-black border-white" : "border-neutral-600 text-neutral-300"
+                }`}
+              >
                 Season {s}
-              </option>
+              </button>
             ))}
-          </select>
+          </div>
+        )}
+
+        {rounds.length > 0 && (
+          <div className="flex gap-2 mb-5 overflow-x-auto">
+            <button
+              onClick={() => { setRoundChosen(true); setRound(""); }}
+              className={`px-3 py-1 rounded-full text-xs border whitespace-nowrap ${
+                round === "" ? "bg-white text-black border-white" : "border-neutral-600 text-neutral-300"
+              }`}
+            >
+              All races
+            </button>
+            {rounds.map((r) => (
+              <button
+                key={r.round}
+                onClick={() => { setRoundChosen(true); setRound(String(r.round)); }}
+                className={`px-3 py-1 rounded-full text-xs border whitespace-nowrap ${
+                  round === String(r.round) ? "bg-white text-black border-white" : "border-neutral-600 text-neutral-300"
+                }`}
+              >
+                R{r.round}{r.track ? ` · ${r.track}` : ""}
+              </button>
+            ))}
+          </div>
         )}
 
         {!leagueId && (
