@@ -26,7 +26,7 @@ interface League {
   slug: string
 }
 
-const LEAGUE_SLUGS = ['trl', 'wsc']
+const LEAGUE_SLUGS = ['trl', 'wsc', 'w11-racing-series', 'vector-racing-championship']
 
 function SeasonInner() {
   const router = useRouter()
