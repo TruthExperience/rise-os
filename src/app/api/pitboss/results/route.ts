@@ -148,6 +148,23 @@ export async function GET(req: NextRequest) {
     })
   const activeSeason = season || seasons[0] || null
 
+  // Races in the active season (for the race switcher), oldest first.
+  let rounds: { round: number; track: string | null }[] = []
+  if (activeSeason) {
+    const { data: roundRows } = await supabase
+      .schema('pitboss')
+      .from('results')
+      .select('round, track')
+      .eq('league_id', leagueId)
+      .eq('season', activeSeason)
+      .limit(5000)
+    const seen = new Map<number, string | null>()
+    for (const rr of roundRows ?? []) {
+      if (rr.round != null && !seen.has(rr.round)) seen.set(rr.round, rr.track ?? null)
+    }
+    rounds = [...seen.entries()].map(([round, track]) => ({ round, track })).sort((a, b) => a.round - b.round)
+  }
+
   let query = supabase
     .schema('pitboss')
     .from('results')
@@ -192,6 +209,7 @@ export async function GET(req: NextRequest) {
     league_logo_url: league.logo_url,
     season: activeSeason,
     seasons,
+    rounds,
     results: enriched,
   })
 }
