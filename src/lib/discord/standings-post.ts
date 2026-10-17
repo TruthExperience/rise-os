@@ -1,0 +1,312 @@
+// FILE: src/lib/discord/standings-post.ts   (new file)
+// Keeps one "driver standings" and one "team standings" message per league
+// up to date in Discord. Channels live in pitboss.standings_discord_sync
+// (one row per league); leagues without a row are skipped. The message is
+// edited in place (not re-posted) and nothing is sent when results haven't
+// changed since the last sync, so it is cheap to call after any standings
+// change. Never throws.
+import { createAdminClient } from "@/lib/supabase/server";
+
+const API = "https://discord.com/api/v10";
+const MAX_DESC = 3900;
+
+type Row = { name: string; wins: number; points: number };
+
+// League logo shown in the top-left of each embed (needs a public https URL).
+function authorOf(league: any) {
+  const url = league?.logo_url;
+  return url && /^https?:\/\//.test(url) ? { name: league?.name ?? "League", icon_url: url } : undefined;
+}
+
+function pad(s: string, n: number) {
+  return s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
+}
+
+function table(rows: Row[]) {
+  const w = Math.min(22, Math.max(8, ...rows.map((r) => r.name.length)));
+  const lines = rows.map((r, i) => {
+    const pos = String(i + 1).padStart(2, " ");
+    const pts = String(Number(r.points)).padStart(4, " ");
+    const wins = String(r.wins).padStart(2, " ");
+    return `${pos}  ${pad(r.name, w)}  ${wins}W ${pts}`;
+  });
+  let body = "```\n" + lines.join("\n") + "\n```";
+  while (body.length > MAX_DESC && lines.length > 1) {
+    lines.pop();
+    body = "```\n" + lines.join("\n") + "\n```";
+  }
+  return body;
+}
+
+async function send(token: string, channelId: string, messageId: string | null, payload: object) {
+  const headers = { Authorization: `Bot ${token}`, "Content-Type": "application/json" };
+  if (messageId) {
+    const res = await fetch(`${API}/channels/${channelId}/messages/${messageId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) return messageId;
+    if (res.status !== 404) {
+      console.error("[standings-post] edit failed", res.status, await res.text());
+      return messageId;
+    }
+    // Message was deleted: fall through and post a fresh one.
+  }
+  const res = await fetch(`${API}/channels/${channelId}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    console.error("[standings-post] post failed", res.status, await res.text());
+    return messageId;
+  }
+  const msg = await res.json();
+  return (msg.id as string) ?? messageId;
+}
+
+export async function syncStandingsToDiscord(leagueId: string, opts: { force?: boolean } = {}): Promise<void> {
+  try {
+    const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
+    if (!token) return;
+
+    const supabase = createAdminClient();
+    const pb = supabase.schema("pitboss");
+
+    const { data: cfg } = await pb
+      .from("standings_discord_sync")
+      .select("*")
+      .eq("league_id", leagueId)
+      .maybeSingle();
+    if (!cfg || (!cfg.driver_channel_id && !cfg.team_channel_id)) return;
+
+    const { data: seasonRows } = await pb
+      .from("results_last_change")
+      .select("season, last_change, row_count")
+      .eq("league_id", leagueId);
+    const sorted = [...(seasonRows ?? [])].sort((a: any, b: any) => {
+      const na = Number(a.season), nb = Number(b.season);
+      return Number.isNaN(na) || Number.isNaN(nb) ? String(b.season).localeCompare(String(a.season)) : nb - na;
+    });
+    const latest: any = sorted[0];
+    if (!latest) return;
+    const season = String(latest.season);
+    const version = `${season}:${latest.row_count}:${latest.last_change}`;
+    if (!opts.force && cfg.last_version === version) return;
+
+    const { data: league } = await pb.from("leagues").select("name, logo_url").eq("id", leagueId).single();
+    const { data: roundRows } = await pb
+      .from("results")
+      .select("round")
+      .eq("league_id", leagueId)
+      .eq("season", season)
+      .limit(5000);
+    const lastRound = Math.max(0, ...(roundRows ?? []).map((r: any) => Number(r.round) || 0));
+    const footer = {
+      text: `Season ${season}${lastRound ? ` · after round ${lastRound}` : ""}`,
+    };
+    const byPoints = (a: any, b: any) =>
+      Number(b.points) - Number(a.points) || b.wins - a.wins || b.top3 - a.top3;
+
+    let driverMsg: string | null = cfg.driver_message_id ?? null;
+    let teamMsg: string | null = cfg.team_message_id ?? null;
+
+    if (cfg.driver_channel_id) {
+      const { data: live } = await pb
+        .from("driver_standings_live")
+        .select("driver_id, wins, top3, points")
+        .eq("league_id", leagueId)
+        .eq("season", season);
+      const ids = (live ?? []).map((r: any) => r.driver_id);
+      const { data: drivers } = ids.length
+        ? await pb.from("drivers").select("id, discord_username, display_name").in("id", ids)
+        : { data: [] as any[] };
+      const names = Object.fromEntries(
+        (drivers ?? []).map((d: any) => [d.id, d.display_name ?? d.discord_username ?? "Unknown"])
+      );
+      const rows: Row[] = [...(live ?? [])]
+        .sort(byPoints)
+        .map((r: any) => ({ name: names[r.driver_id] ?? "Unknown", wins: r.wins, points: r.points }));
+      driverMsg = await send(token, cfg.driver_channel_id, driverMsg, {
+        embeds: [
+          {
+            author: authorOf(league),
+            title: `${league?.name ?? "League"} — Drivers' Championship`,
+            description: rows.length ? table(rows) : "No results yet.",
+            color: 0xe8284a,
+            footer,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+        allowed_mentions: { parse: [] },
+      });
+    }
+
+    if (cfg.team_channel_id) {
+      const { data: live } = await pb
+        .from("constructor_standings_live")
+        .select("franchise_id, wins, top3, points")
+        .eq("league_id", leagueId)
+        .eq("season", season);
+      const ids = (live ?? []).map((r: any) => r.franchise_id);
+      const { data: teams } = ids.length
+        ? await supabase.schema("rise_os").from("franchises").select("id, name").in("id", ids)
+        : { data: [] as any[] };
+      const names = Object.fromEntries((teams ?? []).map((t: any) => [t.id, t.name]));
+      const rows: Row[] = [...(live ?? [])]
+        .sort(byPoints)
+        .map((r: any) => ({ name: names[r.franchise_id] ?? "Unknown team", wins: r.wins, points: r.points }));
+      teamMsg = await send(token, cfg.team_channel_id, teamMsg, {
+        embeds: [
+          {
+            author: authorOf(league),
+            title: `${league?.name ?? "League"} — Constructors' Championship`,
+            description: rows.length ? table(rows) : "No results yet.",
+            color: 0xe8284a,
+            footer,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+        allowed_mentions: { parse: [] },
+      });
+    }
+
+    await pb
+      .from("standings_discord_sync")
+      .update({
+        driver_message_id: driverMsg,
+        team_message_id: teamMsg,
+        last_version: version,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("league_id", leagueId);
+  } catch (err) {
+    console.error("[standings-post] sync failed", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Round results (race + qualifying) -> Discord
+// Channels: standings_discord_sync.race_channel_id / quali_channel_id.
+// One message per round and kind, edited in place when results change
+// (steward edit, penalty, appeal). Never throws.
+// ---------------------------------------------------------------------------
+export async function postRoundResultsToDiscord(
+  leagueId: string,
+  season: string | number,
+  round: number | string
+): Promise<void> {
+  try {
+    const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
+    if (!token) return;
+    const seasonKey = String(season);
+    const roundNum = Number(round);
+    if (!Number.isInteger(roundNum)) return;
+
+    const supabase = createAdminClient();
+    const pb = supabase.schema("pitboss");
+
+    const { data: cfg } = await pb
+      .from("standings_discord_sync")
+      .select("race_channel_id, quali_channel_id")
+      .eq("league_id", leagueId)
+      .maybeSingle();
+    if (!cfg || (!cfg.race_channel_id && !cfg.quali_channel_id)) return;
+
+    const { data: rows } = await pb
+      .from("results_with_team")
+      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, dnf_reason, fastest_lap, points_earned")
+      .eq("league_id", leagueId)
+      .eq("season", seasonKey)
+      .eq("round", roundNum)
+      .limit(500);
+    if (!rows || rows.length === 0) return;
+
+    const driverIds = [...new Set(rows.map((r: any) => r.driver_id))];
+    const teamIds = [...new Set(rows.map((r: any) => r.team_id).filter(Boolean))];
+    const [{ data: drivers }, { data: teams }, { data: league }] = await Promise.all([
+      pb.from("drivers").select("id, discord_username, display_name").in("id", driverIds),
+      teamIds.length
+        ? supabase.schema("rise_os").from("franchises").select("id, name").in("id", teamIds)
+        : Promise.resolve({ data: [] as any[] }),
+      pb.from("leagues").select("name, logo_url").eq("id", leagueId).single(),
+    ]);
+    const dName = Object.fromEntries(
+      (drivers ?? []).map((d: any) => [d.id, d.display_name ?? d.discord_username ?? "Unknown"])
+    );
+    const tName = Object.fromEntries((teams ?? []).map((t: any) => [t.id, t.name]));
+    const track = rows.find((r: any) => r.track)?.track ?? null;
+    const heading = `${league?.name ?? "League"} — Season ${seasonKey}, Round ${roundNum}${track ? ` · ${track}` : ""}`;
+
+    const build = (kind: "race" | "quali") => {
+      const list = [...rows]
+        .filter((r: any) => (kind === "race" ? true : r.qualifying_position != null))
+        .sort((a: any, b: any) => {
+          if (kind === "quali") return a.qualifying_position - b.qualifying_position;
+          if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
+          return (a.finish_position ?? 999) - (b.finish_position ?? 999);
+        });
+      const w = Math.min(20, Math.max(8, ...list.map((r: any) => (dName[r.driver_id] ?? "Unknown").length)));
+      const lines = list.map((r: any, i: number) => {
+        const name = pad(dName[r.driver_id] ?? "Unknown", w);
+        const team = tName[r.team_id] ? `  ${tName[r.team_id]}` : "";
+        if (kind === "quali") return `${String(r.qualifying_position).padStart(2, " ")}  ${name}${team}`;
+        const pos = r.dnf ? "DNF" : String(r.finish_position ?? i + 1).padStart(3, " ");
+        const fl = r.fastest_lap ? " FL" : "";
+        return `${pos}  ${name}  ${String(Number(r.points_earned ?? 0)).padStart(3, " ")}pts${fl}${team}`;
+      });
+      let body = "```\n" + lines.join("\n") + "\n```";
+      while (body.length > MAX_DESC && lines.length > 1) {
+        lines.pop();
+        body = "```\n" + lines.join("\n") + "\n```";
+      }
+      return body;
+    };
+
+    for (const kind of ["race", "quali"] as const) {
+      const channelId = kind === "race" ? cfg.race_channel_id : cfg.quali_channel_id;
+      if (!channelId) continue;
+      if (kind === "quali" && !rows.some((r: any) => r.qualifying_position != null)) continue;
+
+      const { data: prev } = await pb
+        .from("round_results_discord")
+        .select("message_id, channel_id")
+        .eq("league_id", leagueId)
+        .eq("season", seasonKey)
+        .eq("round", roundNum)
+        .eq("kind", kind)
+        .maybeSingle();
+
+      const messageId = await send(
+        token,
+        channelId,
+        prev && prev.channel_id === channelId ? prev.message_id : null,
+        {
+          embeds: [
+            {
+              author: authorOf(league),
+              title: kind === "race" ? "Race Results" : "Qualifying Results",
+              description: `**${heading}**\n${build(kind)}`,
+              color: 0xe8284a,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+          allowed_mentions: { parse: [] },
+        }
+      );
+
+      await pb.from("round_results_discord").upsert({
+        league_id: leagueId,
+        season: seasonKey,
+        round: roundNum,
+        kind,
+        channel_id: channelId,
+        message_id: messageId,
+        updated_at: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.error("[standings-post] round results post failed", err);
+  }
+}
