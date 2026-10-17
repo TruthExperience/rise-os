@@ -213,7 +213,13 @@ function StandingsContent() {
       <div className="relative px-4 pt-6 pb-24">
         <button onClick={() => router.back()} className="text-neutral-400 text-sm mb-4">← Back</button>
 
-        <h1 className="text-3xl font-bold mb-1">{leagueName || "Standings"}</h1>
+        <div className="flex items-center gap-3 mb-1">
+          {logoUrl && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={logoUrl} alt="" className="h-14 w-14 rounded-full object-cover shrink-0" />
+        )}
+          <h1 className="text-3xl font-bold">{leagueName || "Standings"}</h1>
+        </div>
         <p className="text-xs tracking-widest text-neutral-400 uppercase mb-4 flex items-center gap-2">
           {view === "teams" ? "Team Championship" : "Driver Championship"}
           {season ? ` · Season ${season}` : ""}
