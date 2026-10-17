@@ -16,6 +16,20 @@ interface StandingRow {
   points: number;
 }
 
+interface TeamRow {
+  position: number;
+  franchise_id: string;
+  team_name: string;
+  abbreviation: string | null;
+  logo_url: string | null;
+  color: string | null;
+  wins: number;
+  poles: number;
+  fastest_laps: number;
+  dnfs: number;
+  points: number;
+}
+
 interface LeagueSummary {
   league_id: string;
   name: string;
@@ -38,7 +52,10 @@ function StandingsContent() {
   const [memberships, setMemberships] = useState<LeagueSummary[] | null>(null);
   const [membershipError, setMembershipError] = useState<string | null>(null);
 
-  const [season, setSeason] = useState("2026");
+  const [season, setSeason] = useState("latest");
+  const [seasons, setSeasons] = useState<string[]>([]);
+  const [tab, setTab] = useState<"drivers" | "teams">("drivers");
+  const [teams, setTeams] = useState<TeamRow[]>([]);
   const [leagueName, setLeagueName] = useState("");
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [standings, setStandings] = useState<StandingRow[]>([]);
@@ -99,6 +116,10 @@ function StandingsContent() {
           setLeagueName(data.league_name);
           setLogoUrl(data.league_logo_url);
           setStandings(data.standings);
+          setSeasons(data.seasons ?? []);
+          setTeams(data.teams ?? []);
+          // Resolve "latest" to the real season number the API picked.
+          if (season === "latest" && data.season) setSeason(data.season);
         }
       })
       .catch(() => setError("Failed to load standings"))
@@ -121,8 +142,40 @@ function StandingsContent() {
 
         <h1 className="text-3xl font-bold mb-1">{leagueName || "Standings"}</h1>
         <p className="text-xs tracking-widest text-neutral-400 uppercase mb-6">
-          Driver Championship · {season}
+          {tab === "drivers" ? "Driver" : "Team"} Championship{season !== "latest" && season ? ` · Season ${season}` : ""}
         </p>
+
+        {seasons.length > 1 && (
+          <div className="flex gap-2 mb-6 overflow-x-auto">
+            {seasons.map((s) => (
+              <button
+                key={s}
+                onClick={() => setSeason(s)}
+                className={`px-3 py-1 rounded-full text-xs border ${
+                  s === season ? "bg-white text-black border-white" : "border-neutral-600 text-neutral-300"
+                }`}
+              >
+                Season {s}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {urlLeagueId && (
+          <div className="flex gap-2 mb-4">
+            {(["drivers", "teams"] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => setTab(k)}
+                className={`px-4 py-1.5 rounded-full text-sm font-medium border ${
+                  tab === k ? "bg-white text-black border-white" : "border-neutral-600 text-neutral-300"
+                }`}
+              >
+                {k === "drivers" ? "Drivers" : "Teams"}
+              </button>
+            ))}
+          </div>
+        )}
 
         {!urlLeagueId && resolvingLeague && (
           <p className="text-neutral-500 text-sm">Finding your league…</p>
@@ -176,7 +229,45 @@ function StandingsContent() {
         {loading && <p className="text-neutral-500 text-sm">Loading…</p>}
         {error && <p className="text-red-500 text-sm">{error}</p>}
 
-        {standings.length > 0 && (
+        {tab === "teams" && teams.length === 0 && !loading && !error && urlLeagueId && (
+          <p className="text-neutral-500 text-sm">No team standings yet.</p>
+        )}
+
+        {tab === "teams" && teams.length > 0 && (
+          <div className="rounded-2xl border border-neutral-800 bg-black/40 backdrop-blur-sm overflow-hidden">
+            {teams.map((row, i) => (
+              <div
+                key={row.franchise_id}
+                className={`flex items-center justify-between px-4 py-3 ${
+                  i !== teams.length - 1 ? "border-b border-neutral-800" : ""
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <span className={`w-6 text-sm font-semibold ${row.position === 1 ? "text-red-500" : "text-neutral-400"}`}>
+                    {row.position}
+                  </span>
+                  {row.logo_url ? (
+                    <img src={row.logo_url} alt="" className="w-8 h-8 rounded-md object-cover" />
+                  ) : (
+                    <span
+                      className="w-1.5 h-8 rounded-full"
+                      style={{ backgroundColor: row.color ?? "#525252" }}
+                    />
+                  )}
+                  <div>
+                    <p className="font-medium">{row.team_name}</p>
+                    <p className="text-xs text-neutral-500">
+                      {row.wins} wins · {row.poles} poles · {row.fastest_laps} FL · {row.dnfs} DNF
+                    </p>
+                  </div>
+                </div>
+                <span className="text-lg font-bold">{row.points}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === "drivers" && standings.length > 0 && (
           <div className="rounded-2xl border border-neutral-800 bg-black/40 backdrop-blur-sm overflow-hidden">
             {standings.map((row, i) => (
               <div
