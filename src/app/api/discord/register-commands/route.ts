@@ -747,6 +747,26 @@ const DIVISION_COMMAND = {
   ],
 };
 
+// /gamertags import: reads a gamertags channel and saves what each person
+// posted (owners, co-owners, commissioners, stewards and head stewards only;
+// the handler checks). Without apply it only previews.
+// Option types: 1 = SUB_COMMAND, 5 = BOOLEAN, 7 = CHANNEL
+const GAMERTAGS_COMMAND = {
+  name: "gamertags",
+  description: "Save drivers' gamertags from a gamertags channel",
+  options: [
+    {
+      type: 1,
+      name: "import",
+      description: "Read a gamertags channel and save each person's gamertags",
+      options: [
+        { type: 7, name: "channel", description: "Gamertags channel (default: this channel)", channel_types: [0], required: false },
+        { type: 5, name: "apply", description: "Save them (default: preview only)", required: false },
+      ],
+    },
+  ],
+};
+
 async function register(): Promise<NextResponse> {
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
   const appId =
@@ -782,6 +802,7 @@ async function register(): Promise<NextResponse> {
     STEWARD_COMMAND,
     APPEAL_COMMAND,
     DIVISION_COMMAND,
+    GAMERTAGS_COMMAND,
   ]) {
     // Discord rate-limits command writes (a 429 comes back with
     // retry_after in seconds). Wait that long and try again, up to 4 times,
