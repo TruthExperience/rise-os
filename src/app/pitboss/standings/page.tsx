@@ -1,10 +1,13 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { RESULTS_CHANNEL } from "@/lib/standings-sync";
 
-interface StandingRow {
+type View = "drivers" | "teams";
+
+interface DriverRow {
   position: number;
   driver_id: string;
   driver_name: string;
@@ -23,6 +26,7 @@ interface TeamRow {
   abbreviation: string | null;
   logo_url: string | null;
   color: string | null;
+  drivers: number;
   wins: number;
   poles: number;
   fastest_laps: number;
@@ -38,31 +42,48 @@ interface LeagueSummary {
   role: string;
 }
 
+const POLL_MS = 8000;
+
 function StandingsContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const urlLeagueId = searchParams.get("league_id");
+  const urlSeason = searchParams.get("season");
+  const urlRound = searchParams.get("round");
+  const view: View = searchParams.get("view") === "teams" ? "teams" : "drivers";
 
-  // BottomNav links here with no league context at all (it's a global nav
-  // bar, it has no way to know which league is "current"). So when the URL
-  // doesn't supply one, resolve it the same way /league does: fetch the
-  // driver's memberships and either auto-pick the only one or let them
-  // choose, instead of dead-ending on an error message.
   const [resolvingLeague, setResolvingLeague] = useState(!urlLeagueId);
   const [memberships, setMemberships] = useState<LeagueSummary[] | null>(null);
   const [membershipError, setMembershipError] = useState<string | null>(null);
 
-  const [season, setSeason] = useState("latest");
+  const [season, setSeason] = useState<string | null>(urlSeason);
   const [seasons, setSeasons] = useState<string[]>([]);
-  const [tab, setTab] = useState<"drivers" | "teams">("drivers");
-  const [teams, setTeams] = useState<TeamRow[]>([]);
+  const [rounds, setRounds] = useState<{ round: number; track: string | null }[]>([]);
   const [leagueName, setLeagueName] = useState("");
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
-  const [standings, setStandings] = useState<StandingRow[]>([]);
+  const [drivers, setDrivers] = useState<DriverRow[]>([]);
+  const [teams, setTeams] = useState<TeamRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
-  const leagueId = urlLeagueId; // once resolved, we redirect to the URL form so it stays shareable/bookmarkable
+  const leagueId = urlLeagueId;
+  const versionRef = useRef<string>("");
+
+  // Keep view/season in the URL so the page stays shareable/bookmarkable.
+  const buildUrl = useCallback(
+    (next: { view?: View; season?: string | null; round?: string | null }) => {
+      const p = new URLSearchParams();
+      if (leagueId) p.set("league_id", leagueId);
+      const s = next.season === undefined ? season : next.season;
+      if (s) p.set("season", s);
+      const r = next.round === undefined ? urlRound : next.round;
+      if (r) p.set("round", r);
+      p.set("view", next.view ?? view);
+      return `/pitboss/standings?${p.toString()}`;
+    },
+    [leagueId, season, view, urlRound]
+  );
 
   useEffect(() => {
     if (urlLeagueId) return; // already have one, nothing to resolve
@@ -101,30 +122,82 @@ function StandingsContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlLeagueId]);
 
-  useEffect(() => {
-    if (!leagueId || !season) return;
-    setLoading(true);
-    setError(null);
-
-    fetch(`/api/pitboss/standings?league_id=${leagueId}&season=${season}`)
-      .then((res) => res.json())
-      .then((data) => {
+  // Fetch (or silently re-fetch) standings. Silent refreshes don't flash the
+  // loading state, and rows only re-render when the server's version changes.
+  const load = useCallback(
+    async (silent = false) => {
+      if (!leagueId) return;
+      if (!silent) setLoading(true);
+      try {
+        const qs = new URLSearchParams({ league_id: leagueId, view });
+        if (season) qs.set("season", season);
+        if (urlRound) qs.set("round", urlRound);
+        const res = await fetch(`/api/pitboss/standings?${qs}`, { cache: "no-store" });
+        const data = await res.json();
         if (data.error) {
           setError(data.error);
-          setStandings([]);
-        } else {
-          setLeagueName(data.league_name);
-          setLogoUrl(data.league_logo_url);
-          setStandings(data.standings);
-          setSeasons(data.seasons ?? []);
-          setTeams(data.teams ?? []);
-          // Resolve "latest" to the real season number the API picked.
-          if (season === "latest" && data.season) setSeason(data.season);
+          if (!silent) {
+            setDrivers([]);
+            setTeams([]);
+          }
+          return;
         }
-      })
-      .catch(() => setError("Failed to load standings"))
-      .finally(() => setLoading(false));
-  }, [leagueId, season]);
+        setError(null);
+        setLeagueName(data.league_name);
+        setLogoUrl(data.league_logo_url);
+        setSeasons(data.seasons ?? []);
+        setRounds(data.rounds ?? []);
+        if (!season && data.season) setSeason(data.season);
+
+        const key = `${view}:${data.season}:${urlRound ?? ""}:${data.version}`;
+        if (silent && key === versionRef.current) return; // nothing changed
+        versionRef.current = key;
+        if (view === "teams") setTeams(data.standings);
+        else setDrivers(data.standings);
+        setUpdatedAt(new Date());
+      } catch {
+        if (!silent) setError("Failed to load standings");
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [leagueId, season, view, urlRound]
+  );
+
+  // Initial load + reload when league/season/view changes.
+  useEffect(() => {
+    versionRef.current = "";
+    load(false);
+  }, [load]);
+
+  // Instant sync: poll while visible, refresh on focus/visibility, and refresh
+  // immediately when a steward saves results in another tab of this browser.
+  useEffect(() => {
+    if (!leagueId) return;
+    const tick = () => {
+      if (document.visibilityState === "visible") load(true);
+    };
+    const id = setInterval(tick, POLL_MS);
+    document.addEventListener("visibilitychange", tick);
+    window.addEventListener("focus", tick);
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel(RESULTS_CHANNEL);
+      bc.onmessage = () => load(true);
+    } catch {
+      /* unsupported */
+    }
+
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("focus", tick);
+      bc?.close();
+    };
+  }, [leagueId, load]);
+
+  const rows = view === "teams" ? teams : drivers;
 
   return (
     <div className="relative min-h-screen bg-black text-white">
@@ -141,41 +214,17 @@ function StandingsContent() {
         <button onClick={() => router.back()} className="text-neutral-400 text-sm mb-4">← Back</button>
 
         <h1 className="text-3xl font-bold mb-1">{leagueName || "Standings"}</h1>
-        <p className="text-xs tracking-widest text-neutral-400 uppercase mb-6">
-          {tab === "drivers" ? "Driver" : "Team"} Championship{season !== "latest" && season ? ` · Season ${season}` : ""}
+        <p className="text-xs tracking-widest text-neutral-400 uppercase mb-4 flex items-center gap-2">
+          {view === "teams" ? "Team Championship" : "Driver Championship"}
+          {season ? ` · Season ${season}` : ""}
+          {urlRound ? ` · After Round ${urlRound}` : ""}
+          {leagueId && (
+            <span className="inline-flex items-center gap-1 text-green-400 normal-case tracking-normal">
+              <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
+              Live
+            </span>
+          )}
         </p>
-
-        {seasons.length > 1 && (
-          <div className="flex gap-2 mb-6 overflow-x-auto">
-            {seasons.map((s) => (
-              <button
-                key={s}
-                onClick={() => setSeason(s)}
-                className={`px-3 py-1 rounded-full text-xs border ${
-                  s === season ? "bg-white text-black border-white" : "border-neutral-600 text-neutral-300"
-                }`}
-              >
-                Season {s}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {urlLeagueId && (
-          <div className="flex gap-2 mb-4">
-            {(["drivers", "teams"] as const).map((k) => (
-              <button
-                key={k}
-                onClick={() => setTab(k)}
-                className={`px-4 py-1.5 rounded-full text-sm font-medium border ${
-                  tab === k ? "bg-white text-black border-white" : "border-neutral-600 text-neutral-300"
-                }`}
-              >
-                {k === "drivers" ? "Drivers" : "Teams"}
-              </button>
-            ))}
-          </div>
-        )}
 
         {!urlLeagueId && resolvingLeague && (
           <p className="text-neutral-500 text-sm">Finding your league…</p>
@@ -226,62 +275,84 @@ function StandingsContent() {
           </div>
         )}
 
+        {leagueId && (
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <div
+              role="tablist"
+              aria-label="Standings type"
+              className="inline-flex rounded-full border border-neutral-800 bg-white/5 p-1"
+            >
+              {(["drivers", "teams"] as const).map((v) => (
+                <button
+                  key={v}
+                  role="tab"
+                  aria-selected={view === v}
+                  onClick={() => router.replace(buildUrl({ view: v }))}
+                  className={`rounded-full px-4 py-1.5 text-sm font-semibold transition ${
+                    view === v ? "bg-rise-red text-white" : "text-neutral-400"
+                  }`}
+                >
+                  {v === "drivers" ? "Drivers" : "Teams"}
+                </button>
+              ))}
+            </div>
+
+            {seasons.length > 0 && (
+              <select
+                value={season ?? ""}
+                onChange={(e) => {
+                  setSeason(e.target.value);
+                  router.replace(buildUrl({ season: e.target.value, round: null }));
+                }}
+                className="rounded-full border border-neutral-800 bg-black/60 px-3 py-1.5 text-sm text-white"
+                aria-label="Season"
+              >
+                {seasons.map((s) => (
+                  <option key={s} value={s}>Season {s}</option>
+                ))}
+              </select>
+            )}
+
+            {rounds.length > 0 && (
+              <select
+                value={urlRound ?? ""}
+                onChange={(e) => router.replace(buildUrl({ round: e.target.value || null }))}
+                className="rounded-full border border-neutral-800 bg-black/60 px-3 py-1.5 text-sm text-white max-w-[11rem]"
+                aria-label="Standings after race"
+              >
+                <option value="">Latest</option>
+                {rounds.map((r) => (
+                  <option key={r.round} value={r.round}>
+                    After R{r.round}{r.track ? ` · ${r.track}` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
         {loading && <p className="text-neutral-500 text-sm">Loading…</p>}
         {error && <p className="text-red-500 text-sm">{error}</p>}
 
-        {tab === "teams" && teams.length === 0 && !loading && !error && urlLeagueId && (
-          <p className="text-neutral-500 text-sm">No team standings yet.</p>
+        {leagueId && !loading && !error && rows.length === 0 && (
+          <p className="text-neutral-500 text-sm">
+            {view === "teams"
+              ? "No team results yet — team points appear once results carry a team."
+              : "No results recorded yet."}
+          </p>
         )}
 
-        {tab === "teams" && teams.length > 0 && (
+        {view === "drivers" && drivers.length > 0 && (
           <div className="rounded-2xl border border-neutral-800 bg-black/40 backdrop-blur-sm overflow-hidden">
-            {teams.map((row, i) => (
+            {drivers.map((row, i) => (
               <div
-                key={row.franchise_id}
+                key={row.driver_id}
                 className={`flex items-center justify-between px-4 py-3 ${
-                  i !== teams.length - 1 ? "border-b border-neutral-800" : ""
+                  i !== drivers.length - 1 ? "border-b border-neutral-800" : ""
                 }`}
               >
                 <div className="flex items-center gap-3">
                   <span className={`w-6 text-sm font-semibold ${row.position === 1 ? "text-red-500" : "text-neutral-400"}`}>
-                    {row.position}
-                  </span>
-                  {row.logo_url ? (
-                    <img src={row.logo_url} alt="" className="w-8 h-8 rounded-md object-cover" />
-                  ) : (
-                    <span
-                      className="w-1.5 h-8 rounded-full"
-                      style={{ backgroundColor: row.color ?? "#525252" }}
-                    />
-                  )}
-                  <div>
-                    <p className="font-medium">{row.team_name}</p>
-                    <p className="text-xs text-neutral-500">
-                      {row.wins} wins · {row.poles} poles · {row.fastest_laps} FL · {row.dnfs} DNF
-                    </p>
-                  </div>
-                </div>
-                <span className="text-lg font-bold">{row.points}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {tab === "drivers" && standings.length > 0 && (
-          <div className="rounded-2xl border border-neutral-800 bg-black/40 backdrop-blur-sm overflow-hidden">
-            {standings.map((row, i) => (
-              <div
-                key={row.driver_id}
-                className={`flex items-center justify-between px-4 py-3 ${
-                  i !== standings.length - 1 ? "border-b border-neutral-800" : ""
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <span
-                    className={`w-6 text-sm font-semibold ${
-                      row.position === 1 ? "text-red-500" : "text-neutral-400"
-                    }`}
-                  >
                     {row.position}
                   </span>
                   <div>
@@ -296,6 +367,42 @@ function StandingsContent() {
               </div>
             ))}
           </div>
+        )}
+
+        {view === "teams" && teams.length > 0 && (
+          <div className="rounded-2xl border border-neutral-800 bg-black/40 backdrop-blur-sm overflow-hidden">
+            {teams.map((row, i) => (
+              <div
+                key={row.franchise_id}
+                className={`flex items-center justify-between px-4 py-3 ${
+                  i !== teams.length - 1 ? "border-b border-neutral-800" : ""
+                }`}
+                style={row.color ? { borderLeft: `3px solid ${row.color}` } : undefined}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className={`w-6 text-sm font-semibold ${row.position === 1 ? "text-red-500" : "text-neutral-400"}`}>
+                    {row.position}
+                  </span>
+                  {row.logo_url && (
+                    <img src={row.logo_url} alt="" className="h-8 w-8 rounded-lg object-cover flex-shrink-0" />
+                  )}
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">{row.team_name}</p>
+                    <p className="text-xs text-neutral-500">
+                      {row.wins} wins · {row.poles} poles · {row.fastest_laps} FL · {row.dnfs} DNF
+                    </p>
+                  </div>
+                </div>
+                <span className="text-lg font-bold">{row.points}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {updatedAt && (
+          <p className="mt-3 text-[11px] text-neutral-600">
+            Updated {updatedAt.toLocaleTimeString()} · refreshes automatically
+          </p>
         )}
       </div>
     </div>
