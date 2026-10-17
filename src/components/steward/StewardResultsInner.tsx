@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useSession } from 'next-auth/react'
+import { announceResultsChanged } from '@/lib/standings-sync'
 
 interface Driver {
   id: string
@@ -216,6 +217,7 @@ export function StewardResultsInner() {
         if (!res.ok) throw new Error(data.error ?? 'Failed to save results')
       }
       setSaved(true)
+      announceResultsChanged(league.id)
       await loadExisting()
     } catch (e: any) {
       setError(e.message)
