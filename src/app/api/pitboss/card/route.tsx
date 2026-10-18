@@ -7,6 +7,7 @@ import { ImageResponse } from "next/og";
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
 import { verifyCard, type CardKind } from "@/lib/discord/card-url";
+import { loadDriverLabels, labelFull } from "@/lib/discord/driver-labels";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -88,12 +89,8 @@ export async function GET(req: NextRequest) {
       .eq("round", roundNum)
       .limit(500);
     const ids = [...new Set((rows ?? []).map((r: any) => r.driver_id))];
-    const { data: drivers } = ids.length
-      ? await pb.from("drivers").select("id, discord_username, display_name").in("id", ids)
-      : { data: [] as any[] };
-    const names = Object.fromEntries(
-      (drivers ?? []).map((d: any) => [d.id, d.display_name ?? d.discord_username ?? "Unknown"])
-    );
+    const labels = await loadDriverLabels(pb, leagueId, ids as string[]);
+    const names = Object.fromEntries(Object.entries(labels).map(([id, l]) => [id, labelFull(l)]));
     const track = (rows ?? []).find((r: any) => r.track)?.track;
     title = kind === "race" ? "RACE RESULTS" : "QUALIFYING";
     subtitle = `Season ${season} · Round ${roundNum}${track ? ` · ${track}` : ""}`;
@@ -142,12 +139,8 @@ export async function GET(req: NextRequest) {
         .eq("league_id", leagueId)
         .eq("season", season);
       const ids = (live ?? []).map((r: any) => r.driver_id);
-      const { data: drivers } = ids.length
-        ? await pb.from("drivers").select("id, discord_username, display_name").in("id", ids)
-        : { data: [] as any[] };
-      const names = Object.fromEntries(
-        (drivers ?? []).map((d: any) => [d.id, d.display_name ?? d.discord_username ?? "Unknown"])
-      );
+      const labels = await loadDriverLabels(pb, leagueId, ids as string[]);
+      const names = Object.fromEntries(Object.entries(labels).map(([id, l]) => [id, labelFull(l)]));
       title = "DRIVERS' CHAMPIONSHIP";
       lines = [...(live ?? [])].sort(byPoints).map((r: any, i: number) => ({
         pos: String(i + 1),
