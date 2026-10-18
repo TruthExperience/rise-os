@@ -7,11 +7,12 @@
 // change. Never throws.
 import { createAdminClient } from "@/lib/supabase/server";
 import { buildCardUrl } from "@/lib/discord/card-url";
+import { loadDriverLabels, labelPlain, type DriverLabel } from "@/lib/discord/driver-labels";
 
 const API = "https://discord.com/api/v10";
 const MAX_DESC = 3900;
 
-type Row = { name: string; wins: number; points: number };
+type Row = { name: string; wins: number; points: number; flag?: string | null };
 
 // League logo shown in the top-left of each embed (needs a public https URL).
 function authorOf(league: any) {
@@ -48,7 +49,7 @@ function table(rows: Row[]) {
     const pos = String(i + 1).padStart(2, " ");
     const pts = String(Number(r.points)).padStart(4, " ");
     const wins = String(r.wins).padStart(2, " ");
-    return `${pos}  ${pad(r.name, w)}  ${wins}W ${pts}`;
+    return `${pos}  ${pad(r.name, w)}  ${wins}W ${pts}${r.flag ? `  ${r.flag}` : ""}`;
   });
   let body = "```\n" + lines.join("\n") + "\n```";
   while (body.length > MAX_DESC && lines.length > 1) {
@@ -148,15 +149,15 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
         .eq("league_id", leagueId)
         .eq("season", season);
       const ids = (live ?? []).map((r: any) => r.driver_id);
-      const { data: drivers } = ids.length
-        ? await pb.from("drivers").select("id, discord_username, display_name").in("id", ids)
-        : { data: [] as any[] };
-      const names = Object.fromEntries(
-        (drivers ?? []).map((d: any) => [d.id, d.display_name ?? d.discord_username ?? "Unknown"])
-      );
+      const labels: Record<string, DriverLabel> = await loadDriverLabels(pb, leagueId, ids as string[]);
       const rows: Row[] = [...(live ?? [])]
         .sort(byPoints)
-        .map((r: any) => ({ name: names[r.driver_id] ?? "Unknown", wins: r.wins, points: r.points }));
+        .map((r: any) => ({
+          name: labelPlain(labels[r.driver_id]),
+          flag: labels[r.driver_id]?.flag ?? null,
+          wins: r.wins,
+          points: r.points,
+        }));
       driverMsg = await send(token, cfg.driver_channel_id, driverMsg, {
         embeds: [
           {
@@ -254,16 +255,15 @@ export async function postRoundResultsToDiscord(
 
     const driverIds = [...new Set(rows.map((r: any) => r.driver_id))];
     const teamIds = [...new Set(rows.map((r: any) => r.team_id).filter(Boolean))];
-    const [{ data: drivers }, { data: teams }, { data: league }] = await Promise.all([
-      pb.from("drivers").select("id, discord_username, display_name").in("id", driverIds),
+    const [labels, { data: teams }, { data: league }] = await Promise.all([
+      loadDriverLabels(pb, leagueId, driverIds as string[]),
       teamIds.length
         ? supabase.schema("rise_os").from("franchises").select("id, name").in("id", teamIds)
         : Promise.resolve({ data: [] as any[] }),
       pb.from("leagues").select("name, logo_url").eq("id", leagueId).single(),
     ]);
-    const dName = Object.fromEntries(
-      (drivers ?? []).map((d: any) => [d.id, d.display_name ?? d.discord_username ?? "Unknown"])
-    );
+    const dName = Object.fromEntries(Object.entries(labels).map(([id, l]) => [id, labelPlain(l)]));
+    const dFlag = Object.fromEntries(Object.entries(labels).map(([id, l]) => [id, l.flag ? `  ${l.flag}` : ""]));
     const tName = Object.fromEntries((teams ?? []).map((t: any) => [t.id, t.name]));
     const track = rows.find((r: any) => r.track)?.track ?? null;
     const heading = `${league?.name ?? "League"} — Season ${seasonKey}, Round ${roundNum}${track ? ` · ${track}` : ""}`;
@@ -285,11 +285,11 @@ export async function postRoundResultsToDiscord(
         const team = tName[r.team_id] ? `  ${tName[r.team_id]}` : "";
         if (kind === "quali") {
           const t = fmtLap(r.quali_time_seconds);
-          return `${String(r.qualifying_position).padStart(2, " ")}  ${name}  ${t}${team}`;
+          return `${String(r.qualifying_position).padStart(2, " ")}  ${name}  ${t}${team}${dFlag[r.driver_id] ?? ""}`;
         }
         const pos = r.dnf ? "DNF" : String(r.finish_position ?? i + 1).padStart(3, " ");
         const fl = r.fastest_lap ? " FL" : "";
-        return `${pos}  ${name}  ${String(Number(r.points_earned ?? 0)).padStart(3, " ")}pts  ${raceTimeLabel(r, winnerTime).padStart(10, " ")}${fl}${team}`;
+        return `${pos}  ${name}  ${String(Number(r.points_earned ?? 0)).padStart(3, " ")}pts  ${raceTimeLabel(r, winnerTime).padStart(10, " ")}${fl}${team}${dFlag[r.driver_id] ?? ""}`;
       });
       let body = "```\n" + lines.join("\n") + "\n```";
       while (body.length > MAX_DESC && lines.length > 1) {
