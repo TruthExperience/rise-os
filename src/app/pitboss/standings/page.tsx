@@ -17,7 +17,25 @@ interface DriverRow {
   dnfs: number;
   sprint_wins: number;
   points: number;
+  stats?: Record<string, number | null> | null;
 }
+
+const STAT_COLS: [string, string][] = [
+  ["gain", "GAIN"], ["interval", "INT"], ["gap", "GAP"], ["p1", "P1"], ["p2", "P2"], ["p3", "P3"],
+  ["top5", "TOP 5"], ["top10", "TOP 10"], ["best_r", "BEST R"], ["worst_r", "WORST R"], ["avg_r", "AVG R"],
+  ["best_q", "BEST Q"], ["worst_q", "WORST Q"], ["avg_q", "AVG Q"], ["avg_gain", "AVG GAIN"],
+  ["poles", "POLE"], ["rds_led", "RDS LED"], ["dnfs", "DNF"], ["avg_pts", "AVG PTS"],
+  ["scr_pct", "SCR %"], ["events", "EVENTS"],
+];
+const statVal = (row: any, key: string) => {
+  const v = row[key] ?? row.stats?.[key];
+  if (v == null) return "–";
+  if (key === "scr_pct") return `${v}%`;
+  if (["best_r", "worst_r", "best_q", "worst_q"].includes(key)) return `P${v}`;
+  if (["avg_r", "avg_q"].includes(key)) return `P${v}`;
+  if (["gain", "interval", "gap"].includes(key)) return v > 0 ? `+${v}` : "";
+  return String(v);
+};
 
 interface TeamRow {
   position: number;
@@ -52,6 +70,7 @@ function StandingsContent() {
   const urlRound = searchParams.get("round");
   const view: View = searchParams.get("view") === "teams" ? "teams" : "drivers";
 
+  const [fullStats, setFullStats] = useState(false);
   const [resolvingLeague, setResolvingLeague] = useState(!urlLeagueId);
   const [memberships, setMemberships] = useState<LeagueSummary[] | null>(null);
   const [membershipError, setMembershipError] = useState<string | null>(null);
@@ -349,6 +368,45 @@ function StandingsContent() {
         )}
 
         {view === "drivers" && drivers.length > 0 && (
+          <button
+            onClick={() => setFullStats((v) => !v)}
+            className="mb-3 rounded-full border border-neutral-700 px-3 py-1 text-xs text-neutral-300"
+          >
+            {fullStats ? "Simple view" : "Full stats"}
+          </button>
+        )}
+
+        {view === "drivers" && drivers.length > 0 && fullStats && (
+          <div className="rounded-2xl border border-neutral-800 bg-black/40 backdrop-blur-sm overflow-x-auto">
+            <table className="min-w-max text-xs">
+              <thead>
+                <tr className="text-neutral-500">
+                  <th className="sticky left-0 bg-black px-3 py-2 text-left">DRIVER</th>
+                  <th className="px-2 py-2">PTS</th>
+                  {STAT_COLS.map(([, label]) => (
+                    <th key={label} className="px-2 py-2">{label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {drivers.map((row) => (
+                  <tr key={row.driver_id} className="border-t border-neutral-800 text-center">
+                    <td className="sticky left-0 bg-black px-3 py-2 text-left font-medium whitespace-nowrap">
+                      <span className={row.position === 1 ? "text-red-500" : "text-neutral-400"}>{row.position}</span>{" "}
+                      {row.driver_name}
+                    </td>
+                    <td className="px-2 py-2 font-bold">{row.points}</td>
+                    {STAT_COLS.map(([key]) => (
+                      <td key={key} className="px-2 py-2 text-neutral-300">{statVal(row, key)}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {view === "drivers" && drivers.length > 0 && !fullStats && (
           <div className="rounded-2xl border border-neutral-800 bg-black/40 backdrop-blur-sm overflow-hidden">
             {drivers.map((row, i) => (
               <div
