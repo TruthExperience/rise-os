@@ -6,6 +6,7 @@
 // changed since the last sync, so it is cheap to call after any standings
 // change. Never throws.
 import { createAdminClient } from "@/lib/supabase/server";
+import { buildCardUrl } from "@/lib/discord/card-url";
 
 const API = "https://discord.com/api/v10";
 const MAX_DESC = 3900;
@@ -36,6 +37,15 @@ function table(rows: Row[]) {
     body = "```\n" + lines.join("\n") + "\n```";
   }
   return body;
+}
+
+// Standings embed body: the app-styled card image when the card URL can be
+// built (needs NEXT_PUBLIC_APP_URL and PITBOSS_INTERNAL_KEY), otherwise the
+// plain text table.
+function standingsBody(rows: Row[], imageUrl: string | null) {
+  return imageUrl
+    ? { image: { url: imageUrl } }
+    : { description: rows.length ? table(rows) : "No results yet." };
 }
 
 async function send(token: string, channelId: string, messageId: string | null, payload: object) {
@@ -133,7 +143,7 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
           {
             author: authorOf(league),
             title: `${league?.name ?? "League"} — Drivers' Championship`,
-            description: rows.length ? table(rows) : "No results yet.",
+            ...standingsBody(rows, buildCardUrl({ kind: "drivers", league_id: leagueId, season })),
             color: 0xe8284a,
             footer,
             timestamp: new Date().toISOString(),
@@ -162,7 +172,7 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
           {
             author: authorOf(league),
             title: `${league?.name ?? "League"} — Constructors' Championship`,
-            description: rows.length ? table(rows) : "No results yet.",
+            ...standingsBody(rows, buildCardUrl({ kind: "teams", league_id: leagueId, season })),
             color: 0xe8284a,
             footer,
             timestamp: new Date().toISOString(),
@@ -278,6 +288,7 @@ export async function postRoundResultsToDiscord(
         .eq("kind", kind)
         .maybeSingle();
 
+      const cardUrl = buildCardUrl({ kind, league_id: leagueId, season: seasonKey, round: roundNum });
       const messageId = await send(
         token,
         channelId,
@@ -287,7 +298,9 @@ export async function postRoundResultsToDiscord(
             {
               author: authorOf(league),
               title: kind === "race" ? "Race Results" : "Qualifying Results",
-              description: `**${heading}**\n${build(kind)}`,
+              ...(cardUrl
+                ? { description: `**${heading}**`, image: { url: cardUrl } }
+                : { description: `**${heading}**\n${build(kind)}` }),
               color: 0xe8284a,
               timestamp: new Date().toISOString(),
             },
