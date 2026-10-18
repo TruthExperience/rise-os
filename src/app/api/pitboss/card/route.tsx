@@ -83,7 +83,7 @@ export async function GET(req: NextRequest) {
     if (!Number.isInteger(roundNum)) return NextResponse.json({ error: "Bad round" }, { status: 400 });
     const { data: rows } = await pb
       .from("results_with_team")
-      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, fastest_lap, points_earned, quali_time_seconds, race_time_seconds")
+      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, fastest_lap, best_lap_seconds, points_earned, quali_time_seconds, race_time_seconds")
       .eq("league_id", leagueId)
       .eq("season", season)
       .eq("round", roundNum)
@@ -121,7 +121,7 @@ export async function GET(req: NextRequest) {
             name: names[r.driver_id] ?? "Unknown",
             sub: [
               r.qualifying_position != null ? `Q${r.qualifying_position}` : "",
-              r.fastest_lap ? "FL" : "",
+              r.fastest_lap ? `FL${fmtLap(r.best_lap_seconds) ? ` ${fmtLap(r.best_lap_seconds)}` : ""}` : "",
               raceTimeLabel(r, winnerTime),
             ]
               .filter(Boolean)
