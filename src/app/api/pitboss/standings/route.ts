@@ -1,5 +1,6 @@
 // FILE: src/app/api/pitboss/standings/route.ts   (replace the whole file)
 // Revamp: seasons + rosters seeded in driver_standings / constructor_standings now show at 0 pts before any results exist.
+import { computeExtraStats } from "@/lib/pitboss/driver-stats";
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseUserId } from "@/lib/getSupabaseUserId";
 import { createAdminClient } from "@/lib/supabase/server";
@@ -246,6 +247,19 @@ export async function GET(req: NextRequest) {
     : { data: [] as any[] };
   const driverMap = Object.fromEntries((drivers ?? []).map((d: any) => [d.id, d]));
 
+  let extra: Record<string, any> = {};
+  {
+    let q = pb
+      .from("results_with_team")
+      .select("driver_id, round, finish_position, qualifying_position, dnf, points_earned, sprint_points_earned")
+      .eq("league_id", leagueId)
+      .eq("season", season)
+      .limit(10000);
+    if (throughRound != null) q = q.lte("round", throughRound);
+    const { data: raw } = await q;
+    extra = computeExtraStats((raw ?? []) as any[]);
+  }
+
   const rows = driverData
     .map((r: any) => ({ ...r, points: Number(r.points) }))
     .sort((a: any, b: any) =>
@@ -266,6 +280,7 @@ export async function GET(req: NextRequest) {
       sprint_wins: r.sprint_wins,
       sprint_fastest_laps: r.sprint_fastest_laps,
       points: r.points,
+      stats: extra[r.driver_id] ?? null,
     }));
 
   return NextResponse.json({ ...base, standings: rows }, { headers: NO_STORE });
