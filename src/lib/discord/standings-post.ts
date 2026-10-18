@@ -246,7 +246,7 @@ export async function postRoundResultsToDiscord(
 
     const { data: rows } = await pb
       .from("results_with_team")
-      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, dnf_reason, fastest_lap, points_earned, quali_time_seconds, race_time_seconds")
+      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, dnf_reason, fastest_lap, best_lap_seconds, points_earned, quali_time_seconds, race_time_seconds")
       .eq("league_id", leagueId)
       .eq("season", seasonKey)
       .eq("round", roundNum)
@@ -288,7 +288,7 @@ export async function postRoundResultsToDiscord(
           return `${String(r.qualifying_position).padStart(2, " ")}  ${name}  ${t}${team}${dFlag[r.driver_id] ?? ""}`;
         }
         const pos = r.dnf ? "DNF" : String(r.finish_position ?? i + 1).padStart(3, " ");
-        const fl = r.fastest_lap ? " FL" : "";
+        const fl = r.fastest_lap ? ` FL${fmtLap(r.best_lap_seconds) ? ` ${fmtLap(r.best_lap_seconds)}` : ""}` : "";
         return `${pos}  ${name}  ${String(Number(r.points_earned ?? 0)).padStart(3, " ")}pts  ${raceTimeLabel(r, winnerTime).padStart(10, " ")}${fl}${team}${dFlag[r.driver_id] ?? ""}`;
       });
       let body = "```\n" + lines.join("\n") + "\n```";
