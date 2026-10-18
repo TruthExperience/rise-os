@@ -20,6 +20,25 @@ type Line = { pos: string; name: string; sub: string; right: string };
 
 const num = (v: unknown) => String(Number(v ?? 0));
 
+const fmtLap = (s: unknown) => {
+  if (s == null) return "";
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "";
+  const m = Math.floor(n / 60);
+  return `${m}:${(n - m * 60).toFixed(3).padStart(6, "0")}`;
+};
+const fmtRace = (s: number) => {
+  const m = Math.floor(s / 60);
+  return `${m}:${(s - m * 60).toFixed(3).padStart(6, "0")}`;
+};
+// Winner shows total time; everyone else shows the gap to the winner.
+const raceTimeLabel = (r: any, winnerTime: number | null) => {
+  if (r.dnf || r.race_time_seconds == null) return "";
+  const t = Number(r.race_time_seconds);
+  if (winnerTime == null || t === winnerTime) return fmtRace(t);
+  return `+${(t - winnerTime).toFixed(3)}`;
+};
+
 async function logoData(url?: string | null): Promise<string | null> {
   if (!url || !/^https?:\/\//.test(url)) return null;
   try {
@@ -63,7 +82,7 @@ export async function GET(req: NextRequest) {
     if (!Number.isInteger(roundNum)) return NextResponse.json({ error: "Bad round" }, { status: 400 });
     const { data: rows } = await pb
       .from("results_with_team")
-      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, fastest_lap, points_earned")
+      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, fastest_lap, points_earned, quali_time_seconds, race_time_seconds")
       .eq("league_id", leagueId)
       .eq("season", season)
       .eq("round", roundNum)
@@ -86,13 +105,28 @@ export async function GET(req: NextRequest) {
         if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
         return (a.finish_position ?? 999) - (b.finish_position ?? 999);
       });
+    const poleTime = list.find((r: any) => r.qualifying_position === 1)?.quali_time_seconds;
+    const winner = list.find((r: any) => !r.dnf && r.race_time_seconds != null);
+    const winnerTime = winner ? Number(winner.race_time_seconds) : null;
     lines = list.map((r: any, i: number) =>
       kind === "quali"
-        ? { pos: String(r.qualifying_position), name: names[r.driver_id] ?? "Unknown", sub: "", right: "" }
+        ? {
+            pos: String(r.qualifying_position),
+            name: names[r.driver_id] ?? "Unknown",
+            sub:
+              r.quali_time_seconds != null && poleTime != null && r.qualifying_position !== 1
+                ? `+${(Number(r.quali_time_seconds) - Number(poleTime)).toFixed(3)}`
+                : "",
+            right: fmtLap(r.quali_time_seconds),
+          }
         : {
             pos: r.dnf ? "DNF" : String(r.finish_position ?? i + 1),
             name: names[r.driver_id] ?? "Unknown",
-            sub: [r.qualifying_position != null ? `Q${r.qualifying_position}` : "", r.fastest_lap ? "FL" : ""]
+            sub: [
+              r.qualifying_position != null ? `Q${r.qualifying_position}` : "",
+              r.fastest_lap ? "FL" : "",
+              raceTimeLabel(r, winnerTime),
+            ]
               .filter(Boolean)
               .join(" · "),
             right: num(r.points_earned),
