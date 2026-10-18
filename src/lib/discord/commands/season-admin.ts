@@ -2,6 +2,7 @@ import { registerCommand, type CommandContext } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 import { getOrCreateDriver } from "./checkin";
+import { postRoundResultsToDiscord, syncStandingsToDiscord } from "@/lib/discord/standings-post";
 
 // Owner-only season administration from Discord:
 //
@@ -47,6 +48,33 @@ async function ownerGuard(ctx: CommandContext) {
 
 function clip(text: string): string {
   return text.length > MAX_MESSAGE ? text.slice(0, MAX_MESSAGE - 1) + "…" : text;
+}
+
+/**
+ * Refreshes the league's Discord posts after results or standings change:
+ * recomputes the standings table, edits the round's race/quali result posts,
+ * then edits the driver and team standings posts. These need channels set up
+ * in pitboss.standings_discord_sync and never throw, so a Discord problem
+ * can't undo a save. Call from a deferred (background) step, since it makes
+ * several Discord API calls. `force` re-posts the standings even when the
+ * results themselves haven't changed (e.g. a manual standings adjustment).
+ */
+async function refreshDiscordPosts(
+  leagueId: string,
+  rounds: Array<{ season: string | number; round: number }>,
+  opts: { force?: boolean } = {}
+): Promise<void> {
+  try {
+    const supabase = createAdminClient();
+    const rc = await supabase.schema("pitboss").rpc("recompute_driver_standings");
+    if (rc.error) console.error("[season-admin] standings recompute failed:", rc.error.message);
+    for (const r of rounds) {
+      await postRoundResultsToDiscord(leagueId, r.season, r.round);
+    }
+    await syncStandingsToDiscord(leagueId, { force: opts.force });
+  } catch (err) {
+    console.error("[season-admin] Discord refresh failed:", err);
+  }
 }
 
 function toInt(value: unknown): number | null {
@@ -759,11 +787,19 @@ registerCommand("set-result", async (ctx) => {
       ? "\nThis league has no points table, so 0 points were awarded. Pass `points` to set them."
       : "";
 
+  const summary =
+    `Saved <@${driverDiscordId}>: **${finishLabel}** in ${round.name} (season ${seasonNumber}), ` +
+    `${saved.points} pts${saved.sprintPoints > 0 ? ` + ${saved.sprintPoints} sprint` : ""}.${warning}`;
+
+  // The result is saved. Updating the Discord posts takes several API calls,
+  // so acknowledge now and do it in the background (Discord's 3s limit).
   return {
-    content:
-      `Saved <@${driverDiscordId}>: **${finishLabel}** in ${round.name} (season ${seasonNumber}), ` +
-      `${saved.points} pts${saved.sprintPoints > 0 ? ` + ${saved.sprintPoints} sprint` : ""}.${warning}`,
+    defer: true,
     ephemeral: true,
+    background: async () => {
+      await refreshDiscordPosts(leagueId, [{ season: round.season_number, round: round.round_number as number }]);
+      return { content: summary };
+    },
   };
 });
 
@@ -886,6 +922,10 @@ registerCommand("import-results", async (ctx) => {
         }
       }
 
+      if (saved > 0 && round.round_number != null) {
+        await refreshDiscordPosts(leagueId, [{ season: round.season_number, round: round.round_number }]);
+      }
+
       const lines = [`${round.name} (season ${seasonNumber}): ${saved} result(s) saved, ${errors.length} skipped.`];
       if (table.byPosition.size === 0) {
         lines.push("This league has no points table — rows without a `points` value got 0 points.");
@@ -986,10 +1026,18 @@ registerCommand("set-standings", async (ctx) => {
     return { content: `Something went wrong saving the adjustment: ${insertError.message}`, ephemeral: true };
   }
 
+  const summary =
+    `Set <@${driverDiscordId}> to **${target}** points for season ${season} ` +
+    `(was ${current}, adjustment ${delta > 0 ? "+" : ""}${delta}).`;
+
+  // Adjustments don't touch pitboss.results, so force the standings posts
+  // to refresh. Done in the background to stay inside Discord's 3s limit.
   return {
-    content:
-      `Set <@${driverDiscordId}> to **${target}** points for season ${season} ` +
-      `(was ${current}, adjustment ${delta > 0 ? "+" : ""}${delta}).`,
+    defer: true,
     ephemeral: true,
+    background: async () => {
+      await refreshDiscordPosts(leagueId, [], { force: true });
+      return { content: summary };
+    },
   };
 });
