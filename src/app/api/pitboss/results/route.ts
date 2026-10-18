@@ -178,6 +178,7 @@ export async function GET(req: NextRequest) {
       points_earned, penalty_points_added,
       sprint_qualifying_position, sprint_finish_position,
       sprint_dnf, sprint_fastest_lap, sprint_points_earned,
+      quali_time_seconds, race_time_seconds,
       created_at, round_id
     `)
     .eq('league_id', leagueId)
@@ -284,6 +285,8 @@ export async function POST(req: NextRequest) {
     sprint_dnf:                 r.sprint_dnf ?? false,
     sprint_fastest_lap:         r.sprint_fastest_lap ?? false,
     sprint_points_earned:       r.sprint_points_earned ?? 0,
+    quali_time_seconds:         r.quali_time_seconds ?? null,
+    race_time_seconds:          r.race_time_seconds ?? null,
   }))
 
   const { data, error } = await supabase
