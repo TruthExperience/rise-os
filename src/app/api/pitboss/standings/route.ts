@@ -1,4 +1,5 @@
 // FILE: src/app/api/pitboss/standings/route.ts   (replace the whole file)
+// Revamp: seasons + rosters seeded in driver_standings / constructor_standings now show at 0 pts before any results exist.
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseUserId } from "@/lib/getSupabaseUserId";
 import { createAdminClient } from "@/lib/supabase/server";
@@ -49,7 +50,13 @@ export async function GET(req: NextRequest) {
     .from("results_last_change")
     .select("season")
     .eq("league_id", leagueId);
-  const seasons = [...new Set((seasonRows ?? []).map((r: any) => String(r.season)))].sort((a, b) => {
+  // Also count seasons that have only been seeded (0-point rows) in the base standings tables,
+  // so a league shows its roster before the first result is saved.
+  const { data: seededRows } = await pb
+    .from("driver_standings")
+    .select("season")
+    .eq("league_id", leagueId);
+  const seasons = [...new Set([...(seasonRows ?? []), ...(seededRows ?? [])].map((r: any) => String(r.season)))].sort((a, b) => {
     const na = Number(a), nb = Number(b);
     return Number.isNaN(na) || Number.isNaN(nb) ? b.localeCompare(a) : nb - na;
   });
@@ -156,7 +163,21 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: `Failed to load team standings: ${error.message}` }, { status: 500, headers: NO_STORE });
     }
 
-    const ids = (data ?? []).map((r: any) => r.franchise_id);
+    // Zero-fill teams seeded in constructor_standings that have no results yet.
+    const { data: seededTeams } = await pb
+      .from("constructor_standings")
+      .select("franchise_id")
+      .eq("league_id", leagueId)
+      .eq("season", season);
+    const haveTeam = new Set((data ?? []).map((r: any) => r.franchise_id));
+    const teamData: any[] = [...(data ?? [])];
+    for (const t of seededTeams ?? []) {
+      if (!haveTeam.has(t.franchise_id)) {
+        teamData.push({ franchise_id: t.franchise_id, starts: 0, wins: 0, top3: 0, poles: 0, fastest_laps: 0, dnfs: 0, drivers: 0, points: 0 });
+      }
+    }
+
+    const ids = teamData.map((r: any) => r.franchise_id);
     const { data: teams } = ids.length
       ? await supabase
           .schema("rise_os")
@@ -166,9 +187,9 @@ export async function GET(req: NextRequest) {
       : { data: [] as any[] };
     const teamMap = Object.fromEntries((teams ?? []).map((t: any) => [t.id, t]));
 
-    const rows = (data ?? [])
+    const rows = teamData
       .map((r: any) => ({ ...r, points: Number(r.points) }))
-      .sort((a: any, b: any) => b.points - a.points || b.wins - a.wins || b.top3 - a.top3)
+      .sort((a: any, b: any) => b.points - a.points || b.wins - a.wins || b.top3 - a.top3 || String(a.franchise_id).localeCompare(String(b.franchise_id)))
       .map((r: any, i: number) => {
         const t = teamMap[r.franchise_id];
         return {
@@ -205,15 +226,31 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: `Failed to load standings: ${error.message}` }, { status: 500, headers: NO_STORE });
   }
 
-  const ids = (data ?? []).map((r: any) => r.driver_id);
+  // Zero-fill drivers seeded in driver_standings that have no results yet.
+  const { data: seededDrivers } = await pb
+    .from("driver_standings")
+    .select("driver_id")
+    .eq("league_id", leagueId)
+    .eq("season", season);
+  const haveDriver = new Set((data ?? []).map((r: any) => r.driver_id));
+  const driverData: any[] = [...(data ?? [])];
+  for (const d of seededDrivers ?? []) {
+    if (!haveDriver.has(d.driver_id)) {
+      driverData.push({ driver_id: d.driver_id, starts: 0, wins: 0, top3: 0, top5: 0, top10: 0, poles: 0, fastest_laps: 0, dnfs: 0, sprint_wins: 0, sprint_fastest_laps: 0, points: 0 });
+    }
+  }
+
+  const ids = driverData.map((r: any) => r.driver_id);
   const { data: drivers } = ids.length
     ? await pb.from("drivers").select("id, discord_username, display_name").in("id", ids)
     : { data: [] as any[] };
   const driverMap = Object.fromEntries((drivers ?? []).map((d: any) => [d.id, d]));
 
-  const rows = (data ?? [])
+  const rows = driverData
     .map((r: any) => ({ ...r, points: Number(r.points) }))
-    .sort((a: any, b: any) => b.points - a.points || b.wins - a.wins || b.top3 - a.top3)
+    .sort((a: any, b: any) =>
+      b.points - a.points || b.wins - a.wins || b.top3 - a.top3 ||
+      String(driverMap[a.driver_id]?.display_name ?? "").localeCompare(String(driverMap[b.driver_id]?.display_name ?? "")))
     .map((r: any, i: number) => ({
       position: i + 1,
       driver_id: r.driver_id,
