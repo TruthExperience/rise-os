@@ -19,6 +19,25 @@ function authorOf(league: any) {
   return url && /^https?:\/\//.test(url) ? { name: league?.name ?? "League", icon_url: url } : undefined;
 }
 
+const fmtLap = (s: unknown) => {
+  if (s == null) return "";
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "";
+  const m = Math.floor(n / 60);
+  return `${m}:${(n - m * 60).toFixed(3).padStart(6, "0")}`;
+};
+const fmtRace = (s: number) => {
+  const m = Math.floor(s / 60);
+  return `${m}:${(s - m * 60).toFixed(3).padStart(6, "0")}`;
+};
+// Winner shows total time; everyone else shows the gap to the winner.
+const raceTimeLabel = (r: any, winnerTime: number | null) => {
+  if (r.dnf || r.race_time_seconds == null) return "";
+  const t = Number(r.race_time_seconds);
+  if (winnerTime == null || t === winnerTime) return fmtRace(t);
+  return `+${(t - winnerTime).toFixed(3)}`;
+};
+
 function pad(s: string, n: number) {
   return s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
 }
@@ -226,7 +245,7 @@ export async function postRoundResultsToDiscord(
 
     const { data: rows } = await pb
       .from("results_with_team")
-      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, dnf_reason, fastest_lap, points_earned")
+      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, dnf_reason, fastest_lap, points_earned, quali_time_seconds, race_time_seconds")
       .eq("league_id", leagueId)
       .eq("season", seasonKey)
       .eq("round", roundNum)
@@ -257,14 +276,20 @@ export async function postRoundResultsToDiscord(
           if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
           return (a.finish_position ?? 999) - (b.finish_position ?? 999);
         });
+      const poleTime = list.find((r: any) => r.qualifying_position === 1)?.quali_time_seconds;
+      const winner = list.find((r: any) => !r.dnf && r.race_time_seconds != null);
+      const winnerTime = winner ? Number(winner.race_time_seconds) : null;
       const w = Math.min(20, Math.max(8, ...list.map((r: any) => (dName[r.driver_id] ?? "Unknown").length)));
       const lines = list.map((r: any, i: number) => {
         const name = pad(dName[r.driver_id] ?? "Unknown", w);
         const team = tName[r.team_id] ? `  ${tName[r.team_id]}` : "";
-        if (kind === "quali") return `${String(r.qualifying_position).padStart(2, " ")}  ${name}${team}`;
+        if (kind === "quali") {
+          const t = fmtLap(r.quali_time_seconds);
+          return `${String(r.qualifying_position).padStart(2, " ")}  ${name}  ${t}${team}`;
+        }
         const pos = r.dnf ? "DNF" : String(r.finish_position ?? i + 1).padStart(3, " ");
         const fl = r.fastest_lap ? " FL" : "";
-        return `${pos}  ${name}  ${String(Number(r.points_earned ?? 0)).padStart(3, " ")}pts${fl}${team}`;
+        return `${pos}  ${name}  ${String(Number(r.points_earned ?? 0)).padStart(3, " ")}pts  ${raceTimeLabel(r, winnerTime).padStart(10, " ")}${fl}${team}`;
       });
       let body = "```\n" + lines.join("\n") + "\n```";
       while (body.length > MAX_DESC && lines.length > 1) {
