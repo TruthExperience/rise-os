@@ -7,6 +7,7 @@ import { getLeagueMembership, hasAnyFlag } from "../permissions";
 import { getTicketLabel } from "./steward";
 import { applyPositionDrop, revertIncidentAdjustments } from "@/lib/pitboss/applyResultPenalty";
 import { buildIncidentLedgerRows } from "@/lib/pitboss/incidentPenaltyRows";
+import { postRoundResultsToDiscord, syncStandingsToDiscord } from "@/lib/discord/standings-post";
 import {
   addEvidenceFile,
   addEvidenceLink,
@@ -707,7 +708,14 @@ registerCommand("appeal_review", async (ctx) => {
 
       if (resultsChanged) {
         const rc = await supabase.schema("pitboss").rpc("recompute_driver_standings");
-        if (rc.error) resultsNotes.push(`Standings recompute failed: ${rc.error.message}`);
+        if (rc.error) {
+          resultsNotes.push(`Standings recompute failed: ${rc.error.message}`);
+        } else if (incident.season != null && incident.round != null) {
+          // Same refresh the web appeal route does: edit the round's result
+          // posts and the standings posts. Never throws.
+          await postRoundResultsToDiscord(incident.league_id, incident.season, incident.round);
+          await syncStandingsToDiscord(incident.league_id);
+        }
       }
     } catch (err) {
       console.error("[appeal_review] results adjustment failed:", err);
