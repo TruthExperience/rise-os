@@ -18,10 +18,26 @@ interface ResultRow {
   sprint_finish_position: number | null;
   sprint_fastest_lap: boolean;
   sprint_points_earned: number;
+  quali_time_seconds: number | string | null;
+  race_time_seconds: number | string | null;
   driver: { display_name: string | null; discord_username: string } | null;
 }
 
 const POLL_MS = 8000;
+
+const fmtTime = (v: unknown) => {
+  if (v == null) return "";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "";
+  const m = Math.floor(n / 60);
+  return `${m}:${(n - m * 60).toFixed(3).padStart(6, "0")}`;
+};
+// Winner shows total race time; everyone else shows the gap to the winner.
+const raceLabel = (r: ResultRow, winner: number | null) => {
+  if (r.dnf || r.race_time_seconds == null) return "";
+  const t = Number(r.race_time_seconds);
+  return winner == null || t === winner ? fmtTime(t) : `+${(t - winner).toFixed(3)}`;
+};
 
 function ResultsContent() {
   const searchParams = useSearchParams();
@@ -204,6 +220,8 @@ function ResultsContent() {
 
         {orderedRounds.map((n) => {
           const rows = groups.get(n)!;
+          const w = rows.find((x) => !x.dnf && x.race_time_seconds != null);
+          const winnerTime = w ? Number(w.race_time_seconds) : null;
           return (
             <div key={n} className="mb-5">
               {!round && (
@@ -229,14 +247,20 @@ function ResultsContent() {
                         </p>
                         <p className="text-xs text-neutral-500">
                           {r.qualifying_position ? `Q${r.qualifying_position}` : "No quali"}
+                          {r.quali_time_seconds != null ? ` ${fmtTime(r.quali_time_seconds)}` : ""}
                           {r.fastest_lap ? " · FL" : ""}
                           {r.sprint_finish_position ? ` · Sprint P${r.sprint_finish_position}` : ""}
                         </p>
                       </div>
                     </div>
-                    <span className="text-lg font-bold">
-                      {(r.points_earned ?? 0) + (r.sprint_points_earned ?? 0)}
-                    </span>
+                    <div className="text-right">
+                      <p className="text-lg font-bold leading-tight">
+                        {(r.points_earned ?? 0) + (r.sprint_points_earned ?? 0)}
+                      </p>
+                      {raceLabel(r, winnerTime) && (
+                        <p className="text-xs text-neutral-500">{raceLabel(r, winnerTime)}</p>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
