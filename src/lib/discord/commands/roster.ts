@@ -20,6 +20,137 @@ async function getTeamId(teamName: string): Promise<string | null> {
   return data?.id ?? null;
 }
 
+// --- franchise_rosters mirroring -------------------------------------------
+// roster_assign/roster_remove write pitboss.team_rosters (car_class_teams
+// reference data). Everything league-scoped (roster_view, cap, check-in,
+// grid generation, /sign-driver) reads pitboss.franchise_rosters instead, so
+// a driver placed with roster_assign was invisible to all of it. These two
+// helpers keep franchise_rosters in step. They are best-effort: the
+// team_rosters write is already done by the time they run, so a failure here
+// is reported back to the caller rather than thrown.
+
+function seasonDigits(raw: string): string {
+  const m = raw.match(/\d+/);
+  return m ? m[0] : raw.trim();
+}
+
+async function resolveFranchiseByTeamName(
+  leagueId: string,
+  teamName: string
+): Promise<
+  | { franchise: { id: string; name: string; division: string | null } }
+  | { error: string }
+> {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .schema("rise_os")
+    .from("franchises")
+    .select("id, name, abbreviation, division")
+    .eq("league_id", leagueId);
+  if (error) return { error: error.message };
+
+  const norm = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const target = norm(teamName);
+  const rows = (data ?? []) as {
+    id: string;
+    name: string;
+    abbreviation: string | null;
+    division: string | null;
+  }[];
+
+  let matches = rows.filter((f) => norm(f.name) === target);
+  if (matches.length === 0) {
+    matches = rows.filter((f) => {
+      const n = norm(f.name);
+      return n.includes(target) || target.includes(n);
+    });
+  }
+  if (matches.length === 0) {
+    return { error: `no franchise in this league matches "${teamName}"` };
+  }
+  if (matches.length > 1) {
+    const names = matches.map((f) => `${f.name} (${f.division ?? "no division"})`).join(", ");
+    return { error: `"${teamName}" matches more than one franchise: ${names}` };
+  }
+  return { franchise: matches[0] };
+}
+
+async function mirrorAssignToFranchiseRosters(params: {
+  leagueId: string;
+  driverId: string;
+  teamName: string;
+  tier: string;
+  season: string;
+  createdBy: string;
+}): Promise<{ error: string } | { ok: true }> {
+  const resolved = await resolveFranchiseByTeamName(params.leagueId, params.teamName);
+  if ("error" in resolved) return { error: resolved.error };
+  const franchise = resolved.franchise;
+  const season = seasonDigits(params.season);
+
+  const supabase = createAdminClient();
+  const { data: active, error: activeErr } = await supabase
+    .schema("pitboss")
+    .from("franchise_rosters")
+    .select("id")
+    .eq("driver_id", params.driverId)
+    .eq("league_id", params.leagueId)
+    .is("released_at", null)
+    .maybeSingle();
+  if (activeErr) return { error: activeErr.message };
+
+  if (active) {
+    const { error } = await supabase
+      .schema("pitboss")
+      .from("franchise_rosters")
+      .update({
+        franchise_id: franchise.id,
+        division: franchise.division,
+        season,
+        tier: params.tier || null,
+      })
+      .eq("id", active.id);
+    return error ? { error: error.message } : { ok: true };
+  }
+
+  const { error } = await supabase
+    .schema("pitboss")
+    .from("franchise_rosters")
+    .insert({
+      driver_id: params.driverId,
+      franchise_id: franchise.id,
+      league_id: params.leagueId,
+      division: franchise.division,
+      season,
+      tier: params.tier || null,
+      source: "discord:/roster_assign",
+      created_by: params.createdBy,
+    });
+  return error ? { error: error.message } : { ok: true };
+}
+
+async function mirrorRemoveToFranchiseRosters(params: {
+  leagueId: string;
+  driverId: string;
+  season: string;
+}): Promise<{ error: string } | { released: number }> {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("franchise_rosters")
+    .update({
+      released_at: new Date().toISOString(),
+      released_reason: "discord:/roster_remove",
+    })
+    .eq("driver_id", params.driverId)
+    .eq("league_id", params.leagueId)
+    .eq("season", seasonDigits(params.season))
+    .is("released_at", null)
+    .select("id");
+  if (error) return { error: error.message };
+  return { released: data?.length ?? 0 };
+}
+
 const EDITOR_FLAGS = [
   "is_owner",
   "is_co_owner",
@@ -119,18 +250,11 @@ registerCommand("roster_view", async (ctx) => {
   return { content: lines.join("\n"), ephemeral: false };
 });
 
-// NOTE: roster_assign / roster_remove below still read and write
-// pitboss.team_rosters (via car_class_teams), which is now visually
-// disconnected from roster_view above. They weren't touched in this
-// pass because redirecting them to franchise_rosters means teaching
-// them to resolve rise_os.franchises the way sign-driver's
-// resolveFranchise() does (division disambiguation, etc.) instead of
-// the flat car_class_teams lookup — a bigger change than "make roster
-// view show what's actually signed." Until that's done, anyone using
-// roster_assign instead of /sign-driver will again be invisible to
-// roster_view. Worth deciding soon: either migrate these two onto
-// franchise_rosters, or retire them in favor of /sign-driver and
-// /release-driver entirely.
+// NOTE: roster_assign / roster_remove still write pitboss.team_rosters
+// (via car_class_teams), and now also mirror into pitboss.franchise_rosters
+// (see the helpers above) so roster_view, cap, check-in and grid generation
+// see those drivers. They do NOT create driver_contracts or touch franchise
+// wallets — /sign-driver remains the path for cap/economy-aware signings.
 
 registerCommand("roster_assign", async (ctx) => {
   const leagueId = ctx.leagueId;
@@ -234,10 +358,24 @@ registerCommand("roster_assign", async (ctx) => {
     };
   }
 
+  const mirror = await mirrorAssignToFranchiseRosters({
+    leagueId,
+    driverId: driver.id,
+    teamName,
+    tier,
+    season,
+    createdBy: ctx.discordUserId,
+  });
+  let mirrorNote = "";
+  if ("error" in mirror) {
+    console.error("[roster_assign] franchise_rosters mirror failed:", mirror.error);
+    mirrorNote = `\n⚠️ Saved to the team roster, but couldn't link a franchise roster entry (${mirror.error}). Use /sign-driver for this driver instead.`;
+  }
+
   return {
     content: `Assigned <@${targetDiscordId}> to **${teamName}** (${tier}, ${season})${
       isTP ? " as Team Principal" : ""
-    }.`,
+    }.${mirrorNote}`,
     ephemeral: false,
   };
 });
@@ -287,8 +425,19 @@ registerCommand("roster_remove", async (ctx) => {
     };
   }
 
+  const mirror = await mirrorRemoveToFranchiseRosters({
+    leagueId,
+    driverId: driver.id,
+    season,
+  });
+  let mirrorNote = "";
+  if ("error" in mirror) {
+    console.error("[roster_remove] franchise_rosters release failed:", mirror.error);
+    mirrorNote = `\n⚠️ Removed from the team roster, but the franchise roster entry couldn't be released (${mirror.error}).`;
+  }
+
   return {
-    content: `Removed <@${targetDiscordId}> from the roster for ${season}.`,
+    content: `Removed <@${targetDiscordId}> from the roster for ${season}.${mirrorNote}`,
     ephemeral: false,
   };
 });
