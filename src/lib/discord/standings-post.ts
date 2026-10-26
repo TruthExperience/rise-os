@@ -218,7 +218,8 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
 
 // ---------------------------------------------------------------------------
 // Round results (race + qualifying) -> Discord
-// Channels: standings_discord_sync.race_channel_id / quali_channel_id.
+// Channels: standings_discord_sync.race_channel_id / quali_channel_id /
+// stats_channel_id (full stats table).
 // One message per round and kind, edited in place when results change
 // (steward edit, penalty, appeal). Never throws.
 // ---------------------------------------------------------------------------
@@ -239,10 +240,10 @@ export async function postRoundResultsToDiscord(
 
     const { data: cfg } = await pb
       .from("standings_discord_sync")
-      .select("race_channel_id, quali_channel_id")
+      .select("race_channel_id, quali_channel_id, stats_channel_id")
       .eq("league_id", leagueId)
       .maybeSingle();
-    if (!cfg || (!cfg.race_channel_id && !cfg.quali_channel_id)) return;
+    if (!cfg || (!cfg.race_channel_id && !cfg.quali_channel_id && !cfg.stats_channel_id)) return;
 
     const { data: rows } = await pb
       .from("results_with_team")
@@ -299,8 +300,72 @@ export async function postRoundResultsToDiscord(
       return body;
     };
 
-    for (const kind of ["race", "quali"] as const) {
-      const channelId = kind === "race" ? cfg.race_channel_id : cfg.quali_channel_id;
+
+    // Full stats: one row per driver (finish, team, quali time + gap to pole,
+    // race time/gap, fastest lap, points) plus constructor totals for the round
+    // and the season. Plain text tables; no card image.
+    const buildStats = async () => {
+      const list = [...rows].sort((a: any, b: any) => {
+        if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
+        return (a.finish_position ?? 999) - (b.finish_position ?? 999);
+      });
+      const poleTime = rows
+        .filter((r: any) => r.qualifying_position != null && r.quali_time_seconds != null)
+        .sort((a: any, b: any) => a.qualifying_position - b.qualifying_position)[0]?.quali_time_seconds;
+      const winner = list.find((r: any) => !r.dnf && r.race_time_seconds != null);
+      const winnerTime = winner ? Number(winner.race_time_seconds) : null;
+      const bestLap = Math.min(
+        ...rows.filter((r: any) => r.best_lap_seconds != null).map((r: any) => Number(r.best_lap_seconds)),
+        Infinity
+      );
+      const w = Math.min(14, Math.max(6, ...list.map((r: any) => (dName[r.driver_id] ?? "Unknown").length)));
+      const tw = Math.min(12, Math.max(4, ...list.map((r: any) => (tName[r.team_id] ?? "").length)));
+      const header = `${"P".padStart(3)} ${pad("Driver", w)} ${pad("Team", tw)} ${"Quali".padEnd(8)} ${"Gap".padEnd(7)} ${"Race".padEnd(9)} ${"FL".padEnd(8)} Pts`;
+      const lines = list.map((r: any, i: number) => {
+        const pos = r.dnf ? "DNF" : String(r.finish_position ?? i + 1).padStart(3, " ");
+        const q = fmtLap(r.quali_time_seconds);
+        const gap =
+          r.quali_time_seconds != null && poleTime != null && Number(r.quali_time_seconds) !== Number(poleTime)
+            ? `+${(Number(r.quali_time_seconds) - Number(poleTime)).toFixed(3)}`
+            : "";
+        const lap = fmtLap(r.best_lap_seconds);
+        const fl = lap ? `${lap}${r.fastest_lap || Number(r.best_lap_seconds) === bestLap ? "*" : ""}` : "";
+        return `${pos} ${pad(dName[r.driver_id] ?? "Unknown", w)} ${pad(tName[r.team_id] ?? "", tw)} ${q.padEnd(8)} ${gap.padEnd(7)} ${raceTimeLabel(r, winnerTime).padEnd(9)} ${fl.padEnd(8)} ${String(Number(r.points_earned ?? 0)).padStart(3)}`;
+      });
+      let driverBody = "```\n" + [header, ...lines].join("\n") + "\n```";
+      const LIMIT = 3300;
+      while (driverBody.length > LIMIT && lines.length > 1) {
+        lines.pop();
+        driverBody = "```\n" + [header, ...lines].join("\n") + "\n```";
+      }
+
+      // Constructor totals: this round + season to date.
+      const roundPts = new Map<string, number>();
+      for (const r of rows as any[]) {
+        if (!r.team_id) continue;
+        roundPts.set(r.team_id, (roundPts.get(r.team_id) ?? 0) + Number(r.points_earned ?? 0));
+      }
+      const { data: live } = await pb
+        .from("constructor_standings_live")
+        .select("franchise_id, points")
+        .eq("league_id", leagueId)
+        .eq("season", seasonKey);
+      const seasonPts = new Map<string, number>((live ?? []).map((l: any) => [l.franchise_id, Number(l.points)]));
+      const teamRows = [...roundPts.entries()]
+        .map(([id, pts]) => ({ name: tName[id] ?? "Unknown team", pts, total: seasonPts.get(id) ?? pts }))
+        .sort((a, b) => b.pts - a.pts || b.total - a.total);
+      const nw = Math.min(22, Math.max(8, ...teamRows.map((t) => t.name.length)));
+      const tLines = teamRows.map(
+        (t, i) => `${String(i + 1).padStart(2)}  ${pad(t.name, nw)}  ${String(t.pts).padStart(4)}  ${String(t.total).padStart(5)}`
+      );
+      const tHeader = `${"".padStart(2)}  ${pad("Team", nw)}  ${"Rnd".padStart(4)}  ${"Total".padStart(5)}`;
+      const teamBody = "```\n" + [tHeader, ...tLines].join("\n") + "\n```";
+      return { driverBody, teamBody };
+    };
+
+    for (const kind of ["race", "quali", "stats"] as const) {
+      const channelId =
+        kind === "race" ? cfg.race_channel_id : kind === "quali" ? cfg.quali_channel_id : cfg.stats_channel_id;
       if (!channelId) continue;
       if (kind === "quali" && !rows.some((r: any) => r.qualifying_position != null)) continue;
 
@@ -313,19 +378,39 @@ export async function postRoundResultsToDiscord(
         .eq("kind", kind)
         .maybeSingle();
 
-      const cardUrl = buildCardUrl({ kind, league_id: leagueId, season: seasonKey, round: roundNum });
+      const cardUrl = kind === "stats" ? null : buildCardUrl({ kind, league_id: leagueId, season: seasonKey, round: roundNum });
+      const statsBodies = kind === "stats" ? await buildStats() : null;
       const messageId = await send(
         token,
         channelId,
         prev && prev.channel_id === channelId ? prev.message_id : null,
-        {
+        statsBodies
+          ? {
+              embeds: [
+                {
+                  author: authorOf(league),
+                  title: "Full Stats",
+                  description: `**${heading}**\n${statsBodies.driverBody}`,
+                  color: 0xe8284a,
+                  timestamp: new Date().toISOString(),
+                },
+                {
+                  title: "Constructors",
+                  description: statsBodies.teamBody,
+                  color: 0xe8284a,
+                  footer: { text: "* = fastest lap" },
+                },
+              ],
+              allowed_mentions: { parse: [] },
+            }
+          : {
           embeds: [
             {
               author: authorOf(league),
-              title: kind === "race" ? "Race Results" : "Qualifying Results",
+              title: kind === "quali" ? "Qualifying Results" : "Race Results",
               ...(cardUrl
                 ? { description: `**${heading}**`, image: { url: cardUrl } }
-                : { description: `**${heading}**\n${build(kind)}` }),
+                : { description: `**${heading}**\n${build(kind === "quali" ? "quali" : "race")}` }),
               color: 0xe8284a,
               timestamp: new Date().toISOString(),
             },
