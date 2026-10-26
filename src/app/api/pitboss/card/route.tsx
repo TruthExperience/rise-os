@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
 import { verifyCard, type CardKind } from "@/lib/discord/card-url";
 import { loadDriverLabels, labelFull } from "@/lib/discord/driver-labels";
+import { computeExtraStats } from "@/lib/pitboss/driver-stats";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +16,7 @@ export const dynamic = "force-dynamic";
 const W = 1000;
 const ROW = 64;
 const MAX_ROWS = 40;
-const KINDS: CardKind[] = ["race", "quali", "drivers", "teams"];
+const KINDS: CardKind[] = ["race", "quali", "drivers", "teams", "stats", "stats2"];
 
 type Line = { pos: string; name: string; sub: string; right: string };
 
@@ -38,6 +39,30 @@ const raceTimeLabel = (r: any, winnerTime: number | null) => {
   const t = Number(r.race_time_seconds);
   if (winnerTime == null || t === winnerTime) return fmtRace(t);
   return `+${(t - winnerTime).toFixed(3)}`;
+};
+
+
+// ---- Full driver stats (same numbers as the app's "Full stats" table) ------
+// Too many columns for one readable image, so it is split in two cards:
+// "stats" = points / podium / race-control columns, "stats2" = finish and
+// qualifying averages. [key, label, column width]
+const STATS_A: [string, string, number][] = [
+  ["points", "PTS", 84], ["gain", "GAIN", 90], ["interval", "INT", 84], ["gap", "GAP", 84],
+  ["p1", "P1", 64], ["p2", "P2", 64], ["p3", "P3", 64], ["top5", "TOP 5", 90], ["top10", "TOP 10", 100],
+  ["poles", "POLE", 84], ["rds_led", "RDS LED", 120], ["dnfs", "DNF", 76], ["events", "EVENTS", 110],
+];
+const STATS_B: [string, string, number][] = [
+  ["points", "PTS", 84], ["best_r", "BEST R", 110], ["worst_r", "WORST R", 124], ["avg_r", "AVG R", 100],
+  ["best_q", "BEST Q", 110], ["worst_q", "WORST Q", 124], ["avg_q", "AVG Q", 100],
+  ["avg_gain", "AVG GAIN", 130], ["avg_pts", "AVG PTS", 120], ["scr_pct", "SCR %", 100],
+];
+const statCell = (row: any, key: string) => {
+  const v = row[key];
+  if (v == null) return "–";
+  if (key === "scr_pct") return `${v}%`;
+  if (["best_r", "worst_r", "avg_r", "best_q", "worst_q", "avg_q"].includes(key)) return `P${v}`;
+  if (["gain", "interval", "gap"].includes(key)) return Number(v) > 0 ? `+${v}` : "";
+  return String(v);
 };
 
 async function logoData(url?: string | null): Promise<string | null> {
@@ -73,6 +98,129 @@ export async function GET(req: NextRequest) {
   const supabase = createAdminClient();
   const pb = supabase.schema("pitboss");
   const { data: league } = await pb.from("leagues").select("name, logo_url").eq("id", leagueId).single();
+
+
+  // ---- Full driver stats cards -------------------------------------------
+  if (kind === "stats" || kind === "stats2") {
+    const { data: live } = await pb
+      .from("driver_standings_live")
+      .select("driver_id, wins, top3, top5, top10, poles, fastest_laps, dnfs, points")
+      .eq("league_id", leagueId)
+      .eq("season", season);
+    const { data: seeded } = await pb
+      .from("driver_standings")
+      .select("driver_id")
+      .eq("league_id", leagueId)
+      .eq("season", season);
+    const have = new Set((live ?? []).map((r: any) => r.driver_id));
+    const base: any[] = [...(live ?? [])];
+    for (const d of seeded ?? []) {
+      if (!have.has(d.driver_id)) {
+        base.push({ driver_id: d.driver_id, wins: 0, top3: 0, top5: 0, top10: 0, poles: 0, fastest_laps: 0, dnfs: 0, points: 0 });
+      }
+    }
+    const { data: raw } = await pb
+      .from("results_with_team")
+      .select("driver_id, round, finish_position, qualifying_position, dnf, points_earned, sprint_points_earned")
+      .eq("league_id", leagueId)
+      .eq("season", season)
+      .limit(10000);
+    const extra = computeExtraStats((raw ?? []) as any[]);
+    const labels = await loadDriverLabels(pb, leagueId, base.map((r: any) => r.driver_id) as string[]);
+
+    const rows = base
+      .map((r: any) => ({ ...r, ...(extra[r.driver_id] ?? {}), points: Number(r.points) }))
+      .sort((a: any, b: any) => b.points - a.points || b.wins - a.wins || b.top3 - a.top3);
+    const cols = kind === "stats" ? STATS_A : STATS_B;
+    const shownRows = rows.slice(0, MAX_ROWS);
+    const hiddenRows = rows.length - shownRows.length;
+    const logo = await logoData(league?.logo_url);
+    const ROW2 = 54;
+    const POS_W = 64;
+    const NAME_W = 380;
+    const width = 56 + 48 + POS_W + NAME_W + cols.reduce((sum, c) => sum + c[2], 0);
+    const height = 200 + (Math.max(shownRows.length, 1) + 1) * ROW2 + (hiddenRows > 0 ? 40 : 0) + 40;
+
+    return new ImageResponse(
+      (
+        <div style={{ width, height, display: "flex", flexDirection: "column", background: "#07070b", color: "#ffffff", padding: 28 }}>
+          <div style={{ display: "flex", alignItems: "center", height: 144, marginBottom: 28 }}>
+            {logo ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={logo} width={112} height={112} style={{ borderRadius: 56, marginRight: 28 }} />
+            ) : null}
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <div style={{ display: "flex", fontSize: 40, fontWeight: 800 }}>{league?.name ?? "League"}</div>
+              <div style={{ display: "flex", fontSize: 22, color: "#e8284a", letterSpacing: 2, marginTop: 8 }}>
+                {kind === "stats" ? "DRIVER STATS" : "DRIVER STATS · FINISH & QUALIFYING"}
+              </div>
+              <div style={{ display: "flex", fontSize: 20, color: "rgba(255,255,255,0.45)", marginTop: 6 }}>
+                Season {season}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "center", height: ROW2, padding: "0 24px", background: "rgba(255,255,255,0.08)" }}>
+              <div style={{ display: "flex", width: POS_W + NAME_W, fontSize: 18, fontWeight: 700, color: "rgba(255,255,255,0.5)" }}>DRIVER</div>
+              {cols.map(([key, label, w]) => (
+                <div key={key} style={{ display: "flex", width: w, justifyContent: "center", fontSize: 18, fontWeight: 700, color: "rgba(255,255,255,0.5)" }}>
+                  {label}
+                </div>
+              ))}
+            </div>
+            {shownRows.length === 0 ? (
+              <div style={{ display: "flex", height: ROW2, alignItems: "center", padding: "0 24px", fontSize: 22, color: "rgba(255,255,255,0.5)" }}>
+                No results yet.
+              </div>
+            ) : (
+              shownRows.map((r: any, i: number) => (
+                <div
+                  key={r.driver_id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    height: ROW2,
+                    padding: "0 24px",
+                    background: i % 2 === 0 ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.02)",
+                    borderTop: "1px solid rgba(255,255,255,0.08)",
+                  }}
+                >
+                  <div style={{ display: "flex", width: POS_W, fontSize: 24, fontWeight: 800, color: i === 0 ? "#e8284a" : "rgba(255,255,255,0.55)" }}>
+                    {i + 1}
+                  </div>
+                  <div style={{ display: "flex", width: NAME_W, fontSize: 23, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", paddingRight: 12 }}>
+                    {labelFull(labels[r.driver_id])}
+                  </div>
+                  {cols.map(([key, , w]) => (
+                    <div
+                      key={key}
+                      style={{
+                        display: "flex",
+                        width: w,
+                        justifyContent: "center",
+                        fontSize: key === "points" ? 26 : 22,
+                        fontWeight: key === "points" ? 800 : 500,
+                        color: key === "points" ? "#ffffff" : "rgba(255,255,255,0.8)",
+                      }}
+                    >
+                      {statCell(r, key)}
+                    </div>
+                  ))}
+                </div>
+              ))
+            )}
+            {hiddenRows > 0 ? (
+              <div style={{ display: "flex", height: 40, alignItems: "center", padding: "0 24px", fontSize: 18, color: "rgba(255,255,255,0.4)" }}>
+                +{hiddenRows} more
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ),
+      { width, height, headers: { "Cache-Control": "public, max-age=300" } }
+    );
+  }
 
   let lines: Line[] = [];
   let title = "";
