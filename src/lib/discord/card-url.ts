@@ -7,7 +7,7 @@
 // every edit without invalidating it.
 import { createHmac, timingSafeEqual } from "crypto";
 
-export type CardKind = "race" | "quali" | "drivers" | "teams";
+export type CardKind = "race" | "quali" | "drivers" | "teams" | "stats" | "stats2";
 export interface CardParams {
   kind: CardKind;
   league_id: string;
