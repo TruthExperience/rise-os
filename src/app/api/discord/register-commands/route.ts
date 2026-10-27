@@ -830,6 +830,39 @@ const PROGRESSION_COMMAND = {
   ],
 };
 
+// /regression. Owner/co-owner gating happens in the handler
+// (src/lib/discord/commands/regression.ts).
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 10 = NUMBER
+const REGRESSION_COMMAND = {
+  name: "regression",
+  description: "Off-season DDV regression: set rates, preview, apply (owners)",
+  options: [
+    {
+      type: 1,
+      name: "set",
+      description: "Set the regression rate for a tier",
+      options: [
+        { type: 3, name: "tier", description: "Tier name as shown on DDV records, e.g. F1, Academy", required: true },
+        { type: 10, name: "decay_pct", description: "Off-season decay percent (0-100)", required: true, min_value: 0, max_value: 100 },
+        { type: 10, name: "inactivity_pct", description: "Extra decay percent per inactive season", required: false, min_value: 0, max_value: 100 },
+      ],
+    },
+    { type: 1, name: "list", description: "Show this league's regression rates" },
+    {
+      type: 1,
+      name: "preview",
+      description: "Dry-run the regression for a season (saves nothing)",
+      options: [{ type: 3, name: "season", description: "Season being closed out", required: true }],
+    },
+    {
+      type: 1,
+      name: "apply",
+      description: "Apply the regression for a season (commits)",
+      options: [{ type: 3, name: "season", description: "Season being closed out", required: true }],
+    },
+  ],
+};
+
 // Option types: 1 = SUB_COMMAND, 5 = BOOLEAN, 7 = CHANNEL
 const GAMERTAGS_COMMAND = {
   name: "gamertags",
@@ -884,6 +917,7 @@ async function register(): Promise<NextResponse> {
     DIVISION_COMMAND,
     GAMERTAGS_COMMAND,
     PROGRESSION_COMMAND,
+    REGRESSION_COMMAND,
   ]) {
     // Discord rate-limits command writes (a 429 comes back with
     // retry_after in seconds). Wait that long and try again, up to 4 times,
