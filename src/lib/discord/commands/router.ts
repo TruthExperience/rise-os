@@ -267,6 +267,8 @@ import "./gamertags";
 import "./cap";
 // Side-effect import: registers the ddv_* and tp_view commands.
 import "./ddv";
+// Side-effect import: registers the progression_* commands.
+import "./progression";
 // Side-effect import: registers the standings command.
 import "./standings";
 // Side-effect import: registers the setup command.
