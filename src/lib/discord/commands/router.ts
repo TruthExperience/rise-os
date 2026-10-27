@@ -269,6 +269,8 @@ import "./cap";
 import "./ddv";
 // Side-effect import: registers the progression_* commands.
 import "./progression";
+// Side-effect import: registers the regression_* commands.
+import "./regression";
 // Side-effect import: registers the standings command.
 import "./standings";
 // Side-effect import: registers the setup command.
