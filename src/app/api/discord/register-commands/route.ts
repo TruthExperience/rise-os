@@ -1,7 +1,7 @@
 // src/app/api/discord/register-commands/route.ts
 //
 // Registers /setup, /division, /signups (open, resume, status, list, close, invite,
-// tracks, test), /signup (photos), /timetrial, /steward and /appeal with
+// tracks, test), /signup (photos), /timetrial, /steward and /appeal and /progression with
 // Discord. Each command is POSTed BY NAME, which overwrites that one command
 // and leaves every other registered command alone, so this contains EVERY
 // option/subcommand of each command listed here, not just the new ones.
@@ -750,6 +750,86 @@ const DIVISION_COMMAND = {
 // /gamertags import: reads a gamertags channel and saves what each person
 // posted (owners, co-owners, commissioners, stewards and head stewards only;
 // the handler checks). Without apply it only previews.
+// /progression. Owner/co-owner gating happens in the handler
+// (src/lib/discord/commands/progression.ts).
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 4 = INTEGER, 5 = BOOLEAN
+const PROGRESSION_COMMAND = {
+  name: "progression",
+  description: "Season progression: preview, approve and apply division moves (owners)",
+  options: [
+    {
+      type: 1,
+      name: "preview",
+      description: "Dry-run the progression calc for a season (saves nothing)",
+      options: [{ type: 3, name: "season", description: "Season, e.g. 1", required: true }],
+    },
+    {
+      type: 1,
+      name: "propose",
+      description: "Run the calc and save the proposals",
+      options: [{ type: 3, name: "season", description: "Season, e.g. 1", required: true }],
+    },
+    {
+      type: 1,
+      name: "list",
+      description: "List proposals",
+      options: [
+        {
+          type: 3,
+          name: "status",
+          description: "Default: proposed",
+          required: false,
+          choices: [
+            { name: "proposed", value: "proposed" },
+            { name: "approved", value: "approved" },
+            { name: "applied", value: "applied" },
+            { name: "rejected", value: "rejected" },
+            { name: "declined", value: "declined" },
+          ],
+        },
+        { type: 3, name: "season", description: "Filter by season", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "approve",
+      description: "Approve a proposal",
+      options: [{ type: 3, name: "proposal", description: "Proposal ID (first 8 characters is fine)", required: true }],
+    },
+    {
+      type: 1,
+      name: "reject",
+      description: "Reject a proposal",
+      options: [{ type: 3, name: "proposal", description: "Proposal ID (first 8 characters is fine)", required: true }],
+    },
+    {
+      type: 1,
+      name: "decline",
+      description: "Mark a proposal declined (driver declined the move)",
+      options: [{ type: 3, name: "proposal", description: "Proposal ID (first 8 characters is fine)", required: true }],
+    },
+    {
+      type: 1,
+      name: "apply",
+      description: "Apply an approved proposal (dry run unless dry_run is False)",
+      options: [
+        { type: 3, name: "proposal", description: "Proposal ID (first 8 characters is fine)", required: true },
+        { type: 5, name: "dry_run", description: "Default True. Set False to commit", required: false },
+        { type: 4, name: "dispute_hours", description: "Override the dispute window (hours)", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "finalize",
+      description: "Finalize a provisional conversion after its dispute window",
+      options: [
+        { type: 3, name: "conversion", description: "Conversion ID (first 8 characters is fine)", required: true },
+        { type: 5, name: "dry_run", description: "Default True. Set False to commit", required: false },
+      ],
+    },
+  ],
+};
+
 // Option types: 1 = SUB_COMMAND, 5 = BOOLEAN, 7 = CHANNEL
 const GAMERTAGS_COMMAND = {
   name: "gamertags",
@@ -803,6 +883,7 @@ async function register(): Promise<NextResponse> {
     APPEAL_COMMAND,
     DIVISION_COMMAND,
     GAMERTAGS_COMMAND,
+    PROGRESSION_COMMAND,
   ]) {
     // Discord rate-limits command writes (a 429 comes back with
     // retry_after in seconds). Wait that long and try again, up to 4 times,
