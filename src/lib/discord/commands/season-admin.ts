@@ -805,7 +805,8 @@ registerCommand("set-result", async (ctx) => {
 
 /**
  * Finds a driver from a CSV cell: a Discord ID, or a username / display
- * name (exact match, case-insensitive). Refuses ambiguous matches.
+ * name, or a saved gamertag (exact match, case-insensitive). Refuses
+ * ambiguous matches.
  */
 async function findDriverByToken(token: string) {
   const supabase = createAdminClient();
@@ -837,6 +838,25 @@ async function findDriverByToken(token: string) {
     if (data && data.length === 1) return { driverId: data[0].id as string } as const;
     if (data && data.length > 1) return { error: `"${cleaned}" matches more than one driver` } as const;
   }
+
+  // Last resort: saved gamertags. One row can hold several names ("A / B"),
+  // so match any of them exactly (case-insensitive).
+  const { data: tags, error: tagError } = await supabase
+    .schema("pitboss")
+    .from("driver_gamertags")
+    .select("driver_id, gamertag")
+    .ilike("gamertag", `%${pattern}%`)
+    .limit(50);
+  if (tagError) return { error: tagError.message } as const;
+  const want = cleaned.toLowerCase();
+  const tagDrivers = new Set(
+    ((tags ?? []) as { driver_id: string; gamertag: string }[])
+      .filter((t) => t.gamertag.split("/").some((n) => n.trim().toLowerCase() === want))
+      .map((t) => t.driver_id)
+  );
+  if (tagDrivers.size === 1) return { driverId: Array.from(tagDrivers)[0] } as const;
+  if (tagDrivers.size > 1) return { error: `"${cleaned}" matches more than one driver's gamertag` } as const;
+
   return { error: `no driver found for "${cleaned}"` } as const;
 }
 
