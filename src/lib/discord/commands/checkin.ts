@@ -4,8 +4,10 @@ import { getLeagueMembership, hasAnyFlag } from "../permissions";
 import {
   buildCheckinEmbed,
   buildCheckinComponents,
+  isCheckinLocked,
   roundLabel,
   fetchTeamLabels,
+  fetchLeagueTeamNames,
   groupedDiscordIds,
   CHECKIN_STATUSES,
   type CheckinStatus,
@@ -309,6 +311,22 @@ registerCommand("checkin", async (ctx) => {
   }
 
   const supabase = createAdminClient();
+
+  // Lockout: no responses from 15 minutes before the race.
+  const { data: lockPost } = await supabase
+    .schema("pitboss")
+    .from("round_checkin_posts")
+    .select("race_time")
+    .eq("round_id", round.id)
+    .eq("division_id", division.id)
+    .maybeSingle();
+  if (isCheckinLocked(lockPost?.race_time)) {
+    return {
+      content: "🔒 Check-in is locked — it closes 15 minutes before the race. Ask a steward if you need a change.",
+      ephemeral: true,
+    };
+  }
+
   const { error: upsertError } = await supabase
     .schema("pitboss")
     .from("round_checkins")
@@ -508,10 +526,14 @@ registerCommand("checkin-remind", async (ctx) => {
  * Admin command: posts the rich check-in embed (track/weather/ping
  * delivery/countdown + 5 status buttons) to a division's dedicated
  * check-in channel. One post per round+division — re-running this
- * for the same round/division updates the existing row and posts a
- * fresh message (the old one is left as-is; not deleted, since we
- * don't retain enough context here to safely delete a prior message
- * a driver may have already interacted with).
+ * for the same round/division EDITS the existing check-in in place: the
+ * stored row is updated and the already-posted Discord message is
+ * patched (same message, same buttons, drivers' responses kept), so
+ * there is nothing to delete and redo. Only the options you pass change;
+ * everything else keeps its current value. Pass "-" for weather / track /
+ * country / flag to clear one. If the old message is gone (deleted by
+ * hand) or the division's check-in channel changed, a fresh message is
+ * posted instead.
  *
  * Options: round (optional, defaults to next upcoming), season
  * (optional), division (required: e.g. "D1"), weather (optional free
@@ -573,51 +595,45 @@ registerCommand("checkin-create", async (ctx) => {
   }
   const round = roundResult.round;
 
-  const weatherText = (ctx.options.weather as string | undefined) ?? null;
-  const pingDelivery = (ctx.options.ping_delivery as string | undefined) ?? "Channel only";
-  const raceTime =
-    (ctx.options.race_time as string | undefined) ??
-    (round.race_date ? `${round.race_date}T15:00:00Z` : null);
-
-  // Manual track override inputs — empty/omitted means "use the round's
-  // own calendar_rounds data", not "clear whatever was set before" (a
-  // re-run of checkin-create for the same round/division without these
-  // options keeps the previously entered override via upsert semantics
-  // only if we don't overwrite with null — so we explicitly read what's
-  // already stored when the option wasn't passed this time).
-  const trackOverrideInput = ctx.options.track as string | undefined;
-  const countryOverrideInput = ctx.options.country as string | undefined;
-  const flagOverrideInput = ctx.options.flag as string | undefined;
-
   const supabase = createAdminClient();
 
-  // Always read the existing row first — needed both to preserve
-  // untouched overrides (below) and to detect a race_time reschedule
-  // (so the reminder-sent stamps can be reset).
+  // Always read the existing row first: unpassed options keep their stored
+  // value (edit-in-place), and we need the stored Discord message to patch.
   const { data: existingPost } = await supabase
     .schema("pitboss")
     .from("round_checkin_posts")
-    .select("race_time, track_override, country_override, flag_override")
+    .select(
+      "race_time, weather_text, ping_delivery, track_override, country_override, flag_override, discord_channel_id, discord_message_id"
+    )
     .eq("round_id", round.id)
     .eq("division_id", division.id)
     .maybeSingle();
 
-  let trackOverride = trackOverrideInput ?? null;
-  let countryOverride = countryOverrideInput ?? null;
-  let flagOverride = flagOverrideInput ?? null;
+  // option not passed -> keep what is stored; "-" -> clear; otherwise set.
+  const pick = (input: unknown, stored: string | null | undefined): string | null => {
+    if (input === undefined || input === null) return stored ?? null;
+    const v = String(input).trim();
+    if (v === "-") return null;
+    return v === "" ? stored ?? null : v;
+  };
 
-  if (trackOverrideInput === undefined && countryOverrideInput === undefined && flagOverrideInput === undefined) {
-    // No override options passed this run — preserve whatever was
-    // previously stored for this round+division instead of clearing it.
-    trackOverride = existingPost?.track_override ?? null;
-    countryOverride = existingPost?.country_override ?? null;
-    flagOverride = existingPost?.flag_override ?? null;
-  }
+  const weatherText = pick(ctx.options.weather, existingPost?.weather_text);
+  const pingDelivery = pick(ctx.options.ping_delivery, existingPost?.ping_delivery) ?? "Channel only";
+  const trackOverride = pick(ctx.options.track, existingPost?.track_override);
+  const countryOverride = pick(ctx.options.country, existingPost?.country_override);
+  const flagOverride = pick(ctx.options.flag, existingPost?.flag_override);
 
-  // race_time changed (a reschedule) → reset both reminder stamps so the
-  // 3hr DM / 1hr channel pings fire again against the new time. Leave
-  // them untouched on an unrelated re-run (e.g. just updating weather)
-  // so we don't send a duplicate reminder for the same race time.
+  // race_time: passed value wins, then the stored one (so an edit that
+  // doesn't mention the time never resets it), then the calendar's
+  // race_date at 15:00 UTC for a brand-new check-in.
+  const raceTime =
+    (ctx.options.race_time as string | undefined) ??
+    existingPost?.race_time ??
+    (round.race_date ? `${round.race_date}T15:00:00Z` : null);
+
+  // race_time changed (a reschedule) -> re-arm every automated milestone
+  // against the new time. Left untouched on any other edit (e.g. just
+  // weather) so nothing is sent twice for the same race time.
   const raceTimeChanged =
     existingPost != null &&
     (existingPost.race_time ? new Date(existingPost.race_time).getTime() : null) !==
@@ -636,8 +652,14 @@ registerCommand("checkin-create", async (ctx) => {
     updated_at: new Date().toISOString(),
   };
   if (raceTimeChanged) {
+    // Every milestone re-arms against the new time (3h, 1h, 30m, lockout,
+    // T-5m flag, lights out).
     upsertPayload.dm_reminder_sent_at = null;
     upsertPayload.channel_reminder_sent_at = null;
+    upsertPayload.reminder_30m_sent_at = null;
+    upsertPayload.lockout_sent_at = null;
+    upsertPayload.race_flag_sent_at = null;
+    upsertPayload.lights_out_sent_at = null;
   }
 
   const { data: post, error: postError } = await supabase
@@ -657,7 +679,10 @@ registerCommand("checkin-create", async (ctx) => {
     return { content: `Something went wrong pulling existing check-ins: ${groupedResult.error}`, ephemeral: true };
   }
 
-  const teams = await fetchTeamLabels(leagueId, groupedDiscordIds(groupedResult.grouped));
+  const [teams, allTeams] = await Promise.all([
+    fetchTeamLabels(leagueId, groupedDiscordIds(groupedResult.grouped)),
+    fetchLeagueTeamNames(leagueId),
+  ]);
 
   const embed = buildCheckinEmbed({
     round,
@@ -665,20 +690,49 @@ registerCommand("checkin-create", async (ctx) => {
     post,
     grouped: groupedResult.grouped,
     teams,
+    allTeams,
   });
-  const components = buildCheckinComponents(post.id);
+  const components = buildCheckinComponents(post.id, post.race_time);
 
   const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
   if (!token) {
     return { content: "PITBOSS_DISCORD_BOT_TOKEN not set — can't post the check-in.", ephemeral: true };
   }
 
+  const headers = {
+    Authorization: `Bot ${token}`,
+    "Content-Type": "application/json",
+  };
+
+  // ── Edit in place ──────────────────────────────────────────────
+  // Same channel as before and we know the message -> PATCH it. Anything
+  // that fails (message deleted, no access) falls through to a new post.
+  if (
+    existingPost?.discord_message_id &&
+    existingPost.discord_channel_id === division.discord_checkin_channel_id
+  ) {
+    const patchRes = await fetch(
+      `${DISCORD_API_BASE}/channels/${existingPost.discord_channel_id}/messages/${existingPost.discord_message_id}`,
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ embeds: [embed], components }),
+      }
+    );
+
+    if (patchRes.ok) {
+      return {
+        content: `Check-in updated in place for ${roundLabel(round)} — Division ${division.division_code}.`,
+        ephemeral: true,
+      };
+    }
+    console.error("[checkin-create] in-place edit failed, reposting:", patchRes.status, await patchRes.text());
+  }
+
+  // ── New post ───────────────────────────────────────────────────
   const res = await fetch(`${DISCORD_API_BASE}/channels/${division.discord_checkin_channel_id}/messages`, {
     method: "POST",
-    headers: {
-      Authorization: `Bot ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify({ embeds: [embed], components }),
   });
 
