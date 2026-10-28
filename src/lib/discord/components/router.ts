@@ -7,6 +7,8 @@ import { getOrCreateDriver } from "../commands/checkin";
 import {
   buildCheckinEmbed,
   buildCheckinComponents,
+  fetchTeamLabels,
+  groupedDiscordIds,
   CHECKIN_STATUSES,
   type CheckinStatus,
 } from "../commands/checkin-embed";
@@ -352,11 +354,14 @@ async function handleCheckinButton(interaction: any, customId: string) {
     grouped[s]!.push(discordId);
   }
 
+  const teams = await fetchTeamLabels(league.id, groupedDiscordIds(grouped));
+
   const embed = buildCheckinEmbed({
     round,
     divisionCode: division.division_code,
     post,
     grouped,
+    teams,
   });
   const components = buildCheckinComponents(post.id);
 
