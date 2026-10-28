@@ -4,6 +4,7 @@ import {
   buildCheckinEmbed,
   buildCheckinComponents,
   fetchTeamLabels,
+  fetchLeagueTeamNames,
   groupedDiscordIds,
   CHECKIN_STATUSES,
   type CheckinStatus,
@@ -176,7 +177,12 @@ async function refreshEmbed(token: string, payload: ReminderPayload) {
     }
 
     const leagueId = (checkinsRes.data ?? []).map((r: any) => r.league_id).find(Boolean) as string | undefined;
-    const teams = leagueId ? await fetchTeamLabels(leagueId, groupedDiscordIds(grouped)) : {};
+    const [teams, allTeams] = leagueId
+      ? await Promise.all([
+          fetchTeamLabels(leagueId, groupedDiscordIds(grouped)),
+          fetchLeagueTeamNames(leagueId),
+        ])
+      : [{}, [] as string[]];
 
     const embed = buildCheckinEmbed({
       round: roundRes.data,
@@ -184,6 +190,7 @@ async function refreshEmbed(token: string, payload: ReminderPayload) {
       post: postRes.data,
       grouped,
       teams,
+      allTeams,
     });
 
     const patchRes = await fetch(
