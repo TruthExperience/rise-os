@@ -407,6 +407,127 @@ export type LeagueSyncResult =
       failed: number;
     };
 
+// ─── Team roles -> rosters ──────────────────────────────────────────────
+//
+// A Discord role whose name matches a team in the league's car class
+// (e.g. "Ferrari", "Red Bull Racing") puts that member on the team:
+//  - pitboss.team_rosters      (car_class_teams reference; TP flag copied
+//                               from driver_leagues.is_team_principal)
+//  - pitboss.franchise_rosters (what check-in, cap and grid read)
+// Rules: exactly one team role -> assign or move. No team role -> left
+// alone (never released automatically). Two or more -> skipped and reported.
+// The season is the latest one already in team_rosters for the league; a
+// league with no team_rosters rows yet is skipped.
+// Same constant as roster.ts — keep the two in step.
+const TEAM_ROLE_CAR_CLASS_ID = "3cbbd45c-7a2e-4501-8f51-a6b5f6b33326";
+
+const normTeam = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+interface TeamSyncRow {
+  driverId: string;
+  name: string;
+  roleIds: string[];
+  isTeamPrincipal: boolean;
+}
+
+async function syncTeamRoles(
+  leagueId: string,
+  roleNames: Map<string, string>,
+  members: TeamSyncRow[],
+  apply: boolean
+): Promise<{ lines: string[]; failed: number }> {
+  const lines: string[] = [];
+  let failed = 0;
+
+  const { data: seasonRow } = await db()
+    .from("team_rosters")
+    .select("season, tier")
+    .eq("league_id", leagueId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!seasonRow?.season) return { lines, failed };
+  const season = String(seasonRow.season);
+  const tier = (seasonRow.tier as string | null) ?? null;
+
+  const { data: teams } = await db()
+    .from("car_class_teams")
+    .select("id, team_name")
+    .eq("car_class_id", TEAM_ROLE_CAR_CLASS_ID);
+  const teamByName = new Map<string, { id: string; team_name: string }>();
+  for (const t of (teams ?? []) as { id: string; team_name: string }[]) {
+    teamByName.set(normTeam(t.team_name), t);
+  }
+  if (teamByName.size === 0) return { lines, failed };
+
+  const { data: franchises } = await (createAdminClient() as any)
+    .schema("rise_os")
+    .from("franchises")
+    .select("id, name, division")
+    .eq("league_id", leagueId);
+  const franchiseFor = (teamName: string) => {
+    const target = normTeam(teamName);
+    const hits = ((franchises ?? []) as { id: string; name: string; division: string | null }[]).filter(
+      (f) => normTeam(f.name).includes(target)
+    );
+    return hits.length === 1 ? hits[0] : null;
+  };
+
+  const [{ data: trRows }, { data: frRows }] = await Promise.all([
+    db().from("team_rosters").select("id, driver_id, car_class_team_id, is_team_principal").eq("league_id", leagueId).eq("season", season),
+    db().from("franchise_rosters").select("id, driver_id, franchise_id").eq("league_id", leagueId).is("released_at", null),
+  ]);
+  const trByDriver = new Map<string, any>(((trRows ?? []) as any[]).map((r) => [r.driver_id, r]));
+  const frByDriver = new Map<string, any>(((frRows ?? []) as any[]).map((r) => [r.driver_id, r]));
+
+  let created = 0;
+  let moved = 0;
+  const conflicts: string[] = [];
+  const noFranchise = new Set<string>();
+
+  for (const m of members) {
+    const held = m.roleIds
+      .map((id) => teamByName.get(normTeam(roleNames.get(id) ?? "")))
+      .filter((t): t is { id: string; team_name: string } => !!t);
+    if (held.length === 0) continue;
+    if (held.length > 1) {
+      conflicts.push(`${m.name} (${held.map((h) => h.team_name).join(" + ")})`);
+      continue;
+    }
+    const team = held[0];
+
+    const tr = trByDriver.get(m.driverId);
+    const trChanged = !tr || tr.car_class_team_id !== team.id || (tr.is_team_principal === true) !== m.isTeamPrincipal;
+    const fr = frByDriver.get(m.driverId);
+    const franchise = franchiseFor(team.team_name);
+    if (!franchise) noFranchise.add(team.team_name);
+    const frChanged = !!franchise && (!fr || fr.franchise_id !== franchise.id);
+
+    if (!trChanged && !frChanged) continue;
+    if (!tr) created++;
+    else if (tr.car_class_team_id !== team.id) moved++;
+    if (!apply) continue;
+
+    if (trChanged) {
+      const res = tr
+        ? await db().from("team_rosters").update({ car_class_team_id: team.id, is_team_principal: m.isTeamPrincipal, updated_at: new Date().toISOString() }).eq("id", tr.id)
+        : await db().from("team_rosters").insert({ driver_id: m.driverId, league_id: leagueId, car_class_team_id: team.id, tier, season, is_team_principal: m.isTeamPrincipal });
+      if (res.error) { failed++; console.error("[roles] team_rosters sync failed:", res.error); }
+    }
+    if (frChanged && franchise) {
+      const res = fr
+        ? await db().from("franchise_rosters").update({ franchise_id: franchise.id, division: franchise.division }).eq("id", fr.id)
+        : await db().from("franchise_rosters").insert({ driver_id: m.driverId, franchise_id: franchise.id, league_id: leagueId, division: franchise.division, season, tier, source: "discord:roles-sync", created_by: "roles-sync" });
+      if (res.error) { failed++; console.error("[roles] franchise_rosters sync failed:", res.error); }
+    }
+  }
+
+  lines.push(`Team roles: ${apply ? "" : "would "}add ${created} / move ${moved}`);
+  if (conflicts.length > 0) lines.push(`Skipped (more than one team role): ${conflicts.join(", ")}`);
+  if (noFranchise.size > 0) lines.push(`No franchise matches: ${Array.from(noFranchise).join(", ")}`);
+  return { lines, failed };
+}
+
 /**
  * Mirrors the Discord server onto the league. With apply=false nothing is
  * written. Deletion of people who left only happens when apply AND
@@ -637,6 +758,26 @@ export async function syncLeagueRoles(
       }
     }
   }
+
+  const teamSync = await syncTeamRoles(
+    leagueId,
+    roleNames.names,
+    rows.flatMap((row) => {
+      const d = Array.isArray(row.drivers) ? row.drivers[0] : row.drivers;
+      const member = d?.discord_id ? guildMembers.get(d.discord_id) : undefined;
+      if (!member) return [];
+      const patched = changes.find((c) => c.id === row.id)?.patch.is_team_principal;
+      return [{
+        driverId: row.driver_id,
+        name: d?.display_name || d?.discord_username || d?.discord_id || row.driver_id,
+        roleIds: member.roles,
+        isTeamPrincipal: typeof patched === "boolean" ? patched : row.is_team_principal === true,
+      }];
+    }),
+    apply
+  );
+  summary.push(...teamSync.lines);
+  failed += teamSync.failed;
 
   const footer: string[] = [];
   if (keptStaff.length > 0) {
