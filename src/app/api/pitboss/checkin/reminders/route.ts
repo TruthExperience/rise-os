@@ -3,6 +3,8 @@ import { createAdminClient } from "@/lib/supabase/server";
 import {
   buildCheckinEmbed,
   buildCheckinComponents,
+  fetchTeamLabels,
+  groupedDiscordIds,
   CHECKIN_STATUSES,
   type CheckinStatus,
 } from "@/lib/discord/commands/checkin-embed";
@@ -113,7 +115,7 @@ async function handleRaceTimeFlag(token: string, payload: ReminderPayload) {
         supabase
           .schema("pitboss")
           .from("round_checkins")
-          .select("status, drivers(discord_id)")
+          .select("status, league_id, drivers(discord_id)")
           .eq("round_id", round_id)
           .eq("division_id", division_id),
       ]);
@@ -140,11 +142,15 @@ async function handleRaceTimeFlag(token: string, payload: ReminderPayload) {
         grouped[status]!.push(discordId);
       }
 
+      const leagueId = (checkinsRes.data ?? []).map((r: any) => r.league_id).find(Boolean) as string | undefined;
+      const teams = leagueId ? await fetchTeamLabels(leagueId, groupedDiscordIds(grouped)) : {};
+
       const embed = buildCheckinEmbed({
         round: roundRes.data,
         divisionCode: divisionRes.data.division_code,
         post: postRes.data,
         grouped,
+        teams,
       });
 
       const patchRes = await fetch(
