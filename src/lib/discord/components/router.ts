@@ -7,6 +7,7 @@ import { getOrCreateDriver } from "../commands/checkin";
 import {
   buildCheckinEmbed,
   buildCheckinComponents,
+  isCheckinLocked,
   fetchTeamLabels,
   groupedDiscordIds,
   CHECKIN_STATUSES,
@@ -255,6 +256,15 @@ async function handleCheckinButton(interaction: any, customId: string) {
     return ephemeralError("Couldn't find this check-in — it may have been removed.");
   }
 
+  // Lockout: no responses (or clears) from 15 minutes before the race.
+  // Checked live on every click so it holds even if the cron re-render
+  // that greys out the buttons hasn't landed yet.
+  if (isCheckinLocked(post.race_time)) {
+    return ephemeralError(
+      "🔒 Check-in is locked — it closes 15 minutes before the race. Ask a steward if you need a change."
+    );
+  }
+
   const { data: division, error: divisionError } = await supabase
     .schema("rise_os")
     .from("league_divisions")
@@ -363,7 +373,7 @@ async function handleCheckinButton(interaction: any, customId: string) {
     grouped,
     teams,
   });
-  const components = buildCheckinComponents(post.id);
+  const components = buildCheckinComponents(post.id, post.race_time);
 
   return {
     type: InteractionResponseType.UPDATE_MESSAGE,
