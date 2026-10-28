@@ -103,6 +103,29 @@ export async function fetchTeamLabels(
   return out;
 }
 
+/**
+ * Every team (franchise) in the league, A-Z, so the Confirmed list can show
+ * teams that have no driver checked in yet. Never throws: on failure the
+ * embed just lists the teams that do have drivers.
+ */
+export async function fetchLeagueTeamNames(leagueId: string): Promise<string[]> {
+  try {
+    const supabase = createAdminClient();
+    const { data } = await supabase
+      .schema("rise_os")
+      .from("franchises")
+      .select("name")
+      .eq("league_id", leagueId);
+    const names = ((data ?? []) as { name: string | null }[])
+      .map((f) => f.name)
+      .filter((n): n is string => !!n);
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+  } catch (err) {
+    console.error("[checkin] league team lookup failed:", err);
+    return [];
+  }
+}
+
 /** Every Discord id in a grouped check-in, for fetchTeamLabels. */
 export function groupedDiscordIds(grouped: GroupedCheckins): string[] {
   return CHECKIN_STATUSES.flatMap((s) => grouped[s] ?? []);
@@ -223,9 +246,10 @@ const STATE_DISPLAY: Record<RaceState, { text: string; color: number }> = {
 
 // ── Embed ──────────────────────────────────────────────────────────
 
-function mentionList(ids: string[], teams?: TeamLabels): string {
-  if (ids.length === 0) return "—";
-  const withTeams = !!teams && Object.keys(teams).length > 0;
+function mentionList(ids: string[], teams?: TeamLabels, allTeams?: string[]): string {
+  const withTeams =
+    (!!teams && Object.keys(teams).length > 0) || (!!allTeams && allTeams.length > 0);
+  if (ids.length === 0 && !(withTeams && allTeams && allTeams.length > 0)) return "—";
 
   // No team data: compact mention list, as before.
   if (!withTeams) {
@@ -248,8 +272,10 @@ function mentionList(ids: string[], teams?: TeamLabels): string {
   // Teams are ordered A-Z; drivers without a team go last.
   const byTeam = new Map<string, string[]>();
   const noTeam: string[] = [];
+  // Every team gets a line, even with nobody in it (shown as "—").
+  for (const t of allTeams ?? []) byTeam.set(t, []);
   for (const id of ids) {
-    const team = teams![id];
+    const team = teams?.[id];
     if (!team) {
       noTeam.push(id);
       continue;
@@ -270,7 +296,7 @@ function mentionList(ids: string[], teams?: TeamLabels): string {
   let len = 0;
   let shown = 0;
   for (const g of groups) {
-    const line = `**${g.label}** · ${g.ids.map((id) => `<@${id}>`).join(" ")}`;
+    const line = `**${g.label}** · ${g.ids.length > 0 ? g.ids.map((id) => `<@${id}>`).join(" ") : "—"}`;
     // Discord field values cap at 1024 chars; leave room for "+N more".
     if (len + line.length + 1 > 980) {
       lines.push(`+${ids.length - shown} more`);
@@ -290,9 +316,12 @@ export function buildCheckinEmbed(args: {
   grouped: GroupedCheckins;
   /** Optional team names (see fetchTeamLabels). */
   teams?: TeamLabels;
+  /** Every team in the league (see fetchLeagueTeamNames); all shown under Confirmed. */
+  allTeams?: string[];
 }): Record<string, unknown> {
-  const { round, divisionCode, post, grouped, teams } = args;
-  const showTeams = !!teams && Object.keys(teams).length > 0;
+  const { round, divisionCode, post, grouped, teams, allTeams } = args;
+  const showTeams =
+    (!!teams && Object.keys(teams).length > 0) || (!!allTeams && allTeams.length > 0);
 
   // Override precedence: manual /checkin-create values win over the calendar.
   const track = post.track_override ?? round.circuit ?? round.name;
@@ -332,7 +361,7 @@ export function buildCheckinEmbed(args: {
     const meta = STATUS_META[status];
     fields.push({
       name: `${meta.emoji} ${meta.label} (${ids.length})`,
-      value: mentionList(ids, teams),
+      value: mentionList(ids, teams, status === "confirmed" ? allTeams : undefined),
       // Team names make entries wide, so stack the columns when shown.
       inline:
         !showTeams && (status === "confirmed" || status === "tentative" || status === "declined"),
