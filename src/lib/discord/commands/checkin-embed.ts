@@ -8,6 +8,8 @@
 // Everything returned here is a plain JSON object (no discord.js builders)
 // so it can go straight into a Discord REST body or an interaction response.
 
+import { createAdminClient } from "@/lib/supabase/server";
+
 export const CHECKIN_STATUSES = [
   "confirmed",
   "tentative",
@@ -37,6 +39,74 @@ export interface CheckinPost {
 }
 
 export type GroupedCheckins = Partial<Record<CheckinStatus, string[]>>;
+
+/** discord_id -> team name, shown next to each mention in the embed. */
+export type TeamLabels = Record<string, string>;
+
+/**
+ * Team name for each given Discord user, from their active
+ * franchise_rosters row in this league (the same source grid generation
+ * and reminders use). Drivers with no active roster row are left out.
+ * Never throws: a failed lookup just means the embed shows no team names.
+ *
+ * franchise_rosters (pitboss) and franchises (rise_os) are queried
+ * separately — embedded cross-schema selects don't resolve (see the
+ * PATCH note in checkin.ts).
+ */
+export async function fetchTeamLabels(
+  leagueId: string,
+  discordIds: string[]
+): Promise<TeamLabels> {
+  const out: TeamLabels = {};
+  try {
+    const ids = [...new Set(discordIds)];
+    if (ids.length === 0) return out;
+    const supabase = createAdminClient();
+
+    const { data: drivers } = await supabase
+      .schema("pitboss")
+      .from("drivers")
+      .select("id, discord_id")
+      .in("discord_id", ids);
+    const discordByDriver = new Map(
+      (drivers ?? []).map((d: any) => [d.id as string, d.discord_id as string])
+    );
+    if (discordByDriver.size === 0) return out;
+
+    const { data: rosters } = await supabase
+      .schema("pitboss")
+      .from("franchise_rosters")
+      .select("driver_id, franchise_id, created_at")
+      .eq("league_id", leagueId)
+      .is("released_at", null)
+      .in("driver_id", [...discordByDriver.keys()])
+      .order("created_at", { ascending: false });
+    if (!rosters || rosters.length === 0) return out;
+
+    const franchiseIds = [...new Set(rosters.map((r: any) => r.franchise_id as string))];
+    const { data: franchises } = await supabase
+      .schema("rise_os")
+      .from("franchises")
+      .select("id, name")
+      .in("id", franchiseIds);
+    const nameById = new Map((franchises ?? []).map((f: any) => [f.id as string, f.name as string]));
+
+    // Newest roster row wins if a driver somehow has more than one.
+    for (const r of rosters as any[]) {
+      const discordId = discordByDriver.get(r.driver_id);
+      const name = nameById.get(r.franchise_id);
+      if (discordId && name && !out[discordId]) out[discordId] = name;
+    }
+  } catch (err) {
+    console.error("[checkin] team label lookup failed:", err);
+  }
+  return out;
+}
+
+/** Every Discord id in a grouped check-in, for fetchTeamLabels. */
+export function groupedDiscordIds(grouped: GroupedCheckins): string[] {
+  return CHECKIN_STATUSES.flatMap((s) => grouped[s] ?? []);
+}
 
 const STATUS_META: Record<
   CheckinStatus,
@@ -117,12 +187,14 @@ const STATE_DISPLAY: Record<RaceState, { text: string; color: number }> = {
 
 // ── Embed ──────────────────────────────────────────────────────────
 
-function mentionList(ids: string[]): string {
+function mentionList(ids: string[], teams?: TeamLabels): string {
   if (ids.length === 0) return "—";
+  const withTeams = !!teams && Object.keys(teams).length > 0;
   const out: string[] = [];
   let len = 0;
   for (let i = 0; i < ids.length; i++) {
-    const m = `<@${ids[i]}>`;
+    const team = withTeams ? teams![ids[i]] : undefined;
+    const m = team ? `<@${ids[i]}> · ${team}` : `<@${ids[i]}>`;
     // Discord field values cap at 1024 chars; leave room for "+N more".
     if (len + m.length + 1 > 980) {
       out.push(`+${ids.length - i} more`);
@@ -131,7 +203,8 @@ function mentionList(ids: string[]): string {
     out.push(m);
     len += m.length + 1;
   }
-  return out.join(" ");
+  // One driver per line when team names are shown, otherwise compact.
+  return out.join(withTeams ? "\n" : " ");
 }
 
 export function buildCheckinEmbed(args: {
@@ -139,8 +212,11 @@ export function buildCheckinEmbed(args: {
   divisionCode: string;
   post: CheckinPost;
   grouped: GroupedCheckins;
+  /** Optional team names (see fetchTeamLabels). */
+  teams?: TeamLabels;
 }): Record<string, unknown> {
-  const { round, divisionCode, post, grouped } = args;
+  const { round, divisionCode, post, grouped, teams } = args;
+  const showTeams = !!teams && Object.keys(teams).length > 0;
 
   // Override precedence: manual /checkin-create values win over the calendar.
   const track = post.track_override ?? round.circuit ?? round.name;
@@ -174,8 +250,10 @@ export function buildCheckinEmbed(args: {
     const meta = STATUS_META[status];
     fields.push({
       name: `${meta.emoji} ${meta.label} (${ids.length})`,
-      value: mentionList(ids),
-      inline: status === "confirmed" || status === "tentative" || status === "declined" ? true : false,
+      value: mentionList(ids, teams),
+      // Team names make entries wide, so stack the columns when shown.
+      inline:
+        !showTeams && (status === "confirmed" || status === "tentative" || status === "declined"),
     });
   }
 
