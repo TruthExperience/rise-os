@@ -5,6 +5,8 @@ import {
   buildCheckinEmbed,
   buildCheckinComponents,
   roundLabel,
+  fetchTeamLabels,
+  groupedDiscordIds,
   CHECKIN_STATUSES,
   type CheckinStatus,
 } from "./checkin-embed";
@@ -655,11 +657,14 @@ registerCommand("checkin-create", async (ctx) => {
     return { content: `Something went wrong pulling existing check-ins: ${groupedResult.error}`, ephemeral: true };
   }
 
+  const teams = await fetchTeamLabels(leagueId, groupedDiscordIds(groupedResult.grouped));
+
   const embed = buildCheckinEmbed({
     round,
     divisionCode: division.division_code,
     post,
     grouped: groupedResult.grouped,
+    teams,
   });
   const components = buildCheckinComponents(post.id);
 
