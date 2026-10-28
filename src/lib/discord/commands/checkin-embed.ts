@@ -40,7 +40,7 @@ export interface CheckinPost {
 
 export type GroupedCheckins = Partial<Record<CheckinStatus, string[]>>;
 
-/** discord_id -> team name, shown next to each mention in the embed. */
+/** discord_id -> team name; the embed groups mentions under each team. */
 export type TeamLabels = Record<string, string>;
 
 /**
@@ -168,21 +168,57 @@ function resolveFlag(
   return { emoji: code ? codeToFlagEmoji(code) : null, code };
 }
 
-// ── Race state ─────────────────────────────────────────────────────
+// ── Race state / five lights ───────────────────────────────────────
 
-type RaceState = "open" | "formation" | "started";
+const MIN = 60 * 1000;
 
-function raceState(raceTimeMs: number | null, now = Date.now()): RaceState {
-  if (raceTimeMs == null) return "open";
-  if (now >= raceTimeMs) return "started";
-  if (raceTimeMs - now <= 5 * 60 * 1000) return "formation";
-  return "open";
+/** Check-in locks this long before race_time (buttons + /checkin). */
+export const CHECKIN_LOCKOUT_MS = 15 * MIN;
+
+/**
+ * One light per milestone, same schedule as the automated pings:
+ *   T-3h · T-1h · T-30m · T-15m (lockout) · T-5m (formation)
+ * All five lit = formation lap. At race_time they go green: lights out.
+ */
+const LIGHT_MILESTONES_MS = [180 * MIN, 60 * MIN, 30 * MIN, 15 * MIN, 5 * MIN];
+const LIGHTS_TOTAL = LIGHT_MILESTONES_MS.length;
+
+type RaceState = "open" | "locked" | "formation" | "started";
+
+/** True from 15 minutes before race_time onward. No race_time = never locked. */
+export function isCheckinLocked(
+  raceTime: string | null | undefined,
+  now = Date.now()
+): boolean {
+  if (!raceTime) return false;
+  const ms = Date.parse(raceTime);
+  if (Number.isNaN(ms)) return false;
+  return ms - now <= CHECKIN_LOCKOUT_MS;
+}
+
+function raceState(
+  raceTimeMs: number | null,
+  now = Date.now()
+): { state: RaceState; lit: number } {
+  if (raceTimeMs == null) return { state: "open", lit: 0 };
+  const remaining = raceTimeMs - now;
+  if (remaining <= 0) return { state: "started", lit: LIGHTS_TOTAL };
+  const lit = LIGHT_MILESTONES_MS.filter((m) => remaining <= m).length;
+  if (remaining <= 5 * MIN) return { state: "formation", lit };
+  if (remaining <= CHECKIN_LOCKOUT_MS) return { state: "locked", lit };
+  return { state: "open", lit };
+}
+
+function lightsRow(state: RaceState, lit: number): string {
+  if (state === "started") return "🟢".repeat(LIGHTS_TOTAL);
+  return "🔴".repeat(lit) + "⚫".repeat(LIGHTS_TOTAL - lit);
 }
 
 const STATE_DISPLAY: Record<RaceState, { text: string; color: number }> = {
-  open: { text: "🔴 Check-in open", color: 0x5865f2 },
-  formation: { text: "🟡 Formation lap — get to the lobby", color: 0xf1c40f },
-  started: { text: "🟢 Lights out — race underway", color: 0x2ecc71 },
+  open: { text: "Check-in open", color: 0x5865f2 },
+  locked: { text: "🔒 Check-in locked — race starts soon", color: 0xe67e22 },
+  formation: { text: "🔒 Formation lap — get to the lobby", color: 0xf1c40f },
+  started: { text: "🏁 GREEN FLAG — lights out, race underway", color: 0x2ecc71 },
 };
 
 // ── Embed ──────────────────────────────────────────────────────────
@@ -190,21 +226,61 @@ const STATE_DISPLAY: Record<RaceState, { text: string; color: number }> = {
 function mentionList(ids: string[], teams?: TeamLabels): string {
   if (ids.length === 0) return "—";
   const withTeams = !!teams && Object.keys(teams).length > 0;
-  const out: string[] = [];
+
+  // No team data: compact mention list, as before.
+  if (!withTeams) {
+    const out: string[] = [];
+    let len = 0;
+    for (let i = 0; i < ids.length; i++) {
+      const m = `<@${ids[i]}>`;
+      // Discord field values cap at 1024 chars; leave room for "+N more".
+      if (len + m.length + 1 > 980) {
+        out.push(`+${ids.length - i} more`);
+        break;
+      }
+      out.push(m);
+      len += m.length + 1;
+    }
+    return out.join(" ");
+  }
+
+  // Team-first: one line per team, "**Team** · @driver @driver".
+  // Teams are ordered A-Z; drivers without a team go last.
+  const byTeam = new Map<string, string[]>();
+  const noTeam: string[] = [];
+  for (const id of ids) {
+    const team = teams![id];
+    if (!team) {
+      noTeam.push(id);
+      continue;
+    }
+    const list = byTeam.get(team);
+    if (list) list.push(id);
+    else byTeam.set(team, [id]);
+  }
+
+  const groups: { label: string; ids: string[] }[] = [
+    ...[...byTeam.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([label, members]) => ({ label, ids: members })),
+    ...(noTeam.length > 0 ? [{ label: "No team", ids: noTeam }] : []),
+  ];
+
+  const lines: string[] = [];
   let len = 0;
-  for (let i = 0; i < ids.length; i++) {
-    const team = withTeams ? teams![ids[i]] : undefined;
-    const m = team ? `<@${ids[i]}> · ${team}` : `<@${ids[i]}>`;
+  let shown = 0;
+  for (const g of groups) {
+    const line = `**${g.label}** · ${g.ids.map((id) => `<@${id}>`).join(" ")}`;
     // Discord field values cap at 1024 chars; leave room for "+N more".
-    if (len + m.length + 1 > 980) {
-      out.push(`+${ids.length - i} more`);
+    if (len + line.length + 1 > 980) {
+      lines.push(`+${ids.length - shown} more`);
       break;
     }
-    out.push(m);
-    len += m.length + 1;
+    lines.push(line);
+    len += line.length + 1;
+    shown += g.ids.length;
   }
-  // One driver per line when team names are shown, otherwise compact.
-  return out.join(withTeams ? "\n" : " ");
+  return lines.join("\n");
 }
 
 export function buildCheckinEmbed(args: {
@@ -225,7 +301,9 @@ export function buildCheckinEmbed(args: {
 
   const raceMs = post.race_time ? Date.parse(post.race_time) : NaN;
   const raceTimeMs = Number.isNaN(raceMs) ? null : raceMs;
-  const state = STATE_DISPLAY[raceState(raceTimeMs)];
+  const { state: raceStateName, lit } = raceState(raceTimeMs);
+  const state = STATE_DISPLAY[raceStateName];
+  const locked = raceStateName !== "open";
 
   const trackLine = [flag.emoji, `**${track}**`, country ? `· ${country}` : null]
     .filter(Boolean)
@@ -235,9 +313,13 @@ export function buildCheckinEmbed(args: {
     {
       name: "🕒 Race time",
       // <t:..:R> counts down client-side, so it stays live between re-renders.
+      // The lockout line flips to "locked" on the T-15m re-render.
       value:
         raceTimeMs != null
-          ? `<t:${Math.floor(raceTimeMs / 1000)}:F>\n<t:${Math.floor(raceTimeMs / 1000)}:R>`
+          ? `<t:${Math.floor(raceTimeMs / 1000)}:F>\n<t:${Math.floor(raceTimeMs / 1000)}:R>\n` +
+            (locked
+              ? "🔒 Check-in locked"
+              : `⏳ Check-in closes <t:${Math.floor((raceTimeMs - CHECKIN_LOCKOUT_MS) / 1000)}:R>`)
           : "TBC",
       inline: true,
     },
@@ -259,10 +341,14 @@ export function buildCheckinEmbed(args: {
 
   const embed: Record<string, unknown> = {
     title: `${roundLabel(round)} — Division ${divisionCode}`,
-    description: `${trackLine}\n${state.text}`,
+    description: `${trackLine}\n${lightsRow(raceStateName, lit)} ${state.text}`,
     color: state.color,
     fields,
-    footer: { text: "Tap a button to respond — tap it again to clear your response." },
+    footer: {
+      text: locked
+        ? "Check-in is locked — ask a steward if you need a change."
+        : "Tap a button to respond — tap it again to clear your response. Locks 15 min before the race.",
+    },
   };
 
   if (flag.code) {
@@ -275,7 +361,12 @@ export function buildCheckinEmbed(args: {
 // ── Buttons ────────────────────────────────────────────────────────
 
 /** custom_id format is parsed by components/router.ts: checkin_btn:<postId>:<status> */
-export function buildCheckinComponents(postId: string): Record<string, unknown>[] {
+export function buildCheckinComponents(
+  postId: string,
+  /** Pass the post's race_time so the buttons grey out once check-in locks. */
+  raceTime?: string | null
+): Record<string, unknown>[] {
+  const disabled = isCheckinLocked(raceTime);
   return [
     {
       type: 1, // action row (max 5 buttons)
@@ -285,6 +376,7 @@ export function buildCheckinComponents(postId: string): Record<string, unknown>[
         label: STATUS_META[status].label,
         emoji: { name: STATUS_META[status].emoji },
         custom_id: `checkin_btn:${postId}:${status}`,
+        ...(disabled ? { disabled: true } : {}),
       })),
     },
   ];
