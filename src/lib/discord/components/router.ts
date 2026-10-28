@@ -9,6 +9,7 @@ import {
   buildCheckinComponents,
   isCheckinLocked,
   fetchTeamLabels,
+  fetchLeagueTeamNames,
   groupedDiscordIds,
   CHECKIN_STATUSES,
   type CheckinStatus,
@@ -364,7 +365,10 @@ async function handleCheckinButton(interaction: any, customId: string) {
     grouped[s]!.push(discordId);
   }
 
-  const teams = await fetchTeamLabels(league.id, groupedDiscordIds(grouped));
+  const [teams, allTeams] = await Promise.all([
+    fetchTeamLabels(league.id, groupedDiscordIds(grouped)),
+    fetchLeagueTeamNames(league.id),
+  ]);
 
   const embed = buildCheckinEmbed({
     round,
@@ -372,6 +376,7 @@ async function handleCheckinButton(interaction: any, customId: string) {
     post,
     grouped,
     teams,
+    allTeams,
   });
   const components = buildCheckinComponents(post.id, post.race_time);
 
