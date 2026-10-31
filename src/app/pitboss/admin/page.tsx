@@ -75,9 +75,9 @@ function PitBossAdminInner() {
       formData.append('file', file)
       formData.append('league_id', selectedLeague)
       formData.append('role_code', roleCode)
-      formData.append('doc_version', docVersion || '1.0')
+      formData.append('version', docVersion || '1.0')
 
-      const res = await fetch('/api/pitboss/rulebook/upload', {
+      const res = await fetch('/api/pitboss/admin/rulebook/upload', {
         method: 'POST',
         body: formData,
       })
