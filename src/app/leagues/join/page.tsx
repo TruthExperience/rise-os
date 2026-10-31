@@ -79,11 +79,19 @@ export default function JoinLeaguePage() {
 
   return (
     <main className="min-h-screen bg-rise-black px-4 py-8">
-      <div className="mb-8">
-        <h1 className="text-2xl font-black text-white">Join a League</h1>
-        <p className="text-xs text-white/30 uppercase tracking-widest">
-          Open leagues you can join right now
-        </p>
+      <div className="mb-8 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-black text-white">Join a League</h1>
+          <p className="text-xs text-white/30 uppercase tracking-widest">
+            Open leagues you can join right now
+          </p>
+        </div>
+        <button
+          onClick={() => router.push("/leagues/create")}
+          className="flex-shrink-0 rounded-full bg-rise-red px-4 py-2 text-xs font-bold text-white transition active:scale-95"
+        >
+          + Create
+        </button>
       </div>
 
       {loading ? (
