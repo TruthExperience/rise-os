@@ -301,6 +301,31 @@ var GuildGuardian = class {
       console.error("[guardian] version watchdog check failed:", err);
     }
   }
+  // PATCH (2026-10-31): tell Rise OS the bot is in this server so it can auto-map roles,
+  // fill channel settings and sync members. Fire-and-forget; Rise skips guilds that are
+  // already set up, so repeating this on every reconnect is cheap. Needs RISE_OS_URL
+  // (e.g. https://your-app.vercel.app) and GUILD_SYNC_SECRET set on this Worker; no-op if unset.
+  notifyRise(guild) {
+    const base = this.env.RISE_OS_URL?.trim().replace(/\/$/, "");
+    const secret = this.env.GUILD_SYNC_SECRET?.trim();
+    if (!base || !secret) return;
+    const snapshot = {
+      id: guild.id,
+      name: guild.name,
+      owner_id: guild.owner_id,
+      roles: (guild.roles ?? []).map((r) => ({ id: r.id, name: r.name, managed: !!r.managed })),
+      channels: (guild.channels ?? []).slice(0, 500).map((c) => ({ id: c.id, name: c.name, type: c.type, parent_id: c.parent_id ?? null }))
+    };
+    fetch(`${base}/api/pitboss/guild-joined`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-guild-sync-key": secret },
+      body: JSON.stringify({ guild: snapshot })
+    }).then(async (res) => {
+      if (!res.ok) console.error(`[guardian] Rise guild-joined failed for ${guild.id}:`, res.status, (await res.text()).slice(0, 200));
+    }).catch((err) => {
+      console.error(`[guardian] Rise guild-joined request failed for ${guild.id}:`, err);
+    });
+  }
   // Voluntary, self-initiated shutdown. Closes the Gateway connection and
   // flips `retired` so handleClose() knows not to schedule a reconnect.
   async retire() {
@@ -687,6 +712,7 @@ var GuildGuardian = class {
         break;
       case "GUILD_CREATE":
         await this.provisionGuild(data);
+        this.notifyRise(data);
         break;
       case "GUILD_MEMBER_ADD":
         if (this.guildConfigs.has(data.guild_id)) await this.scoreJoin(data.guild_id, data);
