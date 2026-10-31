@@ -3,8 +3,12 @@
 // Returns the selectable driver roster for a league.
 //
 // Source of truth is pitboss.driver_leagues (every league has these rows),
-// joined to pitboss.drivers. pitboss.credential_registry is used only to
-// ENRICH rows with team / car number / primary role when a credential exists.
+// joined to pitboss.drivers. Team is resolved per driver, first hit wins:
+//   1. pitboss.franchise_rosters (active, latest season) -> rise_os.franchises.name
+//   2. pitboss.team_rosters (latest season)              -> pitboss.car_class_teams.team_name
+//   3. Discord team role in driver_leagues.discord_roles  -> pitboss.league_team_roles -> car_class_teams
+//   4. pitboss.credential_registry.team
+// credential_registry also enriches car number / primary role when present.
 // (Previously the roster was built from credential_registry alone, which only
 // has rows for one league, so every other league came back empty.)
 
@@ -43,7 +47,7 @@ export async function GET(
   const { data: members, error: memErr } = await supabase
     .schema('pitboss')
     .from('driver_leagues')
-    .select('driver_id, role, is_driver, driver_number')
+    .select('driver_id, role, is_driver, driver_number, discord_roles')
     .eq('league_id', leagueId)
   if (memErr) return NextResponse.json({ error: memErr.message }, { status: 500 })
 
@@ -79,6 +83,76 @@ export async function GET(
 
   const memberByDriverId = new Map(driverMembers.map((m) => [m.driver_id, m]))
 
+  // 4a. Team via franchise_rosters (latest season, not released).
+  const teamByDriverId = new Map<string, string>()
+  const { data: frRows } = await supabase
+    .schema('pitboss')
+    .from('franchise_rosters')
+    .select('driver_id, franchise_id, season, released_at')
+    .eq('league_id', leagueId)
+    .is('released_at', null)
+    .order('season', { ascending: false })
+  const frLatest = new Map<string, string>() // driver_id -> franchise_id
+  for (const r of frRows ?? []) if (!frLatest.has(r.driver_id)) frLatest.set(r.driver_id, r.franchise_id)
+  const franchiseIds = [...new Set(frLatest.values())]
+  if (franchiseIds.length > 0) {
+    const { data: fr } = await supabase
+      .schema('rise_os')
+      .from('franchises')
+      .select('id, name')
+      .in('id', franchiseIds)
+    const nameById = new Map((fr ?? []).map((f: any) => [f.id, f.name]))
+    for (const [driverId, fid] of frLatest) {
+      const n = nameById.get(fid)
+      if (n) teamByDriverId.set(driverId, n)
+    }
+  }
+
+  // 4b. Team via team_rosters -> car_class_teams, plus Discord role map.
+  const { data: trRows } = await supabase
+    .schema('pitboss')
+    .from('team_rosters')
+    .select('driver_id, car_class_team_id, season')
+    .eq('league_id', leagueId)
+    .order('season', { ascending: false })
+  const { data: roleRows } = await supabase
+    .schema('pitboss')
+    .from('league_team_roles')
+    .select('car_class_team_id, discord_role_id')
+    .eq('league_id', leagueId)
+
+  const cctIds = [
+    ...new Set([
+      ...(trRows ?? []).map((r) => r.car_class_team_id),
+      ...(roleRows ?? []).map((r) => r.car_class_team_id),
+    ].filter(Boolean)),
+  ]
+  const cctName = new Map<string, string>()
+  if (cctIds.length > 0) {
+    const { data: cct } = await supabase
+      .schema('pitboss')
+      .from('car_class_teams')
+      .select('id, team_name')
+      .in('id', cctIds)
+    for (const t of cct ?? []) cctName.set(t.id, t.team_name)
+  }
+  for (const r of trRows ?? []) {
+    if (teamByDriverId.has(r.driver_id)) continue
+    const n = cctName.get(r.car_class_team_id)
+    if (n) teamByDriverId.set(r.driver_id, n)
+  }
+  const teamByRoleId = new Map(
+    (roleRows ?? []).map((r) => [String(r.discord_role_id), cctName.get(r.car_class_team_id)])
+  )
+  for (const m of driverMembers) {
+    if (teamByDriverId.has(m.driver_id)) continue
+    const roles: any[] = Array.isArray(m.discord_roles) ? m.discord_roles : []
+    for (const role of roles) {
+      const n = teamByRoleId.get(String(role?.id ?? role))
+      if (n) { teamByDriverId.set(m.driver_id, n); break }
+    }
+  }
+
   const roster = drivers
     .map((d) => {
       const c = credByDiscordId.get(d.discord_id)
@@ -88,7 +162,7 @@ export async function GET(
         discord_username: d.discord_username ?? '',
         display_name: d.display_name,
         discord_avatar: d.discord_avatar,
-        team: c?.team ?? null,
+        team: teamByDriverId.get(d.id) ?? c?.team ?? null,
         car_number: c?.car_number ?? m?.driver_number ?? null,
         role_primary: c?.role_primary ?? m?.role ?? null,
       }
