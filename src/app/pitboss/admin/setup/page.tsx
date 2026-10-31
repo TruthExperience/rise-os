@@ -77,6 +77,8 @@ function SetupInner() {
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
   const [showOptional, setShowOptional] = useState(true)
+  const [autoRunning, setAutoRunning] = useState(false)
+  const [autoMsg, setAutoMsg] = useState<string | null>(null)
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -121,6 +123,33 @@ function SetupInner() {
     setOpenId(null)
     load()
   }, [load])
+
+  async function runAutoDetect() {
+    setAutoRunning(true)
+    setAutoMsg(null)
+    try {
+      const res = await fetch('/api/pitboss/admin/setup/auto', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ league_id: leagueId }),
+      })
+      const json = await res.json()
+      if (!res.ok || json.ok === false) {
+        setAutoMsg(json.error ?? 'Auto-detect failed')
+      } else {
+        const roles = json.mappedRoles?.length ?? 0
+        const chans = json.channelsSet?.length ?? 0
+        const members =
+          json.members && 'added' in json.members ? `${json.members.added} members added` : 'member sync failed'
+        setAutoMsg(`Done — ${roles} roles mapped, ${chans} channel settings filled, ${members}`)
+        await load()
+      }
+    } catch {
+      setAutoMsg('Network error — try again')
+    } finally {
+      setAutoRunning(false)
+    }
+  }
 
   function openCheck(check: Check) {
     if (openId === check.id) {
@@ -347,6 +376,21 @@ function SetupInner() {
                 style={{ width: `${data.progress.percent}%` }}
               />
             </div>
+            <button
+              onClick={runAutoDetect}
+              disabled={autoRunning || !data.league.discord_server_id}
+              className="mt-4 w-full rounded-xl bg-rise-red py-3 text-sm font-bold text-white disabled:opacity-40"
+            >
+              {autoRunning ? 'Reading your Discord…' : 'Auto-detect from Discord'}
+            </button>
+            {!data.league.discord_server_id && (
+              <p className="mt-2 text-xs text-white/30">Link your Discord server below first.</p>
+            )}
+            {autoMsg && (
+              <p className={`mt-2 text-xs ${autoMsg.startsWith('Done') ? 'text-green-400' : 'text-rise-red'}`}>
+                {autoMsg}
+              </p>
+            )}
             <label className="mt-4 flex items-center gap-2 text-xs text-white/40">
               <input
                 type="checkbox"
