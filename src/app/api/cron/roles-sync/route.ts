@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
-import { syncLeagueRoles } from "@/lib/discord/commands/roles";
+import { autoProvisionGuild } from "@/lib/pitboss/autoProvisionGuild";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * Scheduled full sync of Discord roles -> pitboss.driver_leagues flags for
- * every league that has role mappings. Triggered by the cron in vercel.json.
+ * Scheduled auto-map + full sync of Discord roles -> pitboss.driver_leagues flags for
+ * every league linked to a Discord server. Triggered by the cron in vercel.json.
  * Vercel sends "Authorization: Bearer $CRON_SECRET" when CRON_SECRET is set
  * in the project's environment variables.
  */
@@ -22,40 +22,29 @@ export async function GET(req: NextRequest) {
 
   const supabase = createAdminClient() as any;
 
-  const { data: mapped } = await supabase
-    .schema("pitboss")
-    .from("league_role_map")
-    .select("league_id");
-  const leagueIds = Array.from(
-    new Set(((mapped ?? []) as { league_id: string }[]).map((r) => r.league_id))
-  );
+  // Every league linked to a Discord server -- not just ones with mappings --
+  // so new roles are picked up and mapped automatically.
+  const { data: leagues } = await supabase
+    .schema("rise_os")
+    .from("leagues")
+    .select("id, name, discord_server_id")
+    .not("discord_server_id", "is", null);
 
   const results: Record<string, unknown>[] = [];
 
-  for (const leagueId of leagueIds) {
-    const { data: league } = await supabase
-      .schema("rise_os")
-      .from("leagues")
-      .select("name, discord_server_id")
-      .eq("id", leagueId)
-      .maybeSingle();
-
-    if (!league?.discord_server_id) {
-      results.push({ leagueId, skipped: "no discord_server_id" });
-      continue;
-    }
-
-    const sync = await syncLeagueRoles(leagueId, league.discord_server_id, true);
-    results.push(
-      sync.ok
-        ? {
-            league: league.name,
-            changed: sync.changes.length,
-            applied: sync.applied,
-            failed: sync.failed,
-          }
-        : { league: league.name, error: sync.error }
-    );
+  for (const league of (leagues ?? []) as { id: string; name: string; discord_server_id: string }[]) {
+    const r = await autoProvisionGuild({
+      guildId: league.discord_server_id,
+      leagueId: league.id,
+      force: true,
+    });
+    results.push({
+      league: league.name,
+      ok: r.ok,
+      error: r.error,
+      newMappings: r.mappedRoles?.length ?? 0,
+      members: r.members,
+    });
   }
 
   return NextResponse.json({ ok: true, results });
