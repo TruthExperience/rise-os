@@ -36,7 +36,7 @@ function PitBossAdminInner() {
   // NOTE: added 'cap' — Cap Status tab. Follows the same pattern as
   // 'drivers'/'certs': a button that routes to the standalone page rather
   // than rendering inline (cap-status is its own full page/component).
-  const [activeTab, setActiveTab]     = useState<'rulebook' | 'drivers' | 'certs' | 'cap'>('rulebook')
+  const [activeTab, setActiveTab]     = useState<'setup' | 'rulebook' | 'drivers' | 'certs' | 'cap'>('setup')
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -160,8 +160,8 @@ function PitBossAdminInner() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 mb-6">
-        {(['rulebook', 'drivers', 'certs', 'cap'] as const).map((tab) => (
+      <div className="flex gap-1.5 mb-6">
+        {(['setup', 'rulebook', 'drivers', 'certs', 'cap'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -171,10 +171,27 @@ function PitBossAdminInner() {
                 : 'bg-white/5 text-white/40 border border-white/10'
             }`}
           >
-            {tab === 'rulebook' ? 'Rulebook' : tab === 'drivers' ? 'Drivers' : tab === 'certs' ? 'Certs' : 'Cap'}
+            {tab === 'setup' ? 'Setup' : tab === 'rulebook' ? 'Rulebook' : tab === 'drivers' ? 'Drivers' : tab === 'certs' ? 'Certs' : 'Cap'}
           </button>
         ))}
       </div>
+
+      {/* ── SETUP TAB ── */}
+      {activeTab === 'setup' && (
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <h2 className="text-sm font-bold text-white mb-1">League Setup</h2>
+          <p className="text-xs text-white/30 mb-4">
+            Readiness checklist for Discord, roles, rulebook, teams, points and go-live.
+          </p>
+          <button
+            onClick={() => router.push(`/pitboss/admin/setup?league_id=${selectedLeague}`)}
+            disabled={!selectedLeague}
+            className="w-full rounded-xl bg-rise-red py-3 text-sm font-bold text-white disabled:opacity-40"
+          >
+            Open Setup Dashboard →
+          </button>
+        </div>
+      )}
 
       {/* ── RULEBOOK TAB ── */}
       {activeTab === 'rulebook' && (
