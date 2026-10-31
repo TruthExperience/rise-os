@@ -49,6 +49,7 @@
 
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
+import { autoProvisionGuild } from "@/lib/pitboss/autoProvisionGuild";
 
 // Discord permission bit for ADMINISTRATOR. registry.ts's CommandContext
 // doc comment confirms Discord always includes this for the guild owner
@@ -417,6 +418,35 @@ async function runSetup(guildId: string, input: SetupInput): Promise<string> {
     signupSaveFailed = !saved;
   }
 
+  // Auto role mapping + member sync (same routine the bot runs when it joins
+  // a server). Capped so a big server can't push /setup past its time budget;
+  // if it runs long, the daily sync finishes the job.
+  let autoLine = "";
+  if (leagueId) {
+    try {
+      const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 20000));
+      const auto = await Promise.race([
+        autoProvisionGuild({ guildId, leagueId, force: true }),
+        timeout,
+      ]);
+      if (auto === "timeout") {
+        autoLine = "⏳ Role mapping and member sync are still running. They'll finish shortly or on the next daily sync.";
+      } else if (!auto.ok) {
+        autoLine = `⚠️ Role mapping and member sync didn't run: ${auto.error ?? "unknown error"}`;
+      } else {
+        const mapped = auto.mappedRoles?.length ?? 0;
+        const members =
+          auto.members && "added" in auto.members
+            ? `${auto.members.added} members added`
+            : "member sync failed (check the Server Members Intent)";
+        autoLine = `✅ Roles: ${mapped} new role${mapped === 1 ? "" : "s"} mapped · ${members}`;
+      }
+    } catch (err) {
+      console.error("[setup] auto provision failed:", err);
+      autoLine = "⚠️ Role mapping and member sync hit an error. Use Auto-detect on the setup dashboard to retry.";
+    }
+  }
+
   const lines: string[] = [
     existing
       ? `**${finalName}** setup updated.`
@@ -428,6 +458,7 @@ async function runSetup(guildId: string, input: SetupInput): Promise<string> {
     settingLine("Driver signups", signup.id ? `<#${signup.id}>` : null, signup, "optional, pick with `signup_channel`"),
     settingLine("Steward role", steward.id ? `<@&${steward.id}>` : null, steward, "pick it with `steward_role`"),
   ];
+  if (autoLine) lines.push(autoLine);
 
   if (signupSaveFailed) {
     lines.push(
