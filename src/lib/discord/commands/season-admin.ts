@@ -1122,4 +1122,3 @@ registerCommand("set-standings", async (ctx) => {
     },
   };
 });
-I'm
