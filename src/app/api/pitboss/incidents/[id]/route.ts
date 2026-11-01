@@ -6,6 +6,7 @@ import { pbSteward, pbInfer } from '@/lib/pitboss-llm'
 import type { RuleArticle } from '@/lib/pitboss-llm'
 import { getRequestingDriver, hasStewwardAccess } from '@/lib/pitboss/stewardAccess'
 import { applyPositionDrop } from '@/lib/pitboss/applyResultPenalty'
+import { announceVerdict } from '@/lib/discord/verdict-announcement'
 
 
 const MAX_URLS = 10
@@ -398,6 +399,9 @@ export async function POST(
         resultsNote = "Ruling saved, but the results couldn't be updated. Check this round's results by hand."
       }
     }
+
+    // Announce in the division's incident channel straight away.
+    await announceVerdict(params.id)
 
     return NextResponse.json({
       success: true,
