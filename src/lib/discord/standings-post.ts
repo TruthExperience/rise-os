@@ -13,7 +13,16 @@ import { loadDriverLabels, labelPlain, type DriverLabel } from "@/lib/discord/dr
 const API = "https://discord.com/api/v10";
 const MAX_DESC = 3900;
 
-type Row = { name: string; wins: number; points: number; flag?: string | null };
+type Row = {
+  name: string;
+  wins: number;
+  podiums?: number;
+  poles?: number;
+  fl?: number;
+  dnfs?: number;
+  points: number;
+  flag?: string | null;
+};
 
 // League logo shown in the top-left of each embed (needs a public https URL).
 function authorOf(league: any) {
@@ -49,8 +58,8 @@ function table(rows: Row[]) {
   const lines = rows.map((r, i) => {
     const pos = String(i + 1).padStart(2, " ");
     const pts = String(Number(r.points)).padStart(4, " ");
-    const wins = String(r.wins).padStart(2, " ");
-    return `${pos}  ${pad(r.name, w)}  ${wins}W ${pts}${r.flag ? `  ${r.flag}` : ""}`;
+    const n = (v: number | undefined) => String(v ?? 0).padStart(2, " ");
+    return `${pos}  ${pad(r.name, w)}  ${n(r.wins)}W ${n(r.podiums)}P ${n(r.poles)}PL ${n(r.fl)}FL ${n(r.dnfs)}D ${pts}${r.flag ? `  ${r.flag}` : ""}`;
   });
   let body = "```\n" + lines.join("\n") + "\n```";
   while (body.length > MAX_DESC && lines.length > 1) {
@@ -97,7 +106,10 @@ async function send(token: string, channelId: string, messageId: string | null, 
   return (msg.id as string) ?? messageId;
 }
 
-export async function syncStandingsToDiscord(leagueId: string, opts: { force?: boolean } = {}): Promise<void> {
+export async function syncStandingsToDiscord(
+  leagueId: string,
+  opts: { force?: boolean; round?: number; backfill?: boolean } = {}
+): Promise<void> {
   try {
     const token = process.env.PITBOSS_DISCORD_BOT_TOKEN;
     if (!token) return;
@@ -124,7 +136,7 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
     if (!latest) return;
     const season = String(latest.season);
     const version = `${season}:${latest.row_count}:${latest.last_change}`;
-    if (!opts.force && cfg.last_version === version) return;
+    if (!opts.force && !opts.backfill && cfg.last_version === version) return;
 
     const { data: league } = await pb.from("leagues").select("name, logo_url").eq("id", leagueId).single();
     const { data: roundRows } = await pb
@@ -133,7 +145,7 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
       .eq("league_id", leagueId)
       .eq("season", season)
       .limit(5000);
-    const lastRound = Math.max(0, ...(roundRows ?? []).map((r: any) => Number(r.round) || 0));
+    const lastRound = opts.round ?? Math.max(0, ...(roundRows ?? []).map((r: any) => Number(r.round) || 0));
     const footer = {
       text: `Season ${season}${lastRound ? ` · after round ${lastRound}` : ""}`,
     };
@@ -144,13 +156,52 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
     let teamMsg: string | null = cfg.team_message_id ?? null;
     let statsMsg: string | null = cfg.stats_message_id ?? null;
 
+    // Driver and team standings keep one message per round (like race/quali
+    // results) so earlier weeks stay in the channel. The card URL is pinned to
+    // the round, so an old card keeps showing that round's standings. The
+    // first sync after this change adopts the existing message as the current
+    // round's post instead of posting a duplicate.
+    const pin = lastRound > 0 ? lastRound : null;
+    const postFor = async (kind: "drivers" | "teams", channelId: string, legacyId: string | null) => {
+      if (pin == null) return legacyId;
+      // Backfill never adopts the existing message: it posts a fresh card per round.
+      const { data: row } = await pb
+        .from("round_results_discord")
+        .select("message_id, channel_id")
+        .eq("league_id", leagueId)
+        .eq("season", season)
+        .eq("round", pin)
+        .eq("kind", kind)
+        .maybeSingle();
+      if (row) return row.channel_id === channelId ? row.message_id : null;
+      const { count } = await pb
+        .from("round_results_discord")
+        .select("round", { count: "exact", head: true })
+        .eq("league_id", leagueId)
+        .eq("season", season)
+        .eq("kind", kind);
+      return (count ?? 0) === 0 && !opts.backfill ? legacyId : null;
+    };
+    const savePost = async (kind: "drivers" | "teams", channelId: string, messageId: string | null) => {
+      if (pin == null || !messageId) return;
+      await pb.from("round_results_discord").upsert({
+        league_id: leagueId,
+        season,
+        round: pin,
+        kind,
+        channel_id: channelId,
+        message_id: messageId,
+        updated_at: new Date().toISOString(),
+      });
+    };
+
     // Driver rows are shared by the standings post and the stats text fallback.
     let driverRows: Row[] | null = null;
     const loadDriverRows = async (): Promise<Row[]> => {
       if (driverRows) return driverRows;
       const { data: live } = await pb
         .from("driver_standings_live")
-        .select("driver_id, wins, top3, points")
+        .select("driver_id, wins, top3, points, poles, fastest_laps, dnfs")
         .eq("league_id", leagueId)
         .eq("season", season);
       const ids = (live ?? []).map((r: any) => r.driver_id);
@@ -161,6 +212,10 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
           name: labelPlain(labels[r.driver_id]),
           flag: labels[r.driver_id]?.flag ?? null,
           wins: r.wins,
+          podiums: r.top3,
+          poles: r.poles,
+          fl: r.fastest_laps,
+          dnfs: r.dnfs,
           points: r.points,
         }));
       return driverRows;
@@ -168,12 +223,12 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
 
     if (cfg.driver_channel_id) {
       const rows = await loadDriverRows();
-      driverMsg = await send(token, cfg.driver_channel_id, driverMsg, {
+      driverMsg = await send(token, cfg.driver_channel_id, await postFor("drivers", cfg.driver_channel_id, driverMsg), {
         embeds: [
           {
             author: authorOf(league),
             title: `${league?.name ?? "League"} — Drivers' Championship`,
-            ...standingsBody(rows, buildCardUrl({ kind: "drivers", league_id: leagueId, season })),
+            ...standingsBody(rows, buildCardUrl({ kind: "drivers", league_id: leagueId, season, round: pin })),
             color: 0xe8284a,
             footer,
             timestamp: new Date().toISOString(),
@@ -181,12 +236,13 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
         ],
         allowed_mentions: { parse: [] },
       });
+      await savePost("drivers", cfg.driver_channel_id, driverMsg);
     }
 
     if (cfg.team_channel_id) {
       const { data: live } = await pb
         .from("constructor_standings_live")
-        .select("franchise_id, wins, top3, points")
+        .select("franchise_id, wins, top3, points, poles, fastest_laps, dnfs")
         .eq("league_id", leagueId)
         .eq("season", season);
       const ids = (live ?? []).map((r: any) => r.franchise_id);
@@ -196,13 +252,21 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
       const names = Object.fromEntries((teams ?? []).map((t: any) => [t.id, t.name]));
       const rows: Row[] = [...(live ?? [])]
         .sort(byPoints)
-        .map((r: any) => ({ name: names[r.franchise_id] ?? "Unknown team", wins: r.wins, points: r.points }));
-      teamMsg = await send(token, cfg.team_channel_id, teamMsg, {
+        .map((r: any) => ({
+          name: names[r.franchise_id] ?? "Unknown team",
+          wins: r.wins,
+          podiums: r.top3,
+          poles: r.poles,
+          fl: r.fastest_laps,
+          dnfs: r.dnfs,
+          points: r.points,
+        }));
+      teamMsg = await send(token, cfg.team_channel_id, await postFor("teams", cfg.team_channel_id, teamMsg), {
         embeds: [
           {
             author: authorOf(league),
             title: `${league?.name ?? "League"} — Constructors' Championship`,
-            ...standingsBody(rows, buildCardUrl({ kind: "teams", league_id: leagueId, season })),
+            ...standingsBody(rows, buildCardUrl({ kind: "teams", league_id: leagueId, season, round: pin })),
             color: 0xe8284a,
             footer,
             timestamp: new Date().toISOString(),
@@ -210,12 +274,13 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
         ],
         allowed_mentions: { parse: [] },
       });
+      await savePost("teams", cfg.team_channel_id, teamMsg);
     }
 
     // Full driver stats: two card images in one message (points/podiums and
     // finish/quali averages). Falls back to the plain standings table when
     // card URLs can't be built.
-    if (cfg.stats_channel_id) {
+    if (cfg.stats_channel_id && !opts.backfill) {
       const cardA = buildCardUrl({ kind: "stats", league_id: leagueId, season });
       const cardB = buildCardUrl({ kind: "stats2", league_id: leagueId, season });
       const title = `${league?.name ?? "League"} — Driver Stats`;
@@ -241,6 +306,8 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
       });
     }
 
+    // A backfill posts old rounds; it must not overwrite the latest message ids.
+    if (opts.backfill) return;
     await pb
       .from("standings_discord_sync")
       .update({
@@ -254,6 +321,22 @@ export async function syncStandingsToDiscord(leagueId: string, opts: { force?: b
   } catch (err) {
     console.error("[standings-post] sync failed", err);
   }
+}
+
+// One-off: post a pinned standings card for every round already in the
+// database, oldest first, so the driver/team channels read round 1, 2, 3...
+// Run it BEFORE the normal sync adopts the existing message, and delete the
+// old live messages afterwards (the backfill leaves them untouched).
+export async function backfillStandingsToDiscord(leagueId: string): Promise<number[]> {
+  const pb = createAdminClient().schema("pitboss");
+  const { data: seasonRows } = await pb.from("results_last_change").select("season").eq("league_id", leagueId);
+  const seasons = (seasonRows ?? []).map((r: any) => String(r.season));
+  const season = seasons.sort((a, b) => Number(b) - Number(a) || b.localeCompare(a))[0];
+  if (!season) return [];
+  const { data: rr } = await pb.from("results").select("round").eq("league_id", leagueId).eq("season", season).limit(5000);
+  const rounds = [...new Set((rr ?? []).map((r: any) => Number(r.round)).filter((n: number) => n > 0))].sort((a, b) => a - b);
+  for (const r of rounds) await syncStandingsToDiscord(leagueId, { backfill: true, round: r });
+  return rounds;
 }
 
 // ---------------------------------------------------------------------------
