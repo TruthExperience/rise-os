@@ -19,7 +19,7 @@ const ROW = 64;
 const MAX_ROWS = 40;
 const KINDS: CardKind[] = ["race", "quali", "drivers", "teams", "stats", "stats2"];
 
-type Line = { pos: string; name: string; sub: string; right: string };
+type Line = { pos: string; name: string; sub: string; right: string; gap?: string };
 
 const num = (v: unknown) => String(Number(v ?? 0));
 
@@ -263,7 +263,15 @@ export async function GET(req: NextRequest) {
         if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
         return (a.finish_position ?? 999) - (b.finish_position ?? 999);
       });
-    const poleTime = list.find((r: any) => r.qualifying_position === 1)?.quali_time_seconds;
+    // Gap reference = pole lap; falls back to the quickest lap if pole has no time.
+    const qualiTimes = list.map((r: any) => Number(r.quali_time_seconds)).filter((t: number) => Number.isFinite(t) && t > 0);
+    const poleRow = list.find((r: any) => r.qualifying_position === 1);
+    const poleTime =
+      poleRow?.quali_time_seconds != null
+        ? Number(poleRow.quali_time_seconds)
+        : qualiTimes.length
+          ? Math.min(...qualiTimes)
+          : null;
     const winner = list.find((r: any) => !r.dnf && r.race_time_seconds != null);
     const winnerTime = winner ? Number(winner.race_time_seconds) : null;
     lines = list.map((r: any, i: number) =>
@@ -271,9 +279,10 @@ export async function GET(req: NextRequest) {
         ? {
             pos: String(r.qualifying_position),
             name: names[r.driver_id] ?? "Unknown",
-            sub:
-              r.quali_time_seconds != null && poleTime != null && r.qualifying_position !== 1
-                ? `+${(Number(r.quali_time_seconds) - Number(poleTime)).toFixed(3)}`
+            sub: "",
+            gap:
+              r.quali_time_seconds != null && poleTime != null && Number(r.quali_time_seconds) - poleTime > 0
+                ? `+${(Number(r.quali_time_seconds) - poleTime).toFixed(3)}`
                 : "",
             right: fmtLap(r.quali_time_seconds),
           }
@@ -424,6 +433,11 @@ export async function GET(req: NextRequest) {
                     </div>
                   ) : null}
                 </div>
+                {l.gap !== undefined ? (
+                  <div style={{ display: "flex", justifyContent: "flex-end", width: 150, marginRight: 24, fontSize: 24, fontWeight: 700, color: "#e8284a" }}>
+                    {l.gap}
+                  </div>
+                ) : null}
                 <div style={{ display: "flex", fontSize: 30, fontWeight: 800 }}>{l.right}</div>
               </div>
             ))
