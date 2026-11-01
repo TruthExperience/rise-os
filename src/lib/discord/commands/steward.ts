@@ -528,6 +528,50 @@ async function findIncidentByChannel(leagueId: string, channelId: string) {
   return data;
 }
 
+async function findAppealByChannel(leagueId: string, channelId: string) {
+  const supabase = createAdminClient();
+  const { data } = await supabase
+    .schema("pitboss")
+    .from("incident_appeals")
+    .select(
+      "id, status, incident_id, appealed_by, drivers!incident_appeals_appealed_by_fkey(discord_id), incidents:incident_id(ticket_number, accused_driver_id)"
+    )
+    .eq("league_id", leagueId)
+    .eq("ticket_channel_id", channelId)
+    .maybeSingle();
+  return data;
+}
+
+// For incident-only commands (analyse, verdict, assign, requesthelp):
+// if the channel is an appeal ticket, say where appeals are decided
+// instead of the generic "not linked" error.
+async function notLinkedMessage(leagueId: string, channelId: string) {
+  const appeal = await findAppealByChannel(leagueId, channelId);
+  if (appeal) {
+    return "This is an appeal channel — that command only works in the original incident ticket. Appeals are decided with `/appeal review`.";
+  }
+  return "This channel isn't linked to an incident or appeal ticket.";
+}
+
+// Discord ids of the appellant and the accused driver on an appeal.
+async function getAppealPartyDiscordIds(appeal: any): Promise<string[]> {
+  const ids: string[] = [];
+  const appellant = appeal?.drivers?.discord_id as string | undefined;
+  if (appellant) ids.push(appellant);
+  const accusedId = appeal?.incidents?.accused_driver_id as string | undefined;
+  if (accusedId) {
+    const supabase = createAdminClient();
+    const { data } = await supabase
+      .schema("pitboss")
+      .from("drivers")
+      .select("discord_id")
+      .eq("id", accusedId)
+      .maybeSingle();
+    if (data?.discord_id && !ids.includes(data.discord_id)) ids.push(data.discord_id);
+  }
+  return ids;
+}
+
 type RespondTargetIncident = {
   id: string;
   status: string;
@@ -700,9 +744,42 @@ registerCommand("steward_close", async (ctx) => {
 
   const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
+    const appeal = await findAppealByChannel(leagueId, channelId);
+    if (!appeal) {
+      return {
+        content: "This channel isn't linked to an incident or appeal ticket.",
+        ephemeral: true,
+      };
+    }
+    // Appeals have no closed state in the DB: closing archives the
+    // transcript and makes the channel read-only for the parties.
+    // The appeal itself is decided with /appeal review.
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      defer: true,
       ephemeral: true,
+      background: async () => {
+        const transcript = await buildTicketTranscript(channelId);
+        const partyIds = await getAppealPartyDiscordIds(appeal);
+        if (partyIds.length > 0) {
+          await lockTicketChannel(channelId, partyIds);
+        }
+        await postTicketMessage(
+          channelId,
+          "🔒 This appeal ticket has been closed by a steward. Use `/steward delete` to remove this channel once the appeal is decided."
+        );
+        const supabase = createAdminClient();
+        const archiveWarning = await archiveTranscriptToChannel(
+          supabase,
+          leagueId,
+          channelId,
+          appeal.incident_id,
+          (appeal as any).incidents?.ticket_number ?? null,
+          transcript
+        );
+        return {
+          content: `Appeal ticket closed and transcript archived.${archiveWarning ?? ""}`,
+        };
+      },
     };
   }
   if (incident.ticket_closed_at) {
@@ -797,8 +874,27 @@ registerCommand("steward_transcript", async (ctx) => {
 
   const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
+    const appeal = await findAppealByChannel(leagueId, channelId);
+    if (!appeal) {
+      return {
+        content: "This channel isn't linked to an incident or appeal ticket.",
+        ephemeral: true,
+      };
+    }
+    const appealTranscript = await buildTicketTranscript(channelId);
+    if (!appealTranscript) {
+      return { content: "Couldn't build a transcript for this ticket.", ephemeral: true };
+    }
+    const appealWarning = await archiveTranscriptToChannel(
+      createAdminClient(),
+      leagueId,
+      channelId,
+      appeal.incident_id,
+      (appeal as any).incidents?.ticket_number ?? null,
+      appealTranscript
+    );
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      content: `Appeal transcript archived.${appealWarning ?? ""}`,
       ephemeral: true,
     };
   }
@@ -855,10 +951,35 @@ registerCommand("steward_delete", async (ctx) => {
 
   const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
-    return {
-      content: "This channel isn't linked to an incident ticket.",
-      ephemeral: true,
-    };
+    const appeal = await findAppealByChannel(leagueId, channelId);
+    if (!appeal) {
+      return {
+        content: "This channel isn't linked to an incident or appeal ticket.",
+        ephemeral: true,
+      };
+    }
+    if (appeal.status === "open") {
+      return {
+        content: "This appeal is still open — decide it with `/appeal review` before deleting the channel.",
+        ephemeral: true,
+      };
+    }
+    // Archive the transcript first so nothing is lost if /steward close
+    // was never run on this appeal.
+    const appealTranscript = await buildTicketTranscript(channelId);
+    await archiveTranscriptToChannel(
+      createAdminClient(),
+      leagueId,
+      channelId,
+      appeal.incident_id,
+      (appeal as any).incidents?.ticket_number ?? null,
+      appealTranscript
+    );
+    const appealDeleted = await deleteTicketChannel(channelId);
+    if (!appealDeleted) {
+      return { content: "Couldn't delete the channel — check my permissions.", ephemeral: true };
+    }
+    return { content: "🗑 Appeal ticket deleted.", ephemeral: true };
   }
   if (!incident.ticket_closed_at) {
     return {
@@ -898,13 +1019,14 @@ registerCommand("steward_adduser", async (ctx) => {
   if (denied) return { content: denied, ephemeral: true };
 
   const incident = await findIncidentByChannel(leagueId, channelId);
-  if (!incident) {
+  const appeal = incident ? null : await findAppealByChannel(leagueId, channelId);
+  if (!incident && !appeal) {
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      content: "This channel isn't linked to an incident or appeal ticket.",
       ephemeral: true,
     };
   }
-  if (incident.ticket_closed_at) {
+  if (incident?.ticket_closed_at) {
     return {
       content: "This ticket is closed — reopen it before adding anyone.",
       ephemeral: true,
@@ -961,9 +1083,10 @@ registerCommand("steward_removeuser", async (ctx) => {
   if (denied) return { content: denied, ephemeral: true };
 
   const incident = await findIncidentByChannel(leagueId, channelId);
-  if (!incident) {
+  const appeal = incident ? null : await findAppealByChannel(leagueId, channelId);
+  if (!incident && !appeal) {
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      content: "This channel isn't linked to an incident or appeal ticket.",
       ephemeral: true,
     };
   }
@@ -975,7 +1098,7 @@ registerCommand("steward_removeuser", async (ctx) => {
 
   const force = Boolean(ctx.options.force);
 
-  const reporterDiscordId = (incident as any).drivers?.discord_id as
+  const reporterDiscordId = ((incident ?? appeal) as any)?.drivers?.discord_id as
     | string
     | undefined;
   const isOpener = targetUserId === reporterDiscordId;
@@ -1001,7 +1124,7 @@ registerCommand("steward_removeuser", async (ctx) => {
   );
 
   let appealPromptNote = "";
-  if (isOpener && (incident.status === "resolved" || incident.status === "dismissed")) {
+  if (incident && isOpener && (incident.status === "resolved" || incident.status === "dismissed")) {
     const sent = await sendAppealPromptDM(
       targetUserId,
       incident.id,
@@ -1268,7 +1391,7 @@ registerCommand("steward_analyse", async (ctx) => {
   const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      content: await notLinkedMessage(leagueId, channelId),
       ephemeral: true,
     };
   }
@@ -1454,7 +1577,7 @@ registerCommand("steward_verdict", async (ctx) => {
   const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      content: await notLinkedMessage(leagueId, channelId),
       ephemeral: true,
     };
   }
@@ -1600,7 +1723,7 @@ registerCommand("steward_assign", async (ctx) => {
   const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      content: await notLinkedMessage(leagueId, channelId),
       ephemeral: true,
     };
   }
@@ -1687,7 +1810,7 @@ registerCommand("steward_requesthelp", async (ctx) => {
   const incident = await findIncidentByChannel(leagueId, channelId);
   if (!incident) {
     return {
-      content: "This channel isn't linked to an incident ticket.",
+      content: await notLinkedMessage(leagueId, channelId),
       ephemeral: true,
     };
   }
