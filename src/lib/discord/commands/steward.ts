@@ -15,6 +15,7 @@ import {
   sendAppealPromptDM,
 } from "../tickets";
 import { resolveIncidentChannel, resolveTranscriptChannel } from "../incident-channel";
+import { announceVerdict } from "../verdict-announcement";
 import { hasDiscordStewardAccess } from "../permissions";
 import { applyPositionDrop } from "@/lib/pitboss/applyResultPenalty";
 import { buildIncidentLedgerRows } from "@/lib/pitboss/incidentPenaltyRows";
@@ -1697,6 +1698,9 @@ registerCommand("steward_verdict", async (ctx) => {
       .filter(Boolean)
       .join("\n")
   );
+
+  // Announce in the division's incident channel straight away.
+  await announceVerdict(incident.id, { skipChannelId: channelId });
 
   const replyLines = [
     "Verdict recorded and posted to the ticket.",
