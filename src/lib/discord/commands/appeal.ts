@@ -2,9 +2,15 @@
 import { resolveIncidentChannel } from "../incident-channel";
 import { registerCommand, type CommandContext } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
-import { postTicketMessage, sendDirectMessage, createAppealTicket } from "../tickets";
+import {
+  postTicketMessage,
+  sendDirectMessage,
+  createAppealTicket,
+  buildTicketTranscript,
+  lockTicketChannel,
+} from "../tickets";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
-import { getTicketLabel } from "./steward";
+import { getTicketLabel, archiveTranscriptToChannel } from "./steward";
 import { applyPositionDrop, revertIncidentAdjustments } from "@/lib/pitboss/applyResultPenalty";
 import { buildIncidentLedgerRows } from "@/lib/pitboss/incidentPenaltyRows";
 import { postRoundResultsToDiscord, syncStandingsToDiscord } from "@/lib/discord/standings-post";
@@ -761,6 +767,47 @@ registerCommand("appeal_review", async (ctx) => {
   // one was created — otherwise that channel never hears the result.
   if (appeal.ticket_channel_id) {
     await postTicketMessage(appeal.ticket_channel_id, decisionLines.join("\n"));
+
+    // The appeal is decided, so wrap up its ticket channel: archive the
+    // transcript and make the channel read-only for the parties. Best
+    // effort — a failure here must never undo or hide the decision.
+    // Stewards can remove the channel afterwards with /steward delete.
+    try {
+      const transcript = await buildTicketTranscript(appeal.ticket_channel_id);
+
+      const partyIds: string[] = [];
+      if (appellantDiscordId) partyIds.push(appellantDiscordId);
+      if (incident.accused_driver_id) {
+        const { data: accusedDriver } = await supabase
+          .schema("pitboss")
+          .from("drivers")
+          .select("discord_id")
+          .eq("id", incident.accused_driver_id)
+          .maybeSingle();
+        if (accusedDriver?.discord_id && !partyIds.includes(accusedDriver.discord_id)) {
+          partyIds.push(accusedDriver.discord_id);
+        }
+      }
+      if (partyIds.length > 0) {
+        await lockTicketChannel(appeal.ticket_channel_id, partyIds);
+      }
+
+      await archiveTranscriptToChannel(
+        supabase,
+        leagueId,
+        appeal.ticket_channel_id,
+        incident.id,
+        incident.ticket_number ?? null,
+        transcript
+      );
+
+      await postTicketMessage(
+        appeal.ticket_channel_id,
+        "🔒 This appeal ticket is now closed and read-only. A transcript has been archived. A steward can remove this channel with `/steward delete`."
+      );
+    } catch (err) {
+      console.error("[appeal_review] ticket wrap-up failed:", err);
+    }
   }
 
   // And post it into the league's dedicated appeals channel too, if
