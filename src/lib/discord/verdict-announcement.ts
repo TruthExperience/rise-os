@@ -6,9 +6,9 @@ import { resolveIncidentChannel } from "./incident-channel";
 // (rise_os.league_divisions.discord_incident_channel_id, e.g. T1 26) the
 // moment the ruling is saved.
 //
-// Only divisions that have their own incident channel set announce; there is
-// deliberately no fallback to the league-wide channel, so leagues that never
-// linked a division channel see no change.
+// Channel: the accused driver's division incident channel, falling back to
+// the league-wide incident channel (rise_os.leagues.discord_incident_channel_id)
+// when the driver has no division or the division has no channel set.
 //
 // Never throws and never blocks or fails the ruling itself.
 export async function announceVerdict(
@@ -28,7 +28,18 @@ export async function announceVerdict(
       .maybeSingle();
     if (!incident || !incident.verdict) return;
 
-    const channelId = await resolveIncidentChannel(incident.league_id, incident.id, null);
+    const { data: league } = await supabase
+      .schema("rise_os")
+      .from("leagues")
+      .select("discord_incident_channel_id")
+      .eq("id", incident.league_id)
+      .maybeSingle();
+
+    const channelId = await resolveIncidentChannel(
+      incident.league_id,
+      incident.id,
+      league?.discord_incident_channel_id ?? null
+    );
     if (!channelId || channelId === opts.skipChannelId) return;
 
     let accused = "";
