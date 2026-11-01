@@ -18,6 +18,9 @@
     "src/app/api/cron/roles-sync/route.ts": {
       "maxDuration": 60
     },
+    "src/app/api/cron/discord-ticket-sweep/route.ts": {
+      "maxDuration": 60
+    },
     "src/app/api/pitboss/telemetry/coach/backfill/route.ts": {
       "maxDuration": 300
     }
@@ -42,6 +45,10 @@
     {
       "path": "/api/cron/hbcu-rosters",
       "schedule": "0 9 * * 1"
+    },
+    {
+      "path": "/api/cron/discord-ticket-sweep",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
