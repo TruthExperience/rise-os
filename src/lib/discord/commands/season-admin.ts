@@ -188,6 +188,20 @@ function csvNumber(value: string | undefined, field: string): number | null {
   return n;
 }
 
+/** Parses seconds ("83.456"), "1:23.456" or "1:23:45.678" into seconds. */
+function csvTime(value: string | undefined, field: string): number | null {
+  if (value === undefined || value.trim() === "") return null;
+  const parts = value.trim().split(":");
+  if (parts.length > 3) throw new Error(`${field} "${value}" isn't a time`);
+  let total = 0;
+  for (const part of parts) {
+    const n = Number(part);
+    if (!Number.isFinite(n) || n < 0) throw new Error(`${field} "${value}" isn't a time`);
+    total = total * 60 + n;
+  }
+  return total;
+}
+
 function csvBool(value: string | undefined): boolean {
   return !!value && ["true", "yes", "y", "1", "x"].includes(value.trim().toLowerCase());
 }
@@ -650,6 +664,9 @@ interface ResultInput {
   fastestLap: boolean;
   pointsOverride: number | null;
   sprintFinish: number | null;
+  qualiTimeSeconds?: number | null;
+  raceTimeSeconds?: number | null;
+  bestLapSeconds?: number | null;
 }
 
 /**
@@ -705,6 +722,9 @@ async function saveResult(input: ResultInput, table: PointsTable) {
         franchise_id: roster?.franchise_id ?? null,
         sprint_finish_position: input.sprintFinish,
         sprint_points_earned: sprintPoints,
+        ...(input.qualiTimeSeconds != null ? { quali_time_seconds: input.qualiTimeSeconds } : {}),
+        ...(input.raceTimeSeconds != null && !input.dnf ? { race_time_seconds: input.raceTimeSeconds } : {}),
+        ...(input.bestLapSeconds != null ? { best_lap_seconds: input.bestLapSeconds } : {}),
       },
       { onConflict: "league_id,driver_id,season,round" }
     );
@@ -864,7 +884,9 @@ async function findDriverByToken(token: string) {
  * CSV columns (header row required, any order):
  *   driver (Discord ID, or exact username / display name), finish, quali,
  *   dnf (true/false), dnf_reason, fastest_lap (true/false), points
- *   (overrides the points table), sprint_finish
+ *   (overrides the points table), sprint_finish,
+ *   quali_time, race_time (winner's total time, or each driver's total),
+ *   best_lap  (all accept 83.456 or 1:23.456)
  * Re-importing a driver for the same round overwrites their row.
  */
 registerCommand("import-results", async (ctx) => {
@@ -932,6 +954,9 @@ registerCommand("import-results", async (ctx) => {
               fastestLap: csvBool(rec.fastest_lap),
               pointsOverride: csvNumber(rec.points, "points"),
               sprintFinish: csvInt(rec.sprint_finish, "sprint_finish"),
+              qualiTimeSeconds: csvTime(rec.quali_time, "quali_time"),
+              raceTimeSeconds: csvTime(rec.race_time, "race_time"),
+              bestLapSeconds: csvTime(rec.best_lap, "best_lap"),
             },
             table
           );
