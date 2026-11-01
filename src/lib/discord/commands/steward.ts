@@ -678,7 +678,7 @@ async function getIncidentEvidence(
 // Shared by /steward close and /steward transcript — both need to
 // push the full transcript to the league's archive channel as a file
 // (a chat message caps at ~2000 chars; a file attachment doesn't).
-async function archiveTranscriptToChannel(
+export async function archiveTranscriptToChannel(
   supabase: ReturnType<typeof createAdminClient>,
   leagueId: string,
   ticketChannelId: string,
