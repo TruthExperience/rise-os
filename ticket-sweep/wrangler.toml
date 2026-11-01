@@ -1,0 +1,24 @@
+name = "ticket-sweep"
+main = "src/index.ts"
+compatibility_date = "2026-09-30"
+
+# Hits /api/cron/discord-ticket-sweep every 5 minutes.
+# Vercel Hobby only allows daily crons, so the schedule lives here.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+SWEEP_URL = "https://YOUR-PROD-DOMAIN/api/cron/discord-ticket-sweep"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+# Secrets (set via `wrangler secret put <NAME>`, not in this file):
+#   CRON_SECRET   (same value as Vercel's CRON_SECRET)
