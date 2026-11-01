@@ -9,6 +9,7 @@ import { createAdminClient } from "@/lib/supabase/server";
 import { verifyCard, type CardKind } from "@/lib/discord/card-url";
 import { loadDriverLabels, labelFull } from "@/lib/discord/driver-labels";
 import { computeExtraStats } from "@/lib/pitboss/driver-stats";
+import { standingsThrough } from "@/lib/pitboss/standings-through";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,7 +50,7 @@ const raceTimeLabel = (r: any, winnerTime: number | null) => {
 const STATS_A: [string, string, number][] = [
   ["points", "PTS", 84], ["gain", "GAIN", 90], ["interval", "INT", 84], ["gap", "GAP", 84],
   ["p1", "P1", 64], ["p2", "P2", 64], ["p3", "P3", 64], ["top5", "TOP 5", 90], ["top10", "TOP 10", 100],
-  ["poles", "POLE", 84], ["rds_led", "RDS LED", 120], ["dnfs", "DNF", 76], ["events", "EVENTS", 110],
+  ["poles", "POLE", 84], ["fastest_laps", "FL", 64], ["rds_led", "RDS LED", 120], ["dnfs", "DNF", 76], ["events", "EVENTS", 110],
 ];
 const STATS_B: [string, string, number][] = [
   ["points", "PTS", 84], ["best_r", "BEST R", 110], ["worst_r", "WORST R", 124], ["avg_r", "AVG R", 100],
@@ -86,6 +87,9 @@ export async function GET(req: NextRequest) {
   const leagueId = sp.get("league_id");
   const season = sp.get("season");
   const roundRaw = sp.get("round");
+  // Standings/stats cards pinned to "after round N" when a round is given.
+  const upTo = Number.isInteger(Number(roundRaw)) && Number(roundRaw) > 0 ? Number(roundRaw) : null;
+  const afterRound = upTo != null ? ` · after round ${upTo}` : "";
 
   if (!kind || !KINDS.includes(kind) || !leagueId || !season) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
@@ -102,29 +106,38 @@ export async function GET(req: NextRequest) {
 
   // ---- Full driver stats cards -------------------------------------------
   if (kind === "stats" || kind === "stats2") {
-    const { data: live } = await pb
-      .from("driver_standings_live")
-      .select("driver_id, wins, top3, top5, top10, poles, fastest_laps, dnfs, points")
-      .eq("league_id", leagueId)
-      .eq("season", season);
-    const { data: seeded } = await pb
-      .from("driver_standings")
-      .select("driver_id")
-      .eq("league_id", leagueId)
-      .eq("season", season);
-    const have = new Set((live ?? []).map((r: any) => r.driver_id));
-    const base: any[] = [...(live ?? [])];
-    for (const d of seeded ?? []) {
-      if (!have.has(d.driver_id)) {
-        base.push({ driver_id: d.driver_id, wins: 0, top3: 0, top5: 0, top10: 0, poles: 0, fastest_laps: 0, dnfs: 0, points: 0 });
+    let base: any[];
+    let raw: any[] | null;
+    if (upTo != null) {
+      const st = await standingsThrough(pb, leagueId, season, upTo, "driver");
+      base = st.rows;
+      raw = st.raw;
+    } else {
+      const { data: live } = await pb
+        .from("driver_standings_live")
+        .select("driver_id, wins, top3, top5, top10, poles, fastest_laps, dnfs, points")
+        .eq("league_id", leagueId)
+        .eq("season", season);
+      const { data: seeded } = await pb
+        .from("driver_standings")
+        .select("driver_id")
+        .eq("league_id", leagueId)
+        .eq("season", season);
+      const have = new Set((live ?? []).map((r: any) => r.driver_id));
+      base = [...(live ?? [])];
+      for (const d of seeded ?? []) {
+        if (!have.has(d.driver_id)) {
+          base.push({ driver_id: d.driver_id, wins: 0, top3: 0, top5: 0, top10: 0, poles: 0, fastest_laps: 0, dnfs: 0, points: 0 });
+        }
       }
+      const { data: rawAll } = await pb
+        .from("results_with_team")
+        .select("driver_id, round, finish_position, qualifying_position, dnf, points_earned, sprint_points_earned")
+        .eq("league_id", leagueId)
+        .eq("season", season)
+        .limit(10000);
+      raw = rawAll ?? [];
     }
-    const { data: raw } = await pb
-      .from("results_with_team")
-      .select("driver_id, round, finish_position, qualifying_position, dnf, points_earned, sprint_points_earned")
-      .eq("league_id", leagueId)
-      .eq("season", season)
-      .limit(10000);
     const extra = computeExtraStats((raw ?? []) as any[]);
     const labels = await loadDriverLabels(pb, leagueId, base.map((r: any) => r.driver_id) as string[]);
 
@@ -155,7 +168,7 @@ export async function GET(req: NextRequest) {
                 {kind === "stats" ? "DRIVER STATS" : "DRIVER STATS · FINISH & QUALIFYING"}
               </div>
               <div style={{ display: "flex", fontSize: 20, color: "rgba(255,255,255,0.45)", marginTop: 6 }}>
-                Season {season}
+                Season {season}{afterRound}
               </div>
             </div>
           </div>
@@ -281,11 +294,16 @@ export async function GET(req: NextRequest) {
     const byPoints = (a: any, b: any) =>
       Number(b.points) - Number(a.points) || b.wins - a.wins || b.top3 - a.top3;
     if (kind === "drivers") {
-      const { data: live } = await pb
-        .from("driver_standings_live")
-        .select("driver_id, wins, top3, points")
-        .eq("league_id", leagueId)
-        .eq("season", season);
+      const live =
+        upTo != null
+          ? (await standingsThrough(pb, leagueId, season, upTo, "driver")).rows
+          : (
+              await pb
+                .from("driver_standings_live")
+                .select("driver_id, wins, top3, points, poles, fastest_laps, dnfs")
+                .eq("league_id", leagueId)
+                .eq("season", season)
+            ).data;
       const ids = (live ?? []).map((r: any) => r.driver_id);
       const labels = await loadDriverLabels(pb, leagueId, ids as string[]);
       const names = Object.fromEntries(Object.entries(labels).map(([id, l]) => [id, labelFull(l)]));
@@ -293,15 +311,20 @@ export async function GET(req: NextRequest) {
       lines = [...(live ?? [])].sort(byPoints).map((r: any, i: number) => ({
         pos: String(i + 1),
         name: names[r.driver_id] ?? "Unknown",
-        sub: `${r.wins} win${r.wins === 1 ? "" : "s"}`,
+        sub: `${r.wins} win${r.wins === 1 ? "" : "s"} · ${r.top3 ?? 0} podium${r.top3 === 1 ? "" : "s"} · ${r.poles ?? 0} pole${r.poles === 1 ? "" : "s"} · ${r.fastest_laps ?? 0} FL · ${r.dnfs ?? 0} DNF`,
         right: num(r.points),
       }));
     } else {
-      const { data: live } = await pb
-        .from("constructor_standings_live")
-        .select("franchise_id, wins, top3, points")
-        .eq("league_id", leagueId)
-        .eq("season", season);
+      const live =
+        upTo != null
+          ? (await standingsThrough(pb, leagueId, season, upTo, "team")).rows
+          : (
+              await pb
+                .from("constructor_standings_live")
+                .select("franchise_id, wins, top3, points, poles, fastest_laps, dnfs")
+                .eq("league_id", leagueId)
+                .eq("season", season)
+            ).data;
       const ids = (live ?? []).map((r: any) => r.franchise_id);
       const { data: teams } = ids.length
         ? await supabase.schema("rise_os").from("franchises").select("id, name").in("id", ids)
@@ -311,11 +334,11 @@ export async function GET(req: NextRequest) {
       lines = [...(live ?? [])].sort(byPoints).map((r: any, i: number) => ({
         pos: String(i + 1),
         name: names[r.franchise_id] ?? "Unknown team",
-        sub: `${r.wins} win${r.wins === 1 ? "" : "s"}`,
+        sub: `${r.wins} win${r.wins === 1 ? "" : "s"} · ${r.top3 ?? 0} podium${r.top3 === 1 ? "" : "s"} · ${r.poles ?? 0} pole${r.poles === 1 ? "" : "s"} · ${r.fastest_laps ?? 0} FL · ${r.dnfs ?? 0} DNF`,
         right: num(r.points),
       }));
     }
-    subtitle = `Season ${season}`;
+    subtitle = `Season ${season}${afterRound}`;
   }
 
   const shown = lines.slice(0, MAX_ROWS);
