@@ -45,10 +45,6 @@
     {
       "path": "/api/cron/hbcu-rosters",
       "schedule": "0 9 * * 1"
-    },
-    {
-      "path": "/api/cron/discord-ticket-sweep",
-      "schedule": "*/5 * * * *"
     }
   ]
 }
