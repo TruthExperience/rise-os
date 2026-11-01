@@ -1,6 +1,8 @@
 name = "ticket-sweep"
 main = "src/index.ts"
 compatibility_date = "2026-09-30"
+workers_dev = false
+preview_urls = false
 
 # Hits /api/cron/discord-ticket-sweep every 5 minutes.
 # Vercel Hobby only allows daily crons, so the schedule lives here.
@@ -8,7 +10,7 @@ compatibility_date = "2026-09-30"
 crons = ["*/5 * * * *"]
 
 [vars]
-SWEEP_URL = "https://YOUR-PROD-DOMAIN/api/cron/discord-ticket-sweep"
+SWEEP_URL = "https://rise-os-gules.vercel.app/api/cron/discord-ticket-sweep"
 
 [observability]
 enabled = true
