@@ -202,6 +202,22 @@ function csvTime(value: string | undefined, field: string): number | null {
   return total;
 }
 
+/**
+ * Race result cell as exported by the league sheet: the winner's total time
+ * ("47:49.835"), a gap ("+15.359", "+1:12.184"), or "+1 Lap" / "DNF" (no
+ * usable time). Returns { total } or { gap } in seconds, or null.
+ */
+function parseRaceInterval(value: string | undefined): { total: number } | { gap: number } | null {
+  const v = (value ?? "").trim();
+  if (!v || /lap|dnf|dns|dsq/i.test(v)) return null;
+  if (v.startsWith("+")) {
+    const gap = csvTime(v.slice(1), "race interval");
+    return gap === null ? null : { gap };
+  }
+  const total = csvTime(v, "race interval");
+  return total === null ? null : { total };
+}
+
 function csvBool(value: string | undefined): boolean {
   return !!value && ["true", "yes", "y", "1", "x"].includes(value.trim().toLowerCase());
 }
@@ -887,6 +903,8 @@ async function findDriverByToken(token: string) {
  *   (overrides the points table), sprint_finish,
  *   quali_time, race_time (winner's total time, or each driver's total),
  *   best_lap  (all accept 83.456 or 1:23.456)
+ * Sheet-style headers also work: "Quali Time", "Fastest Lap" (lap time), and
+ * "Race Interval (as shown)" (winner total + "+gap"; "+1 Lap"/DNF left blank).
  * Re-importing a driver for the same round overwrites their row.
  */
 registerCommand("import-results", async (ctx) => {
@@ -931,6 +949,18 @@ registerCommand("import-results", async (ctx) => {
       let saved = 0;
       const errors: string[] = [];
 
+      // Sheet exports give the winner's total time and everyone else a gap, so
+      // find the winner's total first and turn each gap into a total time.
+      let winnerTotal: number | null = null;
+      for (const rec of csv.records) {
+        try {
+          const iv = parseRaceInterval(rec["race interval (as shown)"] ?? rec.race_interval);
+          if (iv && "total" in iv && rec.finish === "1") winnerTotal = iv.total;
+        } catch {
+          /* reported per-row below */
+        }
+      }
+
       for (let i = 0; i < csv.records.length; i++) {
         const rec = csv.records[i];
         const line = i + 2;
@@ -954,9 +984,15 @@ registerCommand("import-results", async (ctx) => {
               fastestLap: csvBool(rec.fastest_lap),
               pointsOverride: csvNumber(rec.points, "points"),
               sprintFinish: csvInt(rec.sprint_finish, "sprint_finish"),
-              qualiTimeSeconds: csvTime(rec.quali_time, "quali_time"),
-              raceTimeSeconds: csvTime(rec.race_time, "race_time"),
-              bestLapSeconds: csvTime(rec.best_lap, "best_lap"),
+              qualiTimeSeconds: csvTime(rec.quali_time ?? rec["quali time"], "quali_time"),
+              raceTimeSeconds: (() => {
+                if (rec.race_time) return csvTime(rec.race_time, "race_time");
+                const iv = parseRaceInterval(rec["race interval (as shown)"] ?? rec.race_interval);
+                if (!iv) return null;
+                if ("total" in iv) return iv.total;
+                return winnerTotal === null ? null : winnerTotal + iv.gap;
+              })(),
+              bestLapSeconds: csvTime(rec.best_lap ?? rec["fastest lap"], "best_lap"),
             },
             table
           );
@@ -1086,3 +1122,4 @@ registerCommand("set-standings", async (ctx) => {
     },
   };
 });
+I'm
