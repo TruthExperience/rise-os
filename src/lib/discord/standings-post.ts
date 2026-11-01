@@ -399,7 +399,14 @@ export async function postRoundResultsToDiscord(
           if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
           return (a.finish_position ?? 999) - (b.finish_position ?? 999);
         });
-      const poleTime = list.find((r: any) => r.qualifying_position === 1)?.quali_time_seconds;
+      const qualiTimes = list.map((r: any) => Number(r.quali_time_seconds)).filter((t: number) => Number.isFinite(t) && t > 0);
+      const poleRow = list.find((r: any) => r.qualifying_position === 1);
+      const poleTime =
+        poleRow?.quali_time_seconds != null
+          ? Number(poleRow.quali_time_seconds)
+          : qualiTimes.length
+            ? Math.min(...qualiTimes)
+            : null;
       const winner = list.find((r: any) => !r.dnf && r.race_time_seconds != null);
       const winnerTime = winner ? Number(winner.race_time_seconds) : null;
       const w = Math.min(20, Math.max(8, ...list.map((r: any) => (dName[r.driver_id] ?? "Unknown").length)));
@@ -407,8 +414,10 @@ export async function postRoundResultsToDiscord(
         const name = pad(dName[r.driver_id] ?? "Unknown", w);
         const team = tName[r.team_id] ? `  ${tName[r.team_id]}` : "";
         if (kind === "quali") {
-          const t = fmtLap(r.quali_time_seconds);
-          return `${String(r.qualifying_position).padStart(2, " ")}  ${name}  ${t}${team}${dFlag[r.driver_id] ?? ""}`;
+          const t = fmtLap(r.quali_time_seconds).padStart(8, " ");
+          const d = r.quali_time_seconds != null && poleTime != null ? Number(r.quali_time_seconds) - poleTime : 0;
+          const gap = (d > 0 ? `+${d.toFixed(3)}` : "").padStart(8, " ");
+          return `${String(r.qualifying_position).padStart(2, " ")}  ${name}  ${t}  ${gap}${team}${dFlag[r.driver_id] ?? ""}`;
         }
         const pos = r.dnf ? "DNF" : String(r.finish_position ?? i + 1).padStart(3, " ");
         const fl = r.fastest_lap ? ` FL${fmtLap(r.best_lap_seconds) ? ` ${fmtLap(r.best_lap_seconds)}` : ""}` : "";
