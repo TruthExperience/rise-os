@@ -29,7 +29,9 @@ import {
 // signups_test (underscores — NOT hyphens, or the router can't find them).
 //
 //   /signups open    season (optional season number; defaults to the league's
-//                    latest "upcoming" season), message (optional custom DM
+//                    latest "upcoming" season. If the number doesn't exist yet
+//                    and is the next in sequence, the season is auto-created
+//                    as "upcoming"), message (optional custom DM
 //                    text), tracks (optional, up to 3 tracks to request
 //                    pictures of, separated by commas). Leave tracks off for
 //                    seasons that don't need time trial pictures (e.g. VRC
@@ -93,6 +95,46 @@ import {
 
 const OWNER_FLAGS = ["is_owner", "is_co_owner", "is_commissioner"] as const;
 
+// Creates the season on demand, but only if it's the very next number,
+// so a typo like season:40 can't create junk rows.
+async function createNextSeason(leagueId: string, seasonNumber: number) {
+  const supabase = createAdminClient();
+  const { data: latest, error } = await supabase
+    .schema("rise_os")
+    .from("seasons")
+    .select("season_number, name")
+    .eq("league_id", leagueId)
+    .order("season_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return { error: `Couldn't check existing seasons: ${error.message}` } as const;
+
+  const expected = (latest?.season_number ?? 0) + 1;
+  if (seasonNumber !== expected) {
+    return {
+      error: `Season ${seasonNumber} isn't set up, and the next season would be ${expected}.`,
+    } as const;
+  }
+
+  // Reuse the previous name's pattern ("WSC Season 3" -> "WSC Season 4")
+  const name = latest?.name
+    ? latest.name.replace(/\d+\s*$/, String(seasonNumber))
+    : `Season ${seasonNumber}`;
+
+  const { data: created, error: insertErr } = await supabase
+    .schema("rise_os")
+    .from("seasons")
+    .insert({ league_id: leagueId, season_number: seasonNumber, name, status: "upcoming" })
+    .select("id")
+    .single();
+
+  if (insertErr || !created) {
+    return { error: `Couldn't create Season ${seasonNumber}: ${insertErr?.message}` } as const;
+  }
+  return { id: created.id as string } as const;
+}
+
 async function findOpenRound(leagueId: string) {
   const supabase = createAdminClient();
   const { data, error } = await supabase
@@ -144,9 +186,15 @@ registerCommand("signups_open", async (ctx) => {
       return { content: `Something went wrong finding that season: ${error.message}`, ephemeral: true };
     }
     if (!season) {
-      return { content: `Season ${seasonNumber} isn't set up for this league.`, ephemeral: true };
+      // Not found: auto-create it if it's the next season in sequence.
+      const created = await createNextSeason(leagueId, seasonNumber);
+      if ("error" in created) {
+        return { content: created.error, ephemeral: true };
+      }
+      seasonId = created.id;
+    } else {
+      seasonId = season.id;
     }
-    seasonId = season.id;
   }
 
   const message = ctx.options.message as string | undefined;
