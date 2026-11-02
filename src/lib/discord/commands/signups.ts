@@ -15,6 +15,7 @@ import {
   requestedTracksFromMessage,
   setRoundTracks,
   notifySignedUpForPhotos,
+  notifySignedUpForTeams,
 } from "@/lib/discord-signups";
 
 // Season signup commands. An owner opens a round for a season; the bot DMs
@@ -26,7 +27,7 @@ import {
 // commands/index.ts builds the dispatch key "<command>_<subcommand>", so the
 // handlers below are keyed signups_open / signups_resume / signups_status /
 // signups_list / signups_close / signups_invite / signups_tracks /
-// signups_test (underscores — NOT hyphens, or the router can't find them).
+// signups_teams / signups_test (underscores — NOT hyphens, or the router can't find them).
 //
 //   /signups open    season (optional season number; defaults to the league's
 //                    latest "upcoming" season. If the number doesn't exist yet
@@ -604,6 +605,51 @@ registerCommand("signups_tracks", async (ctx) => {
         lines.push("Drivers who already signed up were not messaged. Add `notify: True` to DM them.");
       }
 
+      return { content: lines.join("\n") };
+    },
+  };
+});
+
+registerCommand("signups_teams", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const membership = await getLeagueMembership(ctx.discordUserId, leagueId);
+  if (!hasAnyFlag(membership, [...OWNER_FLAGS])) {
+    return { content: "Only league owners can manage season signups.", ephemeral: true };
+  }
+
+  const roundResult = await findOpenRound(leagueId);
+  if ("error" in roundResult) {
+    return { content: roundResult.error ?? "Something went wrong finding the round.", ephemeral: true };
+  }
+  const round = roundResult.round;
+
+  return {
+    defer: true,
+    ephemeral: true,
+    background: async () => {
+      const out = await notifySignedUpForTeams({ roundId: round.id });
+      if (out.teamCount === 0) {
+        return {
+          content:
+            "No teams found for this league, so nobody was messaged. " +
+            "Add teams first (roster, franchises or `signup_team_options`).",
+        };
+      }
+      const lines = [
+        `Team requests on **${round.name}** (${out.teamCount} teams): ${out.sent} DM'd, ` +
+          `${out.failed} couldn't be reached, ${out.skipped} skipped (already picked or no Discord ID).`,
+        "Invited drivers who haven't tapped Sign Up yet get the team step automatically when they do.",
+      ];
+      if (out.remaining > 0) {
+        lines.push(
+          `${out.remaining} not reached before the time limit. Run \`/signups teams\` again; ` +
+            "drivers who already picked are skipped."
+        );
+      }
       return { content: lines.join("\n") };
     },
   };
