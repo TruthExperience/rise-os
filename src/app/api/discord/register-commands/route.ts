@@ -180,6 +180,11 @@ const SIGNUPS_COMMAND = {
     },
     {
       type: 1,
+      name: "teams",
+      description: "DM signed-up drivers the team request buttons (open round)",
+    },
+    {
+      type: 1,
       name: "tracks",
       description: "Request time trial pictures on the open round (nobody is re-invited)",
       options: [
