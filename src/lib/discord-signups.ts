@@ -199,6 +199,86 @@ async function seasonNumberForSeasonId(
 // 2. Otherwise pitboss.team_rosters, using the latest season on file for the
 //    league (the original behaviour).
 // Returns [] when neither has anything, and the team step is skipped.
+// 3. Last resort: leagues whose rosters only exist as franchises (WSC).
+// /sign-driver and the franchise tools write pitboss.franchise_rosters ->
+// rise_os.franchises and never touch pitboss.team_rosters, so those leagues
+// looked like they had no teams. Signup choices are stored against
+// car_class_teams, so each franchise is matched to a car_class_teams row by
+// name (same rule as roles.ts). Principals come from driver_leagues.
+const SIGNUP_TEAM_CAR_CLASS_ID = '3cbbd45c-7a2e-4501-8f51-a6b5f6b33326'
+const normTeamName = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+
+async function franchiseTeamOptions(leagueId: string): Promise<TeamOption[]> {
+  const { data: franchiseRows } = await riseOs()
+    .from('franchises')
+    .select('id, name')
+    .eq('league_id', leagueId)
+  const franchises: any[] = franchiseRows ?? []
+  if (franchises.length === 0) return []
+
+  const { data: teamRows } = await db()
+    .from('car_class_teams')
+    .select('id, team_name, short_name')
+    .eq('car_class_id', SIGNUP_TEAM_CAR_CLASS_ID)
+  const carTeams: any[] = teamRows ?? []
+  if (carTeams.length === 0) return []
+
+  const { data: rosterRows } = await db()
+    .from('franchise_rosters')
+    .select('driver_id, franchise_id')
+    .eq('league_id', leagueId)
+    .is('released_at', null)
+  const onFranchise: any[] = rosterRows ?? []
+  const driverIds = Array.from(new Set(onFranchise.map((r) => r.driver_id as string)))
+
+  const principalDriverIds = new Set<string>()
+  const discordByDriver = new Map<string, string>()
+  if (driverIds.length) {
+    const { data: tps } = await db()
+      .from('driver_leagues')
+      .select('driver_id')
+      .eq('league_id', leagueId)
+      .eq('is_team_principal', true)
+      .in('driver_id', driverIds)
+    for (const t of (tps ?? []) as any[]) principalDriverIds.add(t.driver_id)
+
+    if (principalDriverIds.size) {
+      const { data: ds } = await db()
+        .from('drivers')
+        .select('id, discord_id')
+        .in('id', Array.from(principalDriverIds))
+      for (const d of (ds ?? []) as any[]) {
+        if (d.discord_id) discordByDriver.set(d.id, d.discord_id)
+      }
+    }
+  }
+
+  const out: TeamOption[] = []
+  const used = new Set<string>()
+  for (const f of franchises) {
+    const fName = normTeamName(f.name ?? '')
+    if (!fName) continue
+    const hits = carTeams.filter((t) => {
+      const tName = normTeamName(t.team_name ?? t.short_name ?? '')
+      return tName && (fName.includes(tName) || tName.includes(fName))
+    })
+    if (hits.length !== 1 || used.has(hits[0].id)) continue
+    used.add(hits[0].id)
+
+    const principals = onFranchise
+      .filter((r) => r.franchise_id === f.id && principalDriverIds.has(r.driver_id))
+      .map((r) => discordByDriver.get(r.driver_id))
+      .filter((id): id is string => !!id)
+
+    out.push({
+      id: hits[0].id as string,
+      name: ((hits[0].team_name || hits[0].short_name || f.name) as string).slice(0, 80),
+      principalDiscordIds: Array.from(new Set(principals)),
+    })
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name))
+}
+
 export async function leagueTeamOptions(
   leagueId: string,
   seasonId?: string | null
@@ -257,7 +337,7 @@ export async function leagueTeamOptions(
     .select('driver_id, car_class_team_id, season, is_team_principal')
     .eq('league_id', leagueId)
   const rosters: any[] = rosterRows ?? []
-  if (rosters.length === 0) return []
+  if (rosters.length === 0) return franchiseTeamOptions(leagueId)
 
   const seasonKey = (r: any) => String(r.season ?? '')
   const latest = rosters
@@ -1320,6 +1400,91 @@ async function signedUpReply(round: any, info: SignupInfo): Promise<ButtonRespon
     type: 7,
     data: { content: `${content}\n\n${prompt.content}`, components: prompt.components },
   }
+}
+
+// DMs every driver who already signed up but has no team requests yet the
+// team buttons (the same message the Sign Up reply shows). For rounds that
+// were opened before the league's teams were available. The buttons use the
+// normal signupteam handler, so picks are saved and principals DM'd as usual.
+export async function notifySignedUpForTeams(params: {
+  roundId: string
+  budgetMs?: number
+}): Promise<{
+  sent: number
+  failed: number
+  skipped: number
+  remaining: number
+  teamCount: number
+}> {
+  const started = Date.now()
+  const budgetMs = params.budgetMs ?? 45_000
+  const none = { sent: 0, failed: 0, skipped: 0, remaining: 0, teamCount: 0 }
+
+  const { data: round } = await db()
+    .from('signup_rounds')
+    .select('id, name, status, league_id, season_id, leagues!inner(name)')
+    .eq('id', params.roundId)
+    .single()
+  if (!round || round.status !== 'open') return none
+
+  const teams = await leagueTeamOptions(round.league_id, (round as any).season_id)
+  if (teams.length === 0) return none
+
+  const roundIds = await seasonRoundIds(round.id)
+
+  const { data: signed } = await db()
+    .from('league_signups')
+    .select('driver_id, drivers!inner(discord_id)')
+    .in('round_id', roundIds)
+    .eq('status', 'signed_up')
+
+  const { data: choiceRows } = await db()
+    .from('signup_team_choices')
+    .select('driver_id')
+    .in('round_id', roundIds)
+  const alreadyPicked = new Set(((choiceRows ?? []) as any[]).map((c) => c.driver_id as string))
+
+  const seen = new Set<string>()
+  const queue: string[] = []
+  let skipped = 0
+  for (const row of (signed ?? []) as any[]) {
+    if (seen.has(row.driver_id)) continue
+    seen.add(row.driver_id)
+    const d = Array.isArray(row.drivers) ? row.drivers[0] : row.drivers
+    const discordId = d?.discord_id as string | undefined
+    if (!discordId || alreadyPicked.has(row.driver_id)) {
+      skipped++
+      continue
+    }
+    queue.push(discordId)
+  }
+
+  const leagueName = (round as any).leagues?.name ?? 'the league'
+  const prompt = teamPrompt(round.id, 1, teams, [])
+  const content = `🏁 **${leagueName}: ${round.name}** — team requests are open\n${prompt.content}`
+
+  let sent = 0
+  let failed = 0
+  for (let i = 0; i < queue.length; i++) {
+    if (Date.now() - started > budgetMs) {
+      return { sent, failed, skipped, remaining: queue.length - i, teamCount: teams.length }
+    }
+    try {
+      const channel = await discord('/users/@me/channels', { recipient_id: queue[i] })
+      await discord(`/channels/${channel.id}/messages`, {
+        content,
+        components: prompt.components,
+        allowed_mentions: { parse: [] },
+      })
+      sent++
+    } catch (e) {
+      console.error('[signups] team request DM failed:', e)
+      failed++
+    }
+    await sleep(SEND_DELAY_MS)
+  }
+
+  return { sent, failed, skipped, remaining: 0, teamCount: teams.length }
 }
 
 // Posts a driver's answers to the league's signup channel (if it has one).
