@@ -13,6 +13,53 @@ import {
   type CheckinStatus,
 } from "./checkin-embed";
 
+// ── Race-time helpers (check-in auto-post) ───────────────────────────
+// Divisions store a wall-clock default start time + IANA timezone
+// (rise_os.league_divisions.default_race_time / race_timezone), e.g.
+// 19:45 Europe/London. These convert between that and a UTC instant,
+// DST-safe, so the same logic matches pitboss.dispatch_checkin_autopost().
+const DEFAULT_RACE_TZ = "Europe/London";
+
+function zoneOffsetMs(utcMs: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(utcMs));
+  const get = (t: string) => Number(parts.find((p) => p.type === t)!.value);
+  const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  return asUtc - Math.floor(utcMs / 1000) * 1000;
+}
+
+/** "2026-11-04" + "18:00" in an IANA zone -> UTC ISO string. */
+function localToUtcIso(date: string, time: string, timeZone: string): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const [hh, mm] = time.split(":").map(Number);
+  const wall = Date.UTC(y, m - 1, d, hh, mm);
+  const off1 = zoneOffsetMs(wall, timeZone);
+  let utc = wall - off1;
+  const off2 = zoneOffsetMs(utc, timeZone);
+  if (off2 !== off1) utc = wall - off2; // crossed a DST change
+  return new Date(utc).toISOString();
+}
+
+/** UTC ISO string -> "HH:MM" wall-clock time in an IANA zone. */
+function localTimeOfDay(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hourCycle: "h23",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(new Date(iso));
+  const get = (t: string) => parts.find((p) => p.type === t)!.value;
+  return `${get("hour")}:${get("minute")}`;
+}
+
 // Tables now confirmed against live schema:
 //   rise_os.calendar_rounds    (was guessed as pitboss.race_rounds)
 //   pitboss.round_checkins     (was guessed as pitboss.race_checkins)
@@ -205,7 +252,7 @@ async function resolveDivision(leagueId: string, divisionInput: string) {
   const { data, error } = await supabase
     .schema("rise_os")
     .from("league_divisions")
-    .select("id, division_code, discord_checkin_channel_id")
+    .select("id, division_code, discord_checkin_channel_id, default_race_time, race_timezone, default_ping_delivery")
     .eq("league_id", leagueId)
     .ilike("division_code", divisionInput)
     .maybeSingle();
@@ -618,7 +665,10 @@ registerCommand("checkin-create", async (ctx) => {
   };
 
   const weatherText = pick(ctx.options.weather, existingPost?.weather_text);
-  const pingDelivery = pick(ctx.options.ping_delivery, existingPost?.ping_delivery) ?? "Channel only";
+  const pingDelivery =
+    pick(ctx.options.ping_delivery, existingPost?.ping_delivery) ??
+    division.default_ping_delivery ??
+    "Channel only";
   const trackOverride = pick(ctx.options.track, existingPost?.track_override);
   const countryOverride = pick(ctx.options.country, existingPost?.country_override);
   const flagOverride = pick(ctx.options.flag, existingPost?.flag_override);
@@ -626,9 +676,15 @@ registerCommand("checkin-create", async (ctx) => {
   // race_time: passed value wins, then the stored one (so an edit that
   // doesn't mention the time never resets it), then the calendar's
   // race_date at 15:00 UTC for a brand-new check-in.
+  // Fallback order: passed -> stored -> the division's remembered default
+  // start time on the round's date -> 15:00 UTC (legacy last resort).
+  const raceTimezone = division.race_timezone ?? DEFAULT_RACE_TZ;
   const raceTime =
     (ctx.options.race_time as string | undefined) ??
     existingPost?.race_time ??
+    (round.race_date && division.default_race_time
+      ? localToUtcIso(round.race_date, String(division.default_race_time).slice(0, 5), raceTimezone)
+      : null) ??
     (round.race_date ? `${round.race_date}T15:00:00Z` : null);
 
   // race_time changed (a reschedule) -> re-arm every automated milestone
@@ -672,6 +728,21 @@ registerCommand("checkin-create", async (ctx) => {
   if (postError || !post) {
     console.error("[checkin-create] post upsert failed:", postError);
     return { content: `Something went wrong saving the check-in post: ${postError?.message ?? "unknown error"}`, ephemeral: true };
+  }
+
+  // First check-in for a division that has no default start time yet:
+  // remember this one's wall-clock time so later check-ins (and the
+  // auto-post job) reuse it. A one-off time on a later round never
+  // overwrites an existing default.
+  if (ctx.options.race_time && !division.default_race_time && raceTime) {
+    const { error: defaultTimeError } = await supabase
+      .schema("rise_os")
+      .from("league_divisions")
+      .update({ default_race_time: localTimeOfDay(raceTime, raceTimezone) })
+      .eq("id", division.id);
+    if (defaultTimeError) {
+      console.error("[checkin-create] failed to remember default race time:", defaultTimeError);
+    }
   }
 
   const groupedResult = await fetchGroupedCheckins(round.id, division.id);
