@@ -851,6 +851,107 @@ registerCommand("steward_close", async (ctx) => {
   };
 });
 
+registerCommand("steward_open", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+  const channelId = ctx.channelId;
+  if (!channelId) {
+    return { content: "This command must be run in a channel, not a DM.", ephemeral: true };
+  }
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "This command must be used in a server.", ephemeral: true };
+  }
+
+  const denied = await requireSteward({
+    guildId,
+    leagueId,
+    memberRoles: ctx.memberRoles,
+    memberPermissions: ctx.memberPermissions,
+  });
+  if (denied) return { content: denied, ephemeral: true };
+
+  const incident = await findIncidentByChannel(leagueId, channelId);
+  if (!incident) {
+    const message = await notLinkedMessage(leagueId, channelId);
+    return { content: message, ephemeral: true };
+  }
+  if (!incident.ticket_closed_at) {
+    return { content: "This ticket is already open.", ephemeral: true };
+  }
+
+  return {
+    defer: true,
+    ephemeral: true,
+    background: async () => {
+      const supabase = createAdminClient();
+
+      // Reopening never touches the verdict or penalty_ledger rows. A
+      // closed ticket with no verdict goes back to "open"; one that
+      // already has a verdict keeps its status so the ruling stands.
+      const { data: current } = await supabase
+        .schema("pitboss")
+        .from("incidents")
+        .select("verdict")
+        .eq("id", incident.id)
+        .maybeSingle();
+
+      const update: Record<string, unknown> = { ticket_closed_at: null };
+      if (incident.status === "resolved" && !current?.verdict) {
+        update.status = "open";
+        update.resolved_at = null;
+        update.resolved_by = null;
+      }
+
+      const { error } = await supabase
+        .schema("pitboss")
+        .from("incidents")
+        .update(update)
+        .eq("id", incident.id);
+
+      if (error) {
+        console.error("[steward_open] update failed:", error);
+        return { content: `Couldn't reopen the ticket: ${error.message}` };
+      }
+
+      // Undo lockTicketChannel for the reporter and the accused.
+      const discordIds: string[] = [];
+      const reporterDiscordId = (incident as any).drivers?.discord_id as
+        | string
+        | undefined;
+      if (reporterDiscordId) discordIds.push(reporterDiscordId);
+
+      if (incident.accused_driver_id) {
+        const { data: accusedDriver } = await supabase
+          .schema("pitboss")
+          .from("drivers")
+          .select("discord_id")
+          .eq("id", incident.accused_driver_id)
+          .maybeSingle();
+        if (accusedDriver?.discord_id) discordIds.push(accusedDriver.discord_id);
+      }
+
+      let unlockFailed = false;
+      for (const id of discordIds) {
+        const ok = await addUserToTicketChannel(channelId, id);
+        if (!ok) unlockFailed = true;
+      }
+
+      await postTicketMessage(channelId, "🔓 This ticket has been reopened by a steward.");
+
+      return {
+        content: `Ticket reopened.${
+          unlockFailed
+            ? " ⚠ Couldn't restore send access for one or more parties — check the bot's permissions on this channel."
+            : ""
+        }`,
+      };
+    },
+  };
+});
+
 registerCommand("steward_transcript", async (ctx) => {
   const leagueId = ctx.leagueId;
   if (!leagueId) {
