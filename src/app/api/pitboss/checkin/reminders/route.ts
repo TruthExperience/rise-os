@@ -22,13 +22,17 @@ import {
 // PITBOSS_DISCORD_BOT_TOKEN and DISCORD_API_BASE convention as checkin.ts.
 //
 // One kind per milestone — together they are the five lights:
-//   dm_reminder       T-3h   DM each missing driver + ping ALL drivers in channel
-//   channel_reminder  T-1h   ping ALL drivers in channel (missing called out)
-//   reminder_30m      T-30m  ping ALL drivers in channel (missing called out)
+//   dm_reminder       T-3h   DM each missing driver + tag ONLY missing drivers in channel
+//   channel_reminder  T-1h   tag ONLY missing drivers in channel
+//   reminder_30m      T-30m  tag ONLY missing drivers in channel
 //   lockout           T-15m  re-render embed with buttons disabled + lock notice
-//   race_time_flag    T-5m   re-render embed, ping division role + ALL drivers
+//   race_time_flag    T-5m   re-render embed, ping division role (roster only if no role set)
 //   lights_out        T-0    re-render embed (lights go green) + green flag,
 //                            pinging the roles selected in the check-in's Pings
+//
+// Drivers who already responded (any status, including declined) are never
+// tagged by the reminders. The missing list from Postgres is a snapshot, so
+// the route re-checks it against round_checkins right before sending.
 //
 // Every kind re-renders the check-in embed so the lights row stays in step.
 // dispatch_checkin_reminders stamps each *_sent_at column whether or not
@@ -248,24 +252,55 @@ async function postChannelMessage(
 }
 
 /**
- * The "ping all drivers" message used at T-3h / T-1h / T-30m / T-5m:
- * a headline, the live race countdown, who hasn't checked in yet, then a
- * mention of every driver on the roster.
+ * The reminder message used at T-3h / T-1h / T-30m: a headline, the live
+ * race countdown, then a mention of ONLY the drivers who haven't responded.
+ * Drivers who already ticked a status are not tagged again.
  */
 function buildDriverPing(headline: string, payload: ReminderPayload, extraLine?: string): string {
   const ts = raceTimestamp(payload.race_time);
   const missing = payload.driver_discord_ids ?? [];
-  const all = payload.all_driver_discord_ids ?? [];
 
   const lines = [`${headline}`, `🕒 <t:${ts}:F> · <t:${ts}:R>`];
   if (extraLine) lines.push(extraLine);
   if (missing.length > 0) {
-    lines.push(`❔ **Not checked in yet:** ${mentionString(missing, 450)}`);
-  }
-  if (all.length > 0) {
-    lines.push(`📣 ${mentionString(all, 900)}`);
+    lines.push(`❔ **Not checked in yet:** ${mentionString(missing, 1300)}`);
+  } else {
+    lines.push("✅ Everyone on the roster has responded.");
   }
   return lines.join("\n");
+}
+
+/**
+ * Drop anyone who has responded since Postgres built the missing list
+ * (pg_net delivery lag, or a click right at the milestone). Any row in
+ * round_checkins for this round + division counts as responded, matching
+ * _checkin_roster_ids. Falls back to the list as given if the lookup fails.
+ */
+async function dropRespondedDrivers(payload: ReminderPayload): Promise<string[]> {
+  const missing = payload.driver_discord_ids ?? [];
+  if (missing.length === 0 || !payload.round_id || !payload.division_id) return missing;
+
+  try {
+    const { data, error } = await createAdminClient()
+      .schema("pitboss")
+      .from("round_checkins")
+      .select("drivers(discord_id)")
+      .eq("round_id", payload.round_id)
+      .eq("division_id", payload.division_id);
+
+    if (error) {
+      console.error("[checkin-reminders] live responded lookup failed:", error.message);
+      return missing;
+    }
+
+    const responded = new Set(
+      (data ?? []).map((r: any) => r.drivers?.discord_id).filter(Boolean) as string[]
+    );
+    return missing.filter((id) => !responded.has(id));
+  } catch (err) {
+    console.error("[checkin-reminders] live responded lookup threw:", err);
+    return missing;
+  }
 }
 
 /**
@@ -309,21 +344,27 @@ async function resolveGreenFlagPing(payload: ReminderPayload) {
 async function handleRaceTimeFlag(token: string, payload: ReminderPayload) {
   const embed = await refreshEmbed(token, payload);
 
+  // The division check-in role covers the whole division in one tag. Only
+  // when no role is configured do we fall back to mentioning the roster, so
+  // the flag never goes out silent.
   const all = payload.all_driver_discord_ids ?? [];
   if (!payload.role_id && all.length === 0) {
     return { embed, ping: { ok: false, skipped: "no discord_checkin_role_id and no roster drivers" } };
   }
 
-  const rolePing = payload.role_id ? `<@&${payload.role_id}> ` : "";
-  const content =
-    rolePing +
-    buildDriverPing(
-      "🏁 **Race starts in about 5 minutes.** Get to the lobby and be ready on the grid.",
-      { ...payload, driver_discord_ids: [] }
-    );
+  const ts = raceTimestamp(payload.race_time);
+  const lines = [
+    "🏁 **Race starts in about 5 minutes.** Get to the lobby and be ready on the grid.",
+    `🕒 <t:${ts}:F> · <t:${ts}:R>`,
+  ];
+  if (payload.role_id) {
+    lines.unshift(`<@&${payload.role_id}>`);
+  } else {
+    lines.push(`📣 ${mentionString(all, 900)}`);
+  }
 
-  const ping = await postChannelMessage(token, payload, content, {
-    parse: ["users"],
+  const ping = await postChannelMessage(token, payload, lines.join("\n"), {
+    parse: payload.role_id ? [] : ["users"],
     roles: payload.role_id ? [payload.role_id] : [],
   });
   return { embed, ping };
@@ -354,12 +395,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  const { kind, race_time, driver_discord_ids } = payload;
+  const { kind, race_time } = payload;
+  payload.driver_discord_ids = await dropRespondedDrivers(payload);
+  const driver_discord_ids = payload.driver_discord_ids;
   const usersOnly = { parse: ["users"] };
 
   if (kind === "dm_reminder") {
-    // T-3h: DM the drivers who still haven't responded, and ping everyone
-    // in the division channel.
+    // T-3h: DM the drivers who still haven't responded, and tag the same
+    // missing drivers in the division channel.
     const raceTimeLabel = new Date(race_time).toUTCString();
     const dmContent =
       `⏰ **Check-in reminder** — your race starts in about 3 hours (${raceTimeLabel}). ` +
