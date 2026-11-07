@@ -726,6 +726,8 @@ interface ResultInput {
   qualiTimeSeconds?: number | null;
   raceTimeSeconds?: number | null;
   bestLapSeconds?: number | null;
+  /** Team name from the CSV; used when the driver isn't on a roster (reserves). */
+  teamName?: string | null;
 }
 
 /**
@@ -761,6 +763,21 @@ async function saveResult(input: ResultInput, table: PointsTable) {
     .limit(1)
     .maybeSingle();
 
+  // Reserves and stand-ins aren't on a roster, so fall back to the team named
+  // in the CSV (exact name, case-insensitive) so their points count for it.
+  let franchiseId: string | null = roster?.franchise_id ?? null;
+  const teamName = input.teamName?.trim();
+  if (!franchiseId && teamName) {
+    const { data: fr } = await supabase
+      .schema("rise_os")
+      .from("franchises")
+      .select("id")
+      .eq("league_id", input.leagueId)
+      .ilike("name", teamName.replace(/[\\%_]/g, "\\$&"))
+      .limit(2);
+    if (fr && fr.length === 1) franchiseId = fr[0].id as string;
+  }
+
   const { error } = await supabase
     .schema("pitboss")
     .from("results")
@@ -778,7 +795,7 @@ async function saveResult(input: ResultInput, table: PointsTable) {
         dnf_reason: input.dnf ? input.dnfReason : null,
         fastest_lap: input.fastestLap,
         points_earned: points,
-        franchise_id: roster?.franchise_id ?? null,
+        franchise_id: franchiseId,
         sprint_finish_position: input.sprintFinish,
         sprint_points_earned: sprintPoints,
         ...(input.qualiTimeSeconds != null ? { quali_time_seconds: input.qualiTimeSeconds } : {}),
@@ -951,6 +968,7 @@ async function findDriverByToken(token: string) {
  * "+1 Lap"/DNF left blank). The sheet's own columns are mapped automatically
  * when the canonical ones are missing: Gamertag -> driver, Race Pos ->
  * finish, Quali Pos -> quali, Status -> dnf, FL Pt -> fastest_lap.
+ * team (optional): used for drivers who aren't on a roster (reserves).
  * Re-importing a driver for the same round overwrites their row.
  */
 registerCommand("import-results", async (ctx) => {
@@ -1039,6 +1057,7 @@ registerCommand("import-results", async (ctx) => {
                 return winnerTotal === null ? null : winnerTotal + iv.gap;
               })(),
               bestLapSeconds: csvTime(rec.best_lap ?? rec["fastest lap"], "best_lap"),
+              teamName: rec.team || null,
             },
             table
           );
