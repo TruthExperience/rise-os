@@ -171,7 +171,50 @@ async function readCsvAttachment(ctx: CommandContext, optionName: string) {
     });
     return rec;
   });
+  applySheetHeaderAliases(header, records);
   return { header, records } as const;
+}
+
+/**
+ * Lets the league sheet's own export import as-is. Fills the importer's
+ * canonical columns from the sheet-style headers when the canonical column
+ * is missing or blank for that row (existing canonical values always win):
+ *   Gamertag        -> driver
+ *   Race Pos        -> finish
+ *   Quali Pos       -> quali
+ *   Status          -> dnf   (DNF / DNS / DSQ = true)
+ *   FL Pt           -> fastest_lap (1 = true)
+ *   Race Time/Gap   -> race_interval
+ * Mutates `header` (adds the canonical names) and `records` in place.
+ */
+function applySheetHeaderAliases(header: string[], records: Record<string, string>[]) {
+  const has = (h: string) => header.includes(h);
+  const add = (canonical: string) => {
+    if (!header.includes(canonical)) header.push(canonical);
+  };
+  const fill = (canonical: string, sources: string[], map?: (v: string) => string) => {
+    const present = sources.filter(has);
+    if (present.length === 0) return;
+    add(canonical);
+    for (const rec of records) {
+      if (rec[canonical]) continue;
+      for (const src of present) {
+        const v = rec[src];
+        if (v) {
+          rec[canonical] = map ? map(v) : v;
+          break;
+        }
+      }
+      if (rec[canonical] === undefined) rec[canonical] = "";
+    }
+  };
+
+  fill("driver", ["gamertag", "discord username"]);
+  fill("finish", ["race pos", "position"]);
+  fill("quali", ["quali pos"]);
+  fill("race_interval", ["race time/gap", "race interval (as shown)"]);
+  fill("dnf", ["status"], (v) => (/^(dnf|dns|dsq)\b/i.test(v) ? "true" : "false"));
+  fill("fastest_lap", ["fl pt"], (v) => (Number(v) > 0 ? "true" : "false"));
 }
 
 function csvInt(value: string | undefined, field: string): number | null {
@@ -904,7 +947,10 @@ async function findDriverByToken(token: string) {
  *   quali_time, race_time (winner's total time, or each driver's total),
  *   best_lap  (all accept 83.456 or 1:23.456)
  * Sheet-style headers also work: "Quali Time", "Fastest Lap" (lap time), and
- * "Race Interval (as shown)" (winner total + "+gap"; "+1 Lap"/DNF left blank).
+ * "Race Interval (as shown)" / "Race Time/Gap" (winner total + "+gap";
+ * "+1 Lap"/DNF left blank). The sheet's own columns are mapped automatically
+ * when the canonical ones are missing: Gamertag -> driver, Race Pos ->
+ * finish, Quali Pos -> quali, Status -> dnf, FL Pt -> fastest_lap.
  * Re-importing a driver for the same round overwrites their row.
  */
 registerCommand("import-results", async (ctx) => {
