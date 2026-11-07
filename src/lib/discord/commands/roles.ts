@@ -417,7 +417,7 @@ export type LeagueSyncResult =
 // Rules: exactly one team role -> assign or move. No team role -> left
 // alone (never released automatically). Two or more -> skipped and reported.
 // The season is the latest one already in team_rosters for the league; a
-// league with no team_rosters rows yet is skipped.
+// league with no team_rosters rows yet uses its latest calendar season.
 // Same constant as roster.ts — keep the two in step.
 const TEAM_ROLE_CAR_CLASS_ID = "3cbbd45c-7a2e-4501-8f51-a6b5f6b33326";
 
@@ -446,9 +446,23 @@ async function syncTeamRoles(
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (!seasonRow?.season) return { lines, failed };
-  const season = String(seasonRow.season);
-  const tier = (seasonRow.tier as string | null) ?? null;
+  // A league with no team_rosters rows yet (e.g. WSC) falls back to the
+  // latest season on its calendar, so the first sync can seed the rosters.
+  let seasonValue: string | number | null = seasonRow?.season ?? null;
+  if (!seasonValue) {
+    const { data: roundRow } = await (createAdminClient() as any)
+      .schema("rise_os")
+      .from("calendar_rounds")
+      .select("season_number")
+      .eq("league_id", leagueId)
+      .order("season_number", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    seasonValue = roundRow?.season_number ?? null;
+  }
+  if (!seasonValue) return { lines, failed };
+  const season = String(seasonValue);
+  const tier = (seasonRow?.tier as string | null) ?? null;
 
   const { data: teams } = await db()
     .from("car_class_teams")
