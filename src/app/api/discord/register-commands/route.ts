@@ -388,6 +388,11 @@ const STEWARD_COMMAND = {
     },
     {
       type: 1,
+      name: "open",
+      description: "Reopen a closed incident ticket (run inside the ticket)",
+    },
+    {
+      type: 1,
       name: "transcript",
       description: "Show the transcript for this incident ticket (run inside the ticket)",
     },
