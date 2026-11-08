@@ -100,16 +100,15 @@ registerCommand("steward_finalize_round", async (ctx) => {
     return { content: `**${label}** is cancelled and can't be finalized.`, ephemeral: true };
   }
 
-  // finalized_by must be a pitboss.drivers id.
+  // finalized_by has a foreign key to public.users(id) (NOT pitboss.drivers).
   const { data: finalizer } = await supabase
-    .schema("pitboss")
-    .from("drivers")
+    .from("users")
     .select("id")
     .eq("discord_id", ctx.discordUserId)
     .maybeSingle();
   if (!finalizer) {
     return {
-      content: "You don't have a driver record yet — interact with the bot once first, then retry.",
+      content: "Your Discord account isn't linked to a Rise OS user yet — log in to Rise OS once, then retry.",
       ephemeral: true,
     };
   }
@@ -126,16 +125,20 @@ registerCommand("steward_finalize_round", async (ctx) => {
 
   // The DDV trigger swallows its own errors (so it can never block a
   // finalize). Check it actually wrote rows and say so if not.
-  const { count: ddvRows } = await supabase
+  // Each driver now gets several history rows per round (race Elo, sprint,
+  // H2H, disciplinary, assist tier, attendance), so count distinct drivers.
+  const { data: ddvRowData } = await supabase
     .schema("pitboss")
     .from("driver_ddv_history")
-    .select("id", { count: "exact", head: true })
+    .select("driver_id")
     .eq("league_id", leagueId)
     .eq("round_id", round.id)
     .eq("event_type", "race_weekend");
 
+  const ddvRows = new Set((ddvRowData ?? []).map((r) => r.driver_id)).size;
+
   const ddvLine =
-    (ddvRows ?? 0) > 0
+    ddvRows > 0
       ? `DDV updated for ${ddvRows} driver(s).`
       : "⚠️ Round finalized, but no DDV rows were written. Check the logs for a `ddv calc failed` warning.";
 
