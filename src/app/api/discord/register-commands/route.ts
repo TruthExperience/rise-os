@@ -388,11 +388,6 @@ const STEWARD_COMMAND = {
     },
     {
       type: 1,
-      name: "open",
-      description: "Reopen a closed incident ticket (run inside the ticket)",
-    },
-    {
-      type: 1,
       name: "transcript",
       description: "Show the transcript for this incident ticket (run inside the ticket)",
     },
@@ -503,6 +498,15 @@ const STEWARD_COMMAND = {
           description: "Reason for overriding the AI suggestion, if applicable",
           required: false,
         },
+      ],
+    },
+    {
+      type: 1,
+      name: "finalize_round",
+      description: "Finalize a round after all verdicts are resolved (closes appeals, runs DDV)",
+      options: [
+        { type: 4, name: "round", description: "Round number", required: true },
+        { type: 4, name: "season", description: "Season number (defaults to latest)", required: false },
       ],
     },
     {
