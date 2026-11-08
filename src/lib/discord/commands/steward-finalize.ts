@@ -41,8 +41,6 @@ registerCommand("steward_finalize_round", async (ctx) => {
   if (
     !hasDiscordStewardAccess(
       {
-        guildId,
-        leagueId,
         memberRoles: ctx.memberRoles,
         memberPermissions: ctx.memberPermissions,
       },
