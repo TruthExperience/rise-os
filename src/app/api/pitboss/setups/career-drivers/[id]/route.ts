@@ -165,3 +165,46 @@ export async function PATCH(
   }
   return NextResponse.json(data);
 }
+
+// Deleting a career driver removes its stat history and race results (FK
+// cascade) and detaches it from past setup recommendations (FK set null).
+// Destructive and shared across the library, so limited to commissioners,
+// owners and co-owners, same as renaming.
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const driver = await getAuthedDriver();
+  if (!driver) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  if (!(await isAdminInAnyLeague(driver.id))) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+
+  const { id } = await params;
+  const supabaseAdmin = createAdminClient();
+
+  const { data: existing, error: fetchError } = await supabaseAdmin
+    .schema('pitboss')
+    .from('career_mode_drivers')
+    .select('id')
+    .eq('id', id)
+    .maybeSingle();
+  if (fetchError) {
+    return NextResponse.json({ error: fetchError.message }, { status: 500 });
+  }
+  if (!existing) {
+    return NextResponse.json({ error: 'Career driver not found' }, { status: 404 });
+  }
+
+  const { error } = await supabaseAdmin
+    .schema('pitboss')
+    .from('career_mode_drivers')
+    .delete()
+    .eq('id', id);
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+  return NextResponse.json({ ok: true });
+}
