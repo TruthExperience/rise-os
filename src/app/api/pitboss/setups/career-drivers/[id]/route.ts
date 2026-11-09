@@ -31,6 +31,7 @@ interface PatchBody {
   focus?: number;
   driver_name?: string;
   notes?: string | null;
+  career_path?: 'f2_f1' | 'f1_only';
 }
 
 // career_mode_drivers is a shared library: every recommendation that picks a
@@ -128,6 +129,13 @@ export async function PATCH(
       );
     }
     updatePayload.notes = body.notes;
+  }
+  // Career path (F2 -> F1 vs F1 only) is open to any signed-in driver, like stats.
+  if (body.career_path !== undefined) {
+    if (body.career_path !== 'f2_f1' && body.career_path !== 'f1_only') {
+      return NextResponse.json({ error: "career_path must be 'f2_f1' or 'f1_only'" }, { status: 400 });
+    }
+    updatePayload.career_path = body.career_path;
   }
   const { data, error } = await supabaseAdmin
     .schema('pitboss')
