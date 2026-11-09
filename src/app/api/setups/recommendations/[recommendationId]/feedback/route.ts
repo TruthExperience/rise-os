@@ -7,6 +7,10 @@ import { fetchParamRanges, fetchOverrides } from '@/lib/pitboss/setup-engine-dat
 import { fetchTelemetryContext } from '@/lib/pitboss/setup-engine-telemetry';
 
 export const dynamic = 'force-dynamic';
+// The worker walks a free-model waterfall (10s per model), so a slow run can
+// pass the old 25s client timeout. Give the route and the worker call room.
+export const maxDuration = 60;
+const SETUP_FEEDBACK_TIMEOUT_MS = 55_000;
 
 const MAX_FEEDBACK_LENGTH = 2000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -130,9 +134,13 @@ export async function POST(
         session_type:  rec.session_type,
         current_setup: generatedSetup,
         // null when no telemetry exists; the worker prompt handles both cases.
-        telemetry:     telemetryContext.available ? telemetryContext : null,
+        // upload_ids are DB ids the LLM can't use; drop them to keep the prompt small.
+        telemetry:     telemetryContext.available
+          ? (({ upload_ids, ...rest }) => rest)(telemetryContext)
+          : null,
       },
-      rec.league_id
+      rec.league_id,
+      SETUP_FEEDBACK_TIMEOUT_MS
     );
   } catch (err) {
     // ADDED — log this the same way a parse_error is logged, so it shows up
@@ -250,96 +258,4 @@ export async function POST(
   //     the same validator the recommend path relies on, and it records what
   //     (if anything) it had to correct. Falls back to the engine output if
   //     the RPC fails or returns an unexpected shape.
-  let finalSetup: Record<string, number> = adjustedResult.generated_setup;
-  let llmValidation: unknown = null;
-  {
-    const { data: vData, error: vErr } = await supabaseAdmin
-      .schema('pitboss')
-      .rpc('validate_setup', {
-        p_car_class_id: rec.car_class_id,
-        p_setup:        adjustedResult.generated_setup,
-        p_session_type: rec.session_type,
-      });
-    if (vErr) {
-      console.error('validate_setup failed:', vErr.message);
-      llmValidation = { error: vErr.message };
-    } else {
-      llmValidation = vData;
-      const cleaned = (vData as any)?.setup ?? (vData as any)?.cleaned_setup;
-      if (cleaned && typeof cleaned === 'object' && Object.keys(cleaned).length > 0) {
-        finalSetup = cleaned as Record<string, number>;
-      }
-    }
-  }
-
-  // 7. Insert the adjusted recommendation, chained via parent_recommendation_id
-  const { data: newRec, error: insertRecErr } = await supabaseAdmin
-    .schema('pitboss')
-    .from('setup_recommendations')
-    .insert({
-      league_id:                 rec.league_id,
-      car_class_id:               rec.car_class_id,
-      track_id:                   rec.track_id,
-      conditions:                 rec.conditions,
-      session_type:               rec.session_type,
-      driver_id:                   driver.id,
-      generated_setup:             finalSetup,
-      rationale:                   adjustedResult.rationale,
-      baseline_used:               adjustedResult.baseline_used,
-      model:                       adjustedResult.model,
-      confidence:                  adjustedResult.confidence,
-      parent_recommendation_id:    recommendationId,
-      feedback_tags:               feedbackTags,
-      adjustment_summary:          llmResult.summary,
-      telemetry_context:           telemetryContext.available ? telemetryContext : null,
-      telemetry_upload_ids:        telemetryContext.available ? telemetryContext.upload_ids : null,
-      llm_validation:              llmValidation,
-      car_team_id:                 (rec as any).car_team_id ?? null,
-      career_driver_id:            (rec as any).career_driver_id ?? null,
-    })
-    .select('id')
-    .single();
-
-  if (insertRecErr || !newRec) {
-    return NextResponse.json(
-      { error: `Failed to create adjusted recommendation: ${insertRecErr?.message}` },
-      { status: 500 }
-    );
-  }
-
-  // 8. Log the feedback, linked to the recommendation it produced
-  const { data: feedbackRow, error: insertFeedbackErr } = await supabaseAdmin
-    .schema('pitboss')
-    .from('setup_feedback')
-    .insert({
-      recommendation_id:           recommendationId,
-      driver_id:                    driver.id,
-      feedback_text,
-      llm_adjustments:              validated,
-      llm_summary:                  llmResult.summary,
-      llm_tags:                     { model: llmResult.model, provider: llmResult.provider },
-      telemetry_context:            telemetryContext.available ? telemetryContext : null,
-      llm_validation:               llmValidation,
-      resulting_recommendation_id:  newRec.id,
-    })
-    .select('id')
-    .single();
-
-  if (insertFeedbackErr) {
-    return NextResponse.json({ error: `Failed to log feedback: ${insertFeedbackErr.message}` }, { status: 500 });
-  }
-
-  return NextResponse.json(
-    {
-      feedback_id:                 feedbackRow.id,
-      resulting_recommendation_id: newRec.id,
-      adjustments:                 validated,
-      adjusted_setup:               finalSetup,
-      telemetry_used:               telemetryContext.available,
-      summary:                      llmResult.summary,
-      disclaimer:                   llmResult.disclaimer,
-      parse_error:                  false,
-    },
-    { status: 200 }
-  );
-}
+  let finalSetup: Record
