@@ -1375,7 +1375,8 @@ Return ONLY valid JSON \u2014 no markdown, no preamble.
 VALID PARAM KEYS (you may ONLY use keys from this list \u2014 never invent a key):
 ${paramKeysBlock}
 Shape: { "adjustments": [ { "param_key": string, "delta": number, "confidence": "low"|"medium"|"high", "reasoning": string } ], "summary": string }
-Rules: delta is signed (positive = increase, negative = decrease). If feedback doesn't map to any known param, omit it. If feedback is too vague, return an empty adjustments array and explain why in summary.`;
+Rules: delta is signed (positive = increase, negative = decrease). If feedback doesn't map to any known param, omit it. If feedback is too vague, return an empty adjustments array and explain why in summary.
+TELEMETRY: CONTEXT.telemetry, when non-null, is measured data (lap/sector times, tyre surface/inner temps and wear, setups tried with best laps). Tyre arrays are ordered [rear-left, rear-right, front-left, front-right]. Use it to confirm or contradict the driver's feedback; if telemetry contradicts the feedback, use a smaller delta and lower confidence and say so in reasoning. Cite the specific telemetry value behind each adjustment that uses it. Never invent telemetry. If telemetry is null, rely on the feedback alone. Keep every resulting value inside the parameter's allowed range.`;
   const prompt = `CONTEXT: ${JSON.stringify(context)}
 DRIVER FEEDBACK: "${feedback_text}"`;
 
