@@ -7,6 +7,7 @@ import {
   applySessionBias,
   applyDriverStyleBias,
   applyComparisonBias,
+  applyTelemetryPerformanceBias,
 } from '@/lib/pitboss/setup-engine';
 import {
   fetchParamRanges,
@@ -16,6 +17,10 @@ import {
   fetchCareerDriverStats,
   fetchDriverStyleProfile,
 } from '@/lib/pitboss/setup-engine-data';
+import {
+  fetchTelemetryPerformanceSamples,
+  fetchTelemetryContext,
+} from '@/lib/pitboss/setup-engine-telemetry';
 
 // Forces this route to opt out of Next.js's static/Data Cache handling.
 // Setup param ranges, overrides, and submissions change via direct SQL/
@@ -82,8 +87,9 @@ export async function POST(req: NextRequest) {
   const driver_id: string | null = authedDriver?.id ?? null;
 
   let paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile;
+  let telemetrySamples, telemetryContext;
   try {
-    [paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile] =
+    [paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile, telemetrySamples, telemetryContext] =
       await Promise.all([
         fetchParamRanges(car_class_id, session_type),
         fetchOverrides(track_id, car_class_id),
@@ -94,6 +100,20 @@ export async function POST(req: NextRequest) {
         // not the in-game car_team_id/career_driver_id — same as the
         // driver-style-profile route, it's "my own record", not a param.
         driver_id ? fetchDriverStyleProfile(driver_id) : Promise.resolve(null),
+        // Telemetry layers. Both are best-effort and never throw — a driver
+        // with no telemetry gets exactly the recommendation they got before.
+        fetchTelemetryPerformanceSamples({
+          trackId: track_id,
+          carClassId: car_class_id,
+          conditions,
+          sessionType: session_type,
+        }),
+        fetchTelemetryContext({
+          driverId: driver_id,
+          trackId: track_id,
+          carClassId: car_class_id,
+          sessionType: session_type,
+        }),
       ]);
   } catch (err) {
     return NextResponse.json(
@@ -127,6 +147,18 @@ export async function POST(req: NextRequest) {
       driverStats: careerDriverStats,
     });
   }
+
+  // Telemetry performance bias — pulls the setup toward what the fastest
+  // telemetry laps actually ran. A no-op below the engine's minimum sample
+  // count (5 laps), so thin data can't override the general blend. This layer
+  // existed in setup-engine.ts but was never called until now.
+  engineResult = applyTelemetryPerformanceBias({
+    base: engineResult,
+    paramRanges,
+    overrides,
+    telemetrySamples,
+    requestingLeagueId: league_id,
+  });
 
   // Session-type bias is always applied — session_type is required on every
   // request, and "practice" is an intentional no-op (empty weight map) so
@@ -179,12 +211,14 @@ export async function POST(req: NextRequest) {
       baseline_used:    engineResult.baseline_used,
       model:            engineResult.model,
       source_submission_ids: submissions.map((s) => s.id),
+      telemetry_context:    telemetryContext.available ? telemetryContext : null,
+      telemetry_upload_ids: telemetryContext.available ? telemetryContext.upload_ids : null,
       car_team_id,
       car_driver_id,
       car_driver_name_freetext,
       career_driver_id,
     })
-    .select('id, generated_setup, rationale, confidence, baseline_used, model, car_team_id, career_driver_id, created_at')
+    .select('id, generated_setup, rationale, confidence, baseline_used, model, car_team_id, career_driver_id, telemetry_upload_ids, created_at')
     .single();
 
   if (insertErr || !newRec) {
