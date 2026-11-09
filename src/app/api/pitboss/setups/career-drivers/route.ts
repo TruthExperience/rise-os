@@ -93,5 +93,20 @@ export async function POST(req: NextRequest) {
   if (error || !data) {
     return NextResponse.json({ error: error?.message ?? 'Failed to create career driver' }, { status: 500 });
   }
+  // Baseline snapshot so the progress chart has a starting point.
+  const { error: histError } = await supabaseAdmin
+    .schema('pitboss')
+    .from('career_driver_stat_history')
+    .insert({
+      career_driver_id: data.id,
+      pace,
+      racecraft,
+      awareness,
+      experience,
+      focus,
+      overall,
+      recorded_by: driver.id,
+    });
+  if (histError) console.error('career_driver_stat_history insert failed:', histError.message);
   return NextResponse.json(data, { status: 201 });
 }
