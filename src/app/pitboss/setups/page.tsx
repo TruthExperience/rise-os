@@ -72,6 +72,82 @@ const CONDITIONS = ['dry', 'wet', 'mixed'] as const
 const SESSION_TYPES = ['race', 'qualifying', 'sprint', 'time_trial', 'practice'] as const
 const DRIVER_MODES = ['league', 'career'] as const
 
+const CAREER_STAT_KEYS = ['pace', 'racecraft', 'awareness', 'experience', 'focus'] as const
+type CareerStatKey = typeof CAREER_STAT_KEYS[number]
+type CareerStats = Record<CareerStatKey, number>
+
+// Mirrors computeOverall in the career-drivers API routes (live preview only —
+// the server recomputes and stores the real overall on save).
+function previewOverall(s: CareerStats): number {
+  return Math.round(
+    s.pace * 0.35 + s.racecraft * 0.2 + s.awareness * 0.2 + s.experience * 0.15 + s.focus * 0.1
+  )
+}
+
+interface StatSnapshot extends CareerStats {
+  id: string
+  overall: number
+  recorded_at: string
+}
+
+function ProgressChart({ history }: { history: StatSnapshot[] }) {
+  if (history.length < 2) {
+    return (
+      <p className="text-gray-500 text-xs">
+        Save an update after your next race or season to start tracking progress.
+      </p>
+    )
+  }
+  const W = 300
+  const H = 70
+  const PAD = 6
+  const vals = history.map((h) => h.overall)
+  const min = Math.min(...vals) - 1
+  const max = Math.max(...vals) + 1
+  const x = (i: number) => PAD + (i * (W - PAD * 2)) / (history.length - 1)
+  const y = (v: number) => H - PAD - ((v - min) * (H - PAD * 2)) / (max - min)
+  const points = history.map((h, i) => `${x(i)},${y(h.overall)}`).join(' ')
+  const first = history[0]
+  const last = history[history.length - 1]
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-gray-400 text-xs uppercase tracking-wide">OVR progress</span>
+        <span className="text-white text-xs font-mono">
+          {first.overall} → {last.overall}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-16">
+        <polyline points={points} fill="none" stroke="#E8284A" strokeWidth={2} />
+        {history.map((h, i) => (
+          <circle key={h.id} cx={x(i)} cy={y(h.overall)} r={2.5} fill="#E8284A" />
+        ))}
+      </svg>
+      <div className="grid grid-cols-5 gap-1 text-center">
+        {CAREER_STAT_KEYS.map((k) => {
+          const diff = last[k] - first[k]
+          return (
+            <div key={k}>
+              <p className="text-gray-500 text-[10px] uppercase">{k.slice(0, 4)}</p>
+              <p className="text-white text-xs font-mono">{last[k]}</p>
+              <p
+                className={`text-[10px] font-mono ${
+                  diff > 0 ? 'text-green-400' : diff < 0 ? 'text-red-400' : 'text-gray-600'
+                }`}
+              >
+                {diff > 0 ? '+' : ''}{diff}
+              </p>
+            </div>
+          )
+        })}
+      </div>
+      <p className="text-gray-600 text-[10px]">
+        {history.length} updates since {new Date(first.recorded_at).toLocaleDateString()}
+      </p>
+    </div>
+  )
+}
+
 function SectionHeader({ title, count }: { title: string; count?: number }) {
   return (
     <div className="flex items-center gap-2 mb-3">
@@ -87,16 +163,26 @@ function StatSlider({
   label,
   value,
   onChange,
+  saved,
 }: {
   label: string
   value: number
   onChange: (v: number) => void
+  saved?: number
 }) {
+  const diff = saved !== undefined ? value - saved : 0
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
         <span className="text-gray-400 text-xs uppercase tracking-wide">{label}</span>
-        <span className="text-white text-xs font-mono">{value}</span>
+        <span className="text-white text-xs font-mono">
+          {value}
+          {diff !== 0 && (
+            <span className={diff > 0 ? 'text-green-400' : 'text-red-400'}>
+              {' '}({diff > 0 ? '+' : ''}{diff})
+            </span>
+          )}
+        </span>
       </div>
       <input
         type="range"
@@ -150,6 +236,13 @@ export default function SetupsPage() {
   const [newFocus, setNewFocus]           = useState(70)
   const [savingCareerDriver, setSavingCareerDriver] = useState(false)
 
+  // Editable copy of the selected career driver's attributes, so the user can
+  // update the sliders as the career progresses and save them back.
+  const [editStats, setEditStats]           = useState<CareerStats | null>(null)
+  const [savingStats, setSavingStats]       = useState(false)
+  const [statsSaved, setStatsSaved]         = useState(false)
+  const [statHistory, setStatHistory]       = useState<StatSnapshot[]>([])
+
 
   const [generating, setGenerating]   = useState(false)
   const [error, setError]             = useState('')
@@ -190,6 +283,34 @@ export default function SetupsPage() {
       .catch(() => setCareerDrivers([]))
       .finally(() => setLoadingCareerDrivers(false))
   }, [driverMode, careerDrivers.length])
+
+  // Whenever a career driver is picked, load its saved attributes into the
+  // editable sliders.
+  useEffect(() => {
+    const d = careerDrivers.find((c) => c.id === careerDriverId)
+    setStatsSaved(false)
+    setEditStats(
+      d
+        ? { pace: d.pace, racecraft: d.racecraft, awareness: d.awareness, experience: d.experience, focus: d.focus }
+        : null
+    )
+  }, [careerDriverId, careerDrivers])
+
+  async function loadStatHistory(id: string) {
+    try {
+      const res = await fetch(`/api/pitboss/setups/career-drivers/${id}/history`)
+      const data = await res.json()
+      setStatHistory(res.ok ? (data.history ?? []) : [])
+    } catch {
+      setStatHistory([])
+    }
+  }
+
+  // Load the progress history whenever a different career driver is picked.
+  useEffect(() => {
+    setStatHistory([])
+    if (careerDriverId) loadStatHistory(careerDriverId)
+  }, [careerDriverId])
 
   async function loadOptions() {
     setLoadingOptions(true)
@@ -251,6 +372,43 @@ export default function SetupsPage() {
     }
   }
 
+  async function saveCareerStats() {
+    if (!careerDriverId || !editStats) return
+    setSavingStats(true)
+    setError('')
+    setStatsSaved(false)
+    try {
+      const res = await fetch(`/api/pitboss/setups/career-drivers/${careerDriverId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editStats),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to update career driver')
+      setCareerDrivers((prev) =>
+        prev.map((c) =>
+          c.id === careerDriverId
+            ? {
+                ...c,
+                pace: data.pace,
+                racecraft: data.racecraft,
+                awareness: data.awareness,
+                experience: data.experience,
+                focus: data.focus,
+                overall: data.overall,
+              }
+            : c
+        )
+      )
+      setStatsSaved(true)
+      loadStatHistory(careerDriverId)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setSavingStats(false)
+    }
+  }
+
   async function generateRecommendation() {
     if (!carClassId || !trackId) return
     setGenerating(true)
@@ -307,6 +465,11 @@ export default function SetupsPage() {
   const selectedTrack = tracks.find((t) => t.id === trackId)
   const selectedTeam = teams.find((t) => t.id === teamId)
   const selectedTeamDrivers = selectedTeam?.drivers ?? []
+  const selectedCareerDriver = careerDrivers.find((c) => c.id === careerDriverId)
+  const statsDirty =
+    !!selectedCareerDriver &&
+    !!editStats &&
+    CAREER_STAT_KEYS.some((k) => editStats[k] !== selectedCareerDriver[k])
 
   return (
     <div className="min-h-screen bg-[#1A1A1A] pb-24">
@@ -471,6 +634,71 @@ export default function SetupsPage() {
                     </option>
                   ))}
                 </select>
+              )}
+
+              {selectedCareerDriver && editStats && (
+                <div className="rounded-xl border border-gray-800 bg-gray-900 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-white text-sm font-semibold">Career attributes</p>
+                    <p className="text-xs font-mono text-gray-400">
+                      OVR {previewOverall(editStats)}
+                      {previewOverall(editStats) !== selectedCareerDriver.overall && (
+                        <span
+                          className={
+                            previewOverall(editStats) > selectedCareerDriver.overall
+                              ? 'text-green-400'
+                              : 'text-red-400'
+                          }
+                        >
+                          {' '}({previewOverall(editStats) > selectedCareerDriver.overall ? '+' : ''}
+                          {previewOverall(editStats) - selectedCareerDriver.overall})
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  {CAREER_STAT_KEYS.map((k) => (
+                    <StatSlider
+                      key={k}
+                      label={k.charAt(0).toUpperCase() + k.slice(1)}
+                      value={editStats[k]}
+                      saved={selectedCareerDriver[k]}
+                      onChange={(v) => {
+                        setStatsSaved(false)
+                        setEditStats((prev) => (prev ? { ...prev, [k]: v } : prev))
+                      }}
+                    />
+                  ))}
+                  <p className="text-gray-500 text-xs">
+                    Update these as your career progresses. Saved values feed straight into your setup recommendation.
+                  </p>
+                  <div className="border-t border-gray-800 pt-3">
+                    <ProgressChart history={statHistory} />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={saveCareerStats}
+                      disabled={!statsDirty || savingStats}
+                      className="flex-1 rounded-lg bg-[#E8284A] py-2 text-xs font-bold text-white disabled:opacity-40"
+                    >
+                      {savingStats ? 'Saving…' : statsSaved && !statsDirty ? 'Saved ✓' : 'Save progress'}
+                    </button>
+                    <button
+                      onClick={() =>
+                        setEditStats({
+                          pace: selectedCareerDriver.pace,
+                          racecraft: selectedCareerDriver.racecraft,
+                          awareness: selectedCareerDriver.awareness,
+                          experience: selectedCareerDriver.experience,
+                          focus: selectedCareerDriver.focus,
+                        })
+                      }
+                      disabled={!statsDirty || savingStats}
+                      className="flex-1 rounded-lg border border-gray-800 py-2 text-xs font-semibold text-gray-400 disabled:opacity-40"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
               )}
 
               {!creatingCareerDriver ? (
