@@ -93,6 +93,7 @@ export default function CareerTrackerPage() {
   const [loadingResults, setLoadingResults] = useState(false)
   const [savingPath, setSavingPath] = useState(false)
   const [error, setError] = useState('')
+  const [deletingDriver, setDeletingDriver] = useState(false)
 
   // Add-result form
   const [showForm, setShowForm] = useState(false)
@@ -168,6 +169,7 @@ export default function CareerTrackerPage() {
       .finally(() => setLoadingResults(false))
   }, [driverId])
 
+  const selected = drivers.find((d) => d.id === driverId)
   const hasF2 = careerPath === 'f2_f1' || results.some((r) => r.series === 'f2')
   const tabs: View[] = hasF2 ? ['f2', 'f1', 'career'] : ['f1']
   const activeView: View = tabs.includes(view) ? view : tabs[0]
@@ -278,6 +280,30 @@ export default function CareerTrackerPage() {
     }
   }
 
+  async function deleteDriver() {
+    if (!driverId || !selected) return
+    if (
+      !window.confirm(
+        `Delete ${selected.driver_name}? This also deletes all their race results and stat history. This cannot be undone.`
+      )
+    )
+      return
+    setDeletingDriver(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/pitboss/setups/career-drivers/${driverId}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to delete driver')
+      setDrivers((prev) => prev.filter((d) => d.id !== driverId))
+      setResults([])
+      setDriverId('')
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setDeletingDriver(false)
+    }
+  }
+
   if (status === 'loading' || loadingDrivers) {
     return (
       <div className="min-h-screen bg-[#1A1A1A] flex items-center justify-center">
@@ -285,8 +311,6 @@ export default function CareerTrackerPage() {
       </div>
     )
   }
-
-  const selected = drivers.find((d) => d.id === driverId)
 
   return (
     <div className="min-h-screen bg-[#1A1A1A] pb-24">
@@ -313,6 +337,15 @@ export default function CareerTrackerPage() {
               </option>
             ))}
           </select>
+          {selected && (
+            <button
+              onClick={deleteDriver}
+              disabled={deletingDriver}
+              className="mt-2 text-xs text-red-400/80 hover:text-red-300 disabled:opacity-50"
+            >
+              {deletingDriver ? 'Deleting…' : `Delete ${selected.driver_name}`}
+            </button>
+          )}
         </div>
 
         {error && (
