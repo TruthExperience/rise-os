@@ -1376,7 +1376,8 @@ VALID PARAM KEYS (you may ONLY use keys from this list \u2014 never invent a key
 ${paramKeysBlock}
 Shape: { "adjustments": [ { "param_key": string, "delta": number, "confidence": "low"|"medium"|"high", "reasoning": string } ], "summary": string }
 Rules: delta is signed (positive = increase, negative = decrease). If feedback doesn't map to any known param, omit it. If feedback is too vague, return an empty adjustments array and explain why in summary.
-TELEMETRY: CONTEXT.telemetry, when non-null, is measured data (lap/sector times, tyre surface/inner temps and wear, setups tried with best laps). Tyre arrays are ordered [rear-left, rear-right, front-left, front-right]. Use it to confirm or contradict the driver's feedback; if telemetry contradicts the feedback, use a smaller delta and lower confidence and say so in reasoning. Cite the specific telemetry value behind each adjustment that uses it. Never invent telemetry. If telemetry is null, rely on the feedback alone. Keep every resulting value inside the parameter's allowed range.`;
+TELEMETRY: CONTEXT.telemetry, when non-null, is measured data (lap/sector times, tyre surface/inner temps and wear, setups tried with best laps). Tyre arrays are ordered [rear-left, rear-right, front-left, front-right]. Use it to confirm or contradict the driver's feedback; if telemetry contradicts the feedback, use a smaller delta and lower confidence and say so in reasoning. Cite the specific telemetry value behind each adjustment that uses it. Never invent telemetry. If telemetry is null, rely on the feedback alone. Keep every resulting value inside the parameter's allowed range.
+OUTPUT LIMITS: return at most 6 adjustments, keep each reasoning under 25 words, and keep summary under 60 words. Think briefly. The JSON must be complete.`;
   const prompt = `CONTEXT: ${JSON.stringify(context)}
 DRIVER FEEDBACK: "${feedback_text}"`;
 
@@ -1387,7 +1388,9 @@ DRIVER FEEDBACK: "${feedback_text}"`;
         { role: "system", content: system },
         { role: "user", content: prompt },
       ],
-      max_tokens: 1024,
+      // Reasoning models spend part of this budget on hidden thinking; 1024
+      // truncated the JSON mid-string (see setup_feedback parse_error rows).
+      max_tokens: 4000,
       temperature: 0.2,
     },
     env
@@ -1396,10 +1399,16 @@ DRIVER FEEDBACK: "${feedback_text}"`;
 
   const disclaimer = "AI-generated suggestion. Review before applying to setup.";
   try {
-    const raw = data.response
+    // Strip think blocks and code fences, then take the outermost {...} so
+    // stray prose before/after the JSON doesn't break parsing.
+    let raw = String(data.response ?? "")
+      .replace(/<think>[\s\S]*?<\/think>/gi, "")
       .replace(/^```(?:json)?\s*/i, "")
       .replace(/\s*```$/, "")
       .trim();
+    const first = raw.indexOf("{");
+    const last = raw.lastIndexOf("}");
+    if (first !== -1 && last > first) raw = raw.slice(first, last + 1);
     const parsed = JSON.parse(raw);
     const validKeys = new Set<string>(known_param_keys);
     parsed.adjustments = (parsed.adjustments ?? []).filter(
