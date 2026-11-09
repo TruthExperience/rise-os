@@ -4,6 +4,7 @@ import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import { pbSetupFeedback } from '@/lib/pitboss-llm';
 import { applyFeedbackAdjustments, type FeedbackAdjustment, type GeneratedRecommendation } from '@/lib/pitboss/setup-engine';
 import { fetchParamRanges, fetchOverrides } from '@/lib/pitboss/setup-engine-data';
+import { fetchTelemetryContext } from '@/lib/pitboss/setup-engine-telemetry';
 
 export const dynamic = 'force-dynamic';
 
@@ -59,7 +60,7 @@ export async function POST(
   const { data: rec, error: recErr } = await supabaseAdmin
     .schema('pitboss')
     .from('setup_recommendations')
-    .select('id, league_id, car_class_id, track_id, conditions, session_type, driver_id, generated_setup, rationale, confidence, baseline_used, model')
+    .select('id, league_id, car_class_id, track_id, conditions, session_type, driver_id, generated_setup, rationale, confidence, baseline_used, model, car_team_id, career_driver_id')
     .eq('id', recommendationId)
     .single();
 
@@ -102,6 +103,15 @@ export async function POST(
     );
   }
 
+  // 2b. Measured telemetry for this driver/track/class (falls back to the pool).
+  //     Best-effort: never throws, returns { available: false } on any problem.
+  const telemetryContext = await fetchTelemetryContext({
+    driverId:    driver.id,
+    trackId:     rec.track_id,
+    carClassId:  rec.car_class_id,
+    sessionType: rec.session_type,
+  });
+
   // 3. Call the LLM layer (worker-side /setup-feedback — engine stays pure/LLM-free)
   // ADDED — wrap in try/catch. Previously an uncaught exception here (bad
   // PITBOSS_WORKER_URL, network failure, non-JSON worker response) bypassed
@@ -119,6 +129,8 @@ export async function POST(
         conditions:    rec.conditions,
         session_type:  rec.session_type,
         current_setup: generatedSetup,
+        // null when no telemetry exists; the worker prompt handles both cases.
+        telemetry:     telemetryContext.available ? telemetryContext : null,
       },
       rec.league_id
     );
@@ -234,6 +246,32 @@ export async function POST(
 
   const feedbackTags = validated.map((a) => a.param_key);
 
+  // 6b. Final range/step check in SQL. The engine already clamps, but this is
+  //     the same validator the recommend path relies on, and it records what
+  //     (if anything) it had to correct. Falls back to the engine output if
+  //     the RPC fails or returns an unexpected shape.
+  let finalSetup: Record<string, number> = adjustedResult.generated_setup;
+  let llmValidation: unknown = null;
+  {
+    const { data: vData, error: vErr } = await supabaseAdmin
+      .schema('pitboss')
+      .rpc('validate_setup', {
+        p_car_class_id: rec.car_class_id,
+        p_setup:        adjustedResult.generated_setup,
+        p_session_type: rec.session_type,
+      });
+    if (vErr) {
+      console.error('validate_setup failed:', vErr.message);
+      llmValidation = { error: vErr.message };
+    } else {
+      llmValidation = vData;
+      const cleaned = (vData as any)?.setup ?? (vData as any)?.cleaned_setup;
+      if (cleaned && typeof cleaned === 'object' && Object.keys(cleaned).length > 0) {
+        finalSetup = cleaned as Record<string, number>;
+      }
+    }
+  }
+
   // 7. Insert the adjusted recommendation, chained via parent_recommendation_id
   const { data: newRec, error: insertRecErr } = await supabaseAdmin
     .schema('pitboss')
@@ -245,7 +283,7 @@ export async function POST(
       conditions:                 rec.conditions,
       session_type:               rec.session_type,
       driver_id:                   driver.id,
-      generated_setup:             adjustedResult.generated_setup,
+      generated_setup:             finalSetup,
       rationale:                   adjustedResult.rationale,
       baseline_used:               adjustedResult.baseline_used,
       model:                       adjustedResult.model,
@@ -253,6 +291,11 @@ export async function POST(
       parent_recommendation_id:    recommendationId,
       feedback_tags:               feedbackTags,
       adjustment_summary:          llmResult.summary,
+      telemetry_context:           telemetryContext.available ? telemetryContext : null,
+      telemetry_upload_ids:        telemetryContext.available ? telemetryContext.upload_ids : null,
+      llm_validation:              llmValidation,
+      car_team_id:                 (rec as any).car_team_id ?? null,
+      career_driver_id:            (rec as any).career_driver_id ?? null,
     })
     .select('id')
     .single();
@@ -275,6 +318,8 @@ export async function POST(
       llm_adjustments:              validated,
       llm_summary:                  llmResult.summary,
       llm_tags:                     { model: llmResult.model, provider: llmResult.provider },
+      telemetry_context:            telemetryContext.available ? telemetryContext : null,
+      llm_validation:               llmValidation,
       resulting_recommendation_id:  newRec.id,
     })
     .select('id')
@@ -289,7 +334,8 @@ export async function POST(
       feedback_id:                 feedbackRow.id,
       resulting_recommendation_id: newRec.id,
       adjustments:                 validated,
-      adjusted_setup:               adjustedResult.generated_setup,
+      adjusted_setup:               finalSetup,
+      telemetry_used:               telemetryContext.available,
       summary:                      llmResult.summary,
       disclaimer:                   llmResult.disclaimer,
       parse_error:                  false,
