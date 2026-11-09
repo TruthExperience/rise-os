@@ -674,6 +674,12 @@ export default function SetupsPage() {
                   <div className="border-t border-gray-800 pt-3">
                     <ProgressChart history={statHistory} />
                   </div>
+                  <button
+                    onClick={() => router.push(`/pitboss/career?driver=${selectedCareerDriver.id}`)}
+                    className="w-full rounded-lg border border-gray-800 py-2 text-xs font-semibold text-[#E8284A]"
+                  >
+                    Career tracker: qualifying &amp; race results →
+                  </button>
                   <div className="flex gap-2">
                     <button
                       onClick={saveCareerStats}
