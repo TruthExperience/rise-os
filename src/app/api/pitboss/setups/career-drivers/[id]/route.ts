@@ -35,9 +35,10 @@ interface PatchBody {
 
 // career_mode_drivers is a shared library: every recommendation that picks a
 // career driver reads these ratings. It has no owner column, so there is no
-// "creator" to check. Editing existing entries is therefore limited to
-// commissioners, owners and co-owners (any league). Nothing in the app calls
-// this route today, so no page changes.
+// "creator" to check. Any signed-in driver may update the five attribute
+// ratings (the setups page uses this so drivers can track career progress).
+// Renaming an entry or editing its notes stays limited to commissioners,
+// owners and co-owners (any league).
 async function isAdminInAnyLeague(driverId: string): Promise<boolean> {
   const admin = createAdminClient();
   const { data, error } = await admin
@@ -57,9 +58,6 @@ export async function PATCH(
   if (!driver) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  if (!(await isAdminInAnyLeague(driver.id))) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  }
 
   const supabaseAdmin = createAdminClient();
   const { id } = await params;
@@ -71,6 +69,13 @@ export async function PATCH(
   }
   if (!body || typeof body !== 'object') {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  // Name / notes edits are admin-only; stat edits are open to any signed-in driver.
+  if (body.driver_name !== undefined || body.notes !== undefined) {
+    if (!(await isAdminInAnyLeague(driver.id))) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
   }
 
   const { data: existing, error: fetchError } = await supabaseAdmin
@@ -133,6 +138,22 @@ export async function PATCH(
     .single();
   if (error || !data) {
     return NextResponse.json({ error: error?.message ?? 'Failed to update career driver' }, { status: 500 });
+  }
+
+  // Record a progress snapshot when any attribute actually changed. Best
+  // effort: a history failure must not fail the save itself.
+  const statsChanged = statFields.some((f) => merged[f] !== existing[f]);
+  if (statsChanged) {
+    const { error: histError } = await supabaseAdmin
+      .schema('pitboss')
+      .from('career_driver_stat_history')
+      .insert({
+        career_driver_id: id,
+        ...merged,
+        overall: updatePayload.overall,
+        recorded_by: driver.id,
+      });
+    if (histError) console.error('career_driver_stat_history insert failed:', histError.message);
   }
   return NextResponse.json(data);
 }
