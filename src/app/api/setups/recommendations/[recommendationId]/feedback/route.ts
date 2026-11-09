@@ -258,4 +258,97 @@ export async function POST(
   //     the same validator the recommend path relies on, and it records what
   //     (if anything) it had to correct. Falls back to the engine output if
   //     the RPC fails or returns an unexpected shape.
-  let finalSetup: Record
+  let finalSetup: Record<string, number> = adjustedResult.generated_setup as Record<string, number>;
+  let validatorViolations: unknown[] = [];
+  try {
+    const { data: vData, error: vErr } = await supabaseAdmin
+      .schema('pitboss')
+      .rpc('validate_setup', {
+        p_car_class_id:  rec.car_class_id,
+        p_setup:         adjustedResult.generated_setup,
+        p_session_type:  rec.session_type,
+      });
+
+    const vSetup = (vData as { setup?: unknown } | null)?.setup;
+    if (!vErr && vSetup && typeof vSetup === 'object' && !Array.isArray(vSetup) && Object.keys(vSetup).length > 0) {
+      // Merge so a param the validator doesn't know about (it drops unknown
+      // keys) keeps the engine's value instead of vanishing from the setup.
+      finalSetup = { ...finalSetup, ...(vSetup as Record<string, number>) };
+      const violations = (vData as { violations?: unknown }).violations;
+      validatorViolations = Array.isArray(violations) ? violations : [];
+    } else if (vErr) {
+      console.error('validate_setup RPC failed, using engine output:', vErr.message);
+    }
+  } catch (err) {
+    console.error('validate_setup RPC threw, using engine output:', err instanceof Error ? err.message : err);
+  }
+
+  // 7. Insert the adjusted recommendation, chained via parent_recommendation_id
+  const { data: newRec, error: insertRecErr } = await supabaseAdmin
+    .schema('pitboss')
+    .from('setup_recommendations')
+    .insert({
+      league_id:                 rec.league_id,
+      car_class_id:               rec.car_class_id,
+      track_id:                   rec.track_id,
+      conditions:                 rec.conditions,
+      session_type:               rec.session_type,
+      driver_id:                   driver.id,
+      car_team_id:                 rec.car_team_id,
+      career_driver_id:            rec.career_driver_id,
+      generated_setup:             finalSetup,
+      rationale:                   adjustedResult.rationale,
+      baseline_used:               adjustedResult.baseline_used,
+      model:                       adjustedResult.model,
+      confidence:                  adjustedResult.confidence,
+      parent_recommendation_id:    recommendationId,
+      feedback_tags:               feedbackTags,
+      adjustment_summary:          llmResult.summary,
+    })
+    .select('id')
+    .single();
+
+  if (insertRecErr || !newRec) {
+    return NextResponse.json(
+      { error: `Failed to create adjusted recommendation: ${insertRecErr?.message}` },
+      { status: 500 }
+    );
+  }
+
+  // 8. Log the feedback, linked to the recommendation it produced
+  const { data: feedbackRow, error: insertFeedbackErr } = await supabaseAdmin
+    .schema('pitboss')
+    .from('setup_feedback')
+    .insert({
+      recommendation_id:           recommendationId,
+      driver_id:                    driver.id,
+      feedback_text,
+      llm_adjustments:              validated,
+      llm_summary:                  llmResult.summary,
+      llm_tags:                     {
+        model: llmResult.model,
+        provider: llmResult.provider,
+        ...(validatorViolations.length > 0 ? { validator_violations: validatorViolations } : {}),
+      },
+      resulting_recommendation_id:  newRec.id,
+    })
+    .select('id')
+    .single();
+
+  if (insertFeedbackErr) {
+    return NextResponse.json({ error: `Failed to log feedback: ${insertFeedbackErr.message}` }, { status: 500 });
+  }
+
+  return NextResponse.json(
+    {
+      feedback_id:                 feedbackRow.id,
+      resulting_recommendation_id: newRec.id,
+      adjustments:                 validated,
+      adjusted_setup:               finalSetup,
+      summary:                      llmResult.summary,
+      disclaimer:                   llmResult.disclaimer,
+      parse_error:                  false,
+    },
+    { status: 200 }
+  );
+}
