@@ -66,6 +66,17 @@ interface Recommendation {
   baseline_used: boolean
   model: string
   created_at: string
+  saved_at?: string | null
+  label?: string | null
+}
+
+interface SavedSetup extends Recommendation {
+  car_class_id: string
+  track_id: string
+  conditions: string
+  session_type: string
+  track_name: string | null
+  car_class_name: string | null
 }
 
 const CONDITIONS = ['dry', 'wet', 'mixed'] as const
@@ -247,6 +258,10 @@ export default function SetupsPage() {
   const [generating, setGenerating]   = useState(false)
   const [error, setError]             = useState('')
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null)
+  const [savedSetups, setSavedSetups] = useState<SavedSetup[]>([])
+  const [showSaved, setShowSaved]     = useState(false)
+  const [saveLabel, setSaveLabel]     = useState('')
+  const [savingSetup, setSavingSetup] = useState(false)
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -255,6 +270,11 @@ export default function SetupsPage() {
   useEffect(() => {
     loadOptions()
   }, [])
+
+  useEffect(() => {
+    if (status !== 'authenticated') return
+    loadSaved()
+  }, [status])
 
   // Reload teams whenever the car class changes, and reset any picked
   // team/driver since they belong to the previous car class's roster.
@@ -409,6 +429,75 @@ export default function SetupsPage() {
     }
   }
 
+  async function loadSaved() {
+    try {
+      const res = await fetch('/api/pitboss/setups/saved')
+      const data = await res.json()
+      if (res.ok) setSavedSetups(data.saved ?? [])
+    } catch {
+      // Saved list is a convenience; ignore load failures.
+    }
+  }
+
+  async function saveCurrentSetup() {
+    if (!recommendation) return
+    setSavingSetup(true)
+    setError('')
+    try {
+      const res = await fetch('/api/pitboss/setups/saved', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recommendation_id: recommendation.id, label: saveLabel.trim() || null }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save setup')
+      setRecommendation({ ...recommendation, saved_at: data.saved_at, label: data.label })
+      setSaveLabel('')
+      await loadSaved()
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setSavingSetup(false)
+    }
+  }
+
+  async function unsaveSetup(id: string) {
+    setError('')
+    try {
+      const res = await fetch(`/api/pitboss/setups/saved/${id}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to remove saved setup')
+      setSavedSetups((prev) => prev.filter((x) => x.id !== id))
+      if (recommendation?.id === id) setRecommendation({ ...recommendation, saved_at: null, label: null })
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  function openSaved(item: SavedSetup) {
+    setCarClassId(item.car_class_id)
+    setTrackId(item.track_id)
+    if ((CONDITIONS as readonly string[]).includes(item.conditions)) {
+      setConditions(item.conditions as typeof CONDITIONS[number])
+    }
+    if ((SESSION_TYPES as readonly string[]).includes(item.session_type)) {
+      setSessionType(item.session_type as typeof SESSION_TYPES[number])
+    }
+    setRecommendation({
+      id: item.id,
+      generated_setup: item.generated_setup,
+      rationale: item.rationale ?? {},
+      confidence: Number(item.confidence ?? 0),
+      baseline_used: item.baseline_used,
+      model: item.model,
+      created_at: item.created_at,
+      saved_at: item.saved_at,
+      label: item.label,
+    })
+    setShowSaved(false)
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
+  }
+
   async function generateRecommendation() {
     if (!carClassId || !trackId) return
     setGenerating(true)
@@ -451,6 +540,8 @@ export default function SetupsPage() {
       ...recommendation,
       id: newRecommendationId,
       generated_setup: adjustedSetup,
+      saved_at: null,
+      label: null,
     })
   }
 
@@ -482,6 +573,52 @@ export default function SetupsPage() {
       </div>
 
             <div className="px-4 space-y-6">
+        <div>
+          <button
+            onClick={() => setShowSaved((v) => !v)}
+            className="w-full rounded-xl border border-gray-800 bg-gray-900 px-4 py-3 text-left flex items-center justify-between"
+          >
+            <div>
+              <p className="text-white text-sm font-semibold">Saved Setups</p>
+              <p className="text-gray-500 text-xs mt-0.5">
+                {savedSetups.length ? `${savedSetups.length} saved` : 'Save a generated setup to pull it back up later'}
+              </p>
+            </div>
+            <span className="text-[#E8284A] text-lg">{showSaved ? '−' : '+'}</span>
+          </button>
+          {showSaved && (
+            <div className="mt-2 rounded-xl border border-gray-800 overflow-hidden">
+              {savedSetups.length === 0 ? (
+                <p className="px-4 py-3 text-gray-500 text-xs">Nothing saved yet.</p>
+              ) : (
+                savedSetups.map((item, i) => (
+                  <div
+                    key={item.id}
+                    className={`flex items-center gap-3 px-4 py-3 ${i > 0 ? 'border-t border-gray-800' : ''}`}
+                  >
+                    <button onClick={() => openSaved(item)} className="flex-1 text-left min-w-0">
+                      <p className="text-white text-sm font-semibold truncate">
+                        {item.label || item.track_name || 'Setup'}
+                      </p>
+                      <p className="text-gray-500 text-xs mt-0.5 truncate">
+                        {[item.track_name, item.car_class_name, item.conditions, item.session_type.replace('_', ' ')]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => unsaveSetup(item.id)}
+                      className="text-xs text-red-400/80 hover:text-red-300"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+
         <button
           onClick={() => router.push('/pitboss/setups/driver-style-profile')}
           className="w-full rounded-xl border border-gray-800 bg-gray-900 px-4 py-3 text-left flex items-center justify-between"
@@ -836,6 +973,39 @@ export default function SetupsPage() {
                   </tbody>
                 </table>
               </div>
+            </div>
+
+            <div className="rounded-xl border border-gray-800 bg-gray-900 px-4 py-3">
+              {recommendation.saved_at ? (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm text-gray-300 truncate">
+                    Saved{recommendation.label ? ` as "${recommendation.label}"` : ''}
+                  </p>
+                  <button
+                    onClick={() => unsaveSetup(recommendation.id)}
+                    className="text-xs text-red-400/80 hover:text-red-300 shrink-0"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <input
+                    value={saveLabel}
+                    onChange={(e) => setSaveLabel(e.target.value)}
+                    maxLength={80}
+                    placeholder="Name (optional)"
+                    className="flex-1 min-w-0 rounded-lg bg-gray-950 border border-gray-800 px-3 py-2 text-white text-sm focus:outline-none focus:border-[#E8284A]"
+                  />
+                  <button
+                    onClick={saveCurrentSetup}
+                    disabled={savingSetup}
+                    className="rounded-lg bg-[#E8284A] px-4 py-2 text-sm font-bold text-white disabled:opacity-40"
+                  >
+                    {savingSetup ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              )}
             </div>
 
             <SetupFeedbackPanel
