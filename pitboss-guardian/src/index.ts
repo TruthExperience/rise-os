@@ -95,6 +95,17 @@ var DANGEROUS_PERMISSIONS = {
 var STEWARD_ROLE_NAME_PATTERNS = [/steward/i, /moderator|mod\b/i];
 var ALERTS_CHANNEL_NAME_PATTERNS = [/guardian/i, /mod-?log/i, /audit/i, /security/i, /alert/i];
 var AUTO_CREATED_ALERTS_CHANNEL_NAME = "guardian-alerts";
+// PATCH (2026-11-12): auto staff exemption. Any member holding a role that can change the
+// server (Administrator, Manage Server/Roles/Channels/Webhooks) or a steward/mod-named role
+// is skipped by scoreAuditEntry. Role list is kept live from Gateway role events, so there is
+// nothing to maintain by hand. Bot-managed roles are never counted as staff.
+var MANAGE_GUILD_PERMISSION = 1n << 5n;
+var STAFF_PERMISSION_MASK = DANGEROUS_PERMISSIONS.ADMINISTRATOR | MANAGE_GUILD_PERMISSION | DANGEROUS_PERMISSIONS.MANAGE_ROLES | DANGEROUS_PERMISSIONS.MANAGE_CHANNELS | DANGEROUS_PERMISSIONS.MANAGE_WEBHOOKS;
+function isStaffRole(role, guildId) {
+  if (!role || role.id === guildId || role.managed) return false;
+  if ((BigInt(role.permissions ?? "0") & STAFF_PERMISSION_MASK) !== 0n) return true;
+  return STEWARD_ROLE_NAME_PATTERNS.some((p) => p.test(role.name ?? ""));
+}
 var GuildGuardian = class {
   // Map<guildId, Map<actorId, entry[]>>
   constructor(state, env) {
@@ -712,7 +723,27 @@ var GuildGuardian = class {
         break;
       case "GUILD_CREATE":
         await this.provisionGuild(data);
+        this.staffRolesByGuild ??= /* @__PURE__ */ new Map();
+        this.staffRolesByGuild.set(data.id, new Set((data.roles ?? []).filter((r) => isStaffRole(r, data.id)).map((r) => r.id)));
+        this.clearRoleCache(data.id);
         this.notifyRise(data);
+        break;
+      case "GUILD_ROLE_CREATE":
+      case "GUILD_ROLE_UPDATE": {
+        const set = this.staffRolesByGuild?.get(data.guild_id);
+        if (set) {
+          if (isStaffRole(data.role, data.guild_id)) set.add(data.role.id);
+          else set.delete(data.role.id);
+        }
+        this.clearRoleCache(data.guild_id);
+        break;
+      }
+      case "GUILD_ROLE_DELETE":
+        this.staffRolesByGuild?.get(data.guild_id)?.delete(data.role_id);
+        this.clearRoleCache(data.guild_id);
+        break;
+      case "GUILD_MEMBER_UPDATE":
+        this.clearRoleCache(data.guild_id, data.user?.id);
         break;
       case "GUILD_MEMBER_ADD":
         if (this.guildConfigs.has(data.guild_id)) await this.scoreJoin(data.guild_id, data);
@@ -785,6 +816,7 @@ var GuildGuardian = class {
     }
     if (entry.user_id === this.env.DISCORD_APP_ID) return;
     if (config.whitelistedActorIds.includes(entry.user_id)) return;
+    if (await this.hasTrustedRole(guildId, entry.user_id)) return;
     const now = Date.now();
     const actorId = entry.user_id;
     const actionType = entry.action_type;
@@ -846,6 +878,53 @@ var GuildGuardian = class {
       else if (webhookCount >= NUKE_WEBHOOK_THRESHOLD) await fire(`${webhookCount} webhooks created by one actor in ${NUKE_WINDOW_MS / 1e3}s`, webhookCount, { recordAs: "webhook_create" });
       else if (botAddCount >= NUKE_BOT_ADD_THRESHOLD) await fire(`${botAddCount} bots/integrations added by one actor in ${NUKE_WINDOW_MS / 1e3}s`, botAddCount, { recordAs: "bot_add" });
     }
+  }
+  // ─── Staff auto-exemption (PATCH 2026-11-12) ───────────────────────────
+  async getStaffRoleIds(guildId) {
+    this.staffRolesByGuild ??= new Map();
+    this.staffRolesFailedAt ??= new Map();
+    const known = this.staffRolesByGuild.get(guildId);
+    if (known) return known;
+    if (Date.now() - (this.staffRolesFailedAt.get(guildId) ?? 0) < 15e3) return /* @__PURE__ */ new Set();
+    const res = await fetch(`https://discord.com/api/v10/guilds/${guildId}/roles`, {
+      headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` }
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      this.staffRolesFailedAt.set(guildId, Date.now());
+      return /* @__PURE__ */ new Set();
+    }
+    const roles = await res.json();
+    const set = new Set(roles.filter((r) => isStaffRole(r, guildId)).map((r) => r.id));
+    this.staffRolesByGuild.set(guildId, set);
+    return set;
+  }
+  clearRoleCache(guildId, userId) {
+    if (!this.roleCache) return;
+    if (userId) {
+      this.roleCache.delete(`${guildId}:${userId}`);
+      return;
+    }
+    for (const k of this.roleCache.keys()) if (k.startsWith(`${guildId}:`)) this.roleCache.delete(k);
+  }
+  async hasTrustedRole(guildId, userId) {
+    const manual = (this.env.TRUSTED_ROLE_IDS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+    const staff = await this.getStaffRoleIds(guildId);
+    if (staff.size === 0 && manual.length === 0) return false;
+    this.roleCache ??= /* @__PURE__ */ new Map();
+    const key = `${guildId}:${userId}`;
+    const hit = this.roleCache.get(key);
+    if (hit && Date.now() - hit.at < hit.ttl) return hit.ok;
+    const res = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
+      headers: { Authorization: `Bot ${this.env.DISCORD_BOT_TOKEN?.trim()}` }
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      this.roleCache.set(key, { ok: false, at: Date.now(), ttl: 15e3 });
+      return false;
+    }
+    const member = await res.json();
+    const ok = (member.roles ?? []).some((r) => staff.has(r) || manual.includes(r));
+    this.roleCache.set(key, { ok, at: Date.now(), ttl: 6e4 });
+    return ok;
   }
   guildUpdateIsDangerous(entry) {
     const changes = entry.changes ?? [];
