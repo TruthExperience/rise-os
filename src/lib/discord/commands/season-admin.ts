@@ -723,6 +723,10 @@ interface ResultInput {
   fastestLap: boolean;
   pointsOverride: number | null;
   sprintFinish: number | null;
+  /** Sprint grid slot (e.g. reverse-championship order). Only written when supplied. */
+  sprintGrid?: number | null;
+  sprintDnf?: boolean | null;
+  sprintFastestLap?: boolean | null;
   qualiTimeSeconds?: number | null;
   raceTimeSeconds?: number | null;
   bestLapSeconds?: number | null;
@@ -796,8 +800,14 @@ async function saveResult(input: ResultInput, table: PointsTable) {
         fastest_lap: input.fastestLap,
         points_earned: points,
         franchise_id: franchiseId,
-        sprint_finish_position: input.sprintFinish,
-        sprint_points_earned: sprintPoints,
+        // Only touch the sprint fields when a sprint finish was supplied, so
+        // importing the main race after a sprint doesn't wipe the sprint result.
+        ...(input.sprintFinish !== null
+          ? { sprint_finish_position: input.sprintFinish, sprint_points_earned: sprintPoints }
+          : {}),
+        ...(input.sprintGrid != null ? { sprint_qualifying_position: input.sprintGrid } : {}),
+        ...(input.sprintDnf != null ? { sprint_dnf: input.sprintDnf } : {}),
+        ...(input.sprintFastestLap != null ? { sprint_fastest_lap: input.sprintFastestLap } : {}),
         ...(input.qualiTimeSeconds != null ? { quali_time_seconds: input.qualiTimeSeconds } : {}),
         ...(input.raceTimeSeconds != null && !input.dnf ? { race_time_seconds: input.raceTimeSeconds } : {}),
         ...(input.bestLapSeconds != null ? { best_lap_seconds: input.bestLapSeconds } : {}),
@@ -961,6 +971,8 @@ async function findDriverByToken(token: string) {
  *   driver (Discord ID, or exact username / display name), finish, quali,
  *   dnf (true/false), dnf_reason, fastest_lap (true/false), points
  *   (overrides the points table), sprint_finish,
+ *   sprint_grid, sprint_dnf, sprint_fastest_lap (sprint columns are only
+ *   written when present, so a later race import never wipes them),
  *   quali_time, race_time (winner's total time, or each driver's total),
  *   best_lap  (all accept 83.456 or 1:23.456)
  * Sheet-style headers also work: "Quali Time", "Fastest Lap" (lap time), and
@@ -1048,6 +1060,9 @@ registerCommand("import-results", async (ctx) => {
               fastestLap: csvBool(rec.fastest_lap),
               pointsOverride: csvNumber(rec.points, "points"),
               sprintFinish: csvInt(rec.sprint_finish, "sprint_finish"),
+              sprintGrid: csvInt(rec.sprint_grid, "sprint_grid"),
+              sprintDnf: rec.sprint_dnf ? csvBool(rec.sprint_dnf) : null,
+              sprintFastestLap: rec.sprint_fastest_lap ? csvBool(rec.sprint_fastest_lap) : null,
               qualiTimeSeconds: csvTime(rec.quali_time ?? rec["quali time"], "quali_time"),
               raceTimeSeconds: (() => {
                 if (rec.race_time) return csvTime(rec.race_time, "race_time");
