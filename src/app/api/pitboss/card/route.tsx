@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 const W = 1000;
 const ROW = 64;
 const MAX_ROWS = 40;
-const KINDS: CardKind[] = ["race", "quali", "drivers", "teams", "stats", "stats2"];
+const KINDS: CardKind[] = ["race", "sprint", "quali", "drivers", "teams", "stats", "stats2"];
 
 type Line = { pos: string; name: string; sub: string; right: string; gap?: string };
 
@@ -239,12 +239,12 @@ export async function GET(req: NextRequest) {
   let title = "";
   let subtitle = "";
 
-  if (kind === "race" || kind === "quali") {
+  if (kind === "race" || kind === "quali" || kind === "sprint") {
     const roundNum = Number(roundRaw);
     if (!Number.isInteger(roundNum)) return NextResponse.json({ error: "Bad round" }, { status: 400 });
     const { data: rows } = await pb
       .from("results_with_team")
-      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, fastest_lap, best_lap_seconds, points_earned, quali_time_seconds, race_time_seconds")
+      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, fastest_lap, best_lap_seconds, points_earned, quali_time_seconds, race_time_seconds, sprint_qualifying_position, sprint_finish_position, sprint_dnf, sprint_fastest_lap, sprint_points_earned")
       .eq("league_id", leagueId)
       .eq("season", season)
       .eq("round", roundNum)
@@ -253,13 +253,23 @@ export async function GET(req: NextRequest) {
     const labels = await loadDriverLabels(pb, leagueId, ids as string[]);
     const names = Object.fromEntries(Object.entries(labels).map(([id, l]) => [id, labelFull(l)]));
     const track = (rows ?? []).find((r: any) => r.track)?.track;
-    title = kind === "race" ? "RACE RESULTS" : "QUALIFYING";
+    title = kind === "race" ? "RACE RESULTS" : kind === "sprint" ? "SPRINT RESULTS" : "QUALIFYING";
     subtitle = `Season ${season} · Round ${roundNum}${track ? ` · ${track}` : ""}`;
 
     const list = [...(rows ?? [])]
-      .filter((r: any) => (kind === "race" ? true : r.qualifying_position != null))
+      .filter((r: any) =>
+        kind === "race"
+          ? true
+          : kind === "sprint"
+            ? r.sprint_finish_position != null || r.sprint_dnf
+            : r.qualifying_position != null
+      )
       .sort((a: any, b: any) => {
         if (kind === "quali") return a.qualifying_position - b.qualifying_position;
+        if (kind === "sprint") {
+          if (!!a.sprint_dnf !== !!b.sprint_dnf) return a.sprint_dnf ? 1 : -1;
+          return (a.sprint_finish_position ?? 999) - (b.sprint_finish_position ?? 999);
+        }
         if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
         return (a.finish_position ?? 999) - (b.finish_position ?? 999);
       });
@@ -275,7 +285,19 @@ export async function GET(req: NextRequest) {
     const winner = list.find((r: any) => !r.dnf && r.race_time_seconds != null);
     const winnerTime = winner ? Number(winner.race_time_seconds) : null;
     lines = list.map((r: any, i: number) =>
-      kind === "quali"
+      kind === "sprint"
+        ? {
+            pos: r.sprint_dnf ? "DNF" : String(r.sprint_finish_position ?? i + 1),
+            name: names[r.driver_id] ?? "Unknown",
+            sub: [
+              r.sprint_qualifying_position != null ? `G${r.sprint_qualifying_position}` : "",
+              r.sprint_fastest_lap ? "FL" : "",
+            ]
+              .filter(Boolean)
+              .join(" · "),
+            right: num(r.sprint_points_earned),
+          }
+        : kind === "quali"
         ? {
             pos: String(r.qualifying_position),
             name: names[r.driver_id] ?? "Unknown",
