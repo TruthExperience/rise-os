@@ -369,7 +369,7 @@ export async function postRoundResultsToDiscord(
 
     const { data: rows } = await pb
       .from("results_with_team")
-      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, dnf_reason, fastest_lap, best_lap_seconds, points_earned, quali_time_seconds, race_time_seconds")
+      .select("driver_id, team_id, track, qualifying_position, finish_position, dnf, dnf_reason, fastest_lap, best_lap_seconds, points_earned, quali_time_seconds, race_time_seconds, sprint_qualifying_position, sprint_finish_position, sprint_dnf, sprint_fastest_lap, sprint_points_earned")
       .eq("league_id", leagueId)
       .eq("season", seasonKey)
       .eq("round", roundNum)
@@ -391,11 +391,21 @@ export async function postRoundResultsToDiscord(
     const track = rows.find((r: any) => r.track)?.track ?? null;
     const heading = `${league?.name ?? "League"} — Season ${seasonKey}, Round ${roundNum}${track ? ` · ${track}` : ""}`;
 
-    const build = (kind: "race" | "quali") => {
+    const build = (kind: "race" | "sprint" | "quali") => {
       const list = [...rows]
-        .filter((r: any) => (kind === "race" ? true : r.qualifying_position != null))
+        .filter((r: any) =>
+          kind === "race"
+            ? true
+            : kind === "sprint"
+              ? r.sprint_finish_position != null || r.sprint_dnf
+              : r.qualifying_position != null
+        )
         .sort((a: any, b: any) => {
           if (kind === "quali") return a.qualifying_position - b.qualifying_position;
+          if (kind === "sprint") {
+            if (!!a.sprint_dnf !== !!b.sprint_dnf) return a.sprint_dnf ? 1 : -1;
+            return (a.sprint_finish_position ?? 999) - (b.sprint_finish_position ?? 999);
+          }
           if (a.dnf !== b.dnf) return a.dnf ? 1 : -1;
           return (a.finish_position ?? 999) - (b.finish_position ?? 999);
         });
@@ -419,6 +429,11 @@ export async function postRoundResultsToDiscord(
           const gap = (d > 0 ? `+${d.toFixed(3)}` : "").padStart(8, " ");
           return `${String(r.qualifying_position).padStart(2, " ")}  ${name}  ${t}  ${gap}${team}${dFlag[r.driver_id] ?? ""}`;
         }
+        if (kind === "sprint") {
+          const sPos = r.sprint_dnf ? "DNF" : String(r.sprint_finish_position ?? i + 1).padStart(3, " ");
+          const sFl = r.sprint_fastest_lap ? " FL" : "";
+          return `${sPos}  ${name}  ${String(Number(r.sprint_points_earned ?? 0)).padStart(3, " ")}pts${sFl}${team}${dFlag[r.driver_id] ?? ""}`;
+        }
         const pos = r.dnf ? "DNF" : String(r.finish_position ?? i + 1).padStart(3, " ");
         const fl = r.fastest_lap ? ` FL${fmtLap(r.best_lap_seconds) ? ` ${fmtLap(r.best_lap_seconds)}` : ""}` : "";
         return `${pos}  ${name}  ${String(Number(r.points_earned ?? 0)).padStart(3, " ")}pts  ${raceTimeLabel(r, winnerTime).padStart(10, " ")}${fl}${team}${dFlag[r.driver_id] ?? ""}`;
@@ -431,10 +446,12 @@ export async function postRoundResultsToDiscord(
       return body;
     };
 
-    for (const kind of ["race", "quali"] as const) {
-      const channelId = kind === "race" ? cfg.race_channel_id : cfg.quali_channel_id;
+    // Sprint goes to the race channel, posted ahead of the main race.
+    for (const kind of ["sprint", "race", "quali"] as const) {
+      const channelId = kind === "quali" ? cfg.quali_channel_id : cfg.race_channel_id;
       if (!channelId) continue;
       if (kind === "quali" && !rows.some((r: any) => r.qualifying_position != null)) continue;
+      if (kind === "sprint" && !rows.some((r: any) => r.sprint_finish_position != null || r.sprint_dnf)) continue;
 
       const { data: prev } = await pb
         .from("round_results_discord")
@@ -454,7 +471,7 @@ export async function postRoundResultsToDiscord(
           embeds: [
             {
               author: authorOf(league),
-              title: kind === "race" ? "Race Results" : "Qualifying Results",
+              title: kind === "race" ? "Race Results" : kind === "sprint" ? "Sprint Results" : "Qualifying Results",
               ...(cardUrl
                 ? { description: `**${heading}**`, image: { url: cardUrl } }
                 : { description: `**${heading}**\n${build(kind)}` }),
