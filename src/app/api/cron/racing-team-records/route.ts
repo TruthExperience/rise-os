@@ -18,7 +18,8 @@
 // Only franchises whose irl_record_source is empty or already starts with
 // "jolpica" are updated.
 //
-// Auth: Authorization: Bearer CRON_SECRET (Vercel Cron), or ?secret=CRON_SECRET.
+// Auth: Authorization: Bearer CRON_SECRET (Vercel Cron). A ?secret= query
+// parameter is not accepted.
 // Options: ?dry=1 (report only, writes nothing), ?season=2026.
 
 import { NextResponse } from 'next/server';
@@ -47,8 +48,7 @@ type Totals = {
 function isAuthorized(request: Request): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
-  if (request.headers.get('authorization') === `Bearer ${secret}`) return true;
-  return new URL(request.url).searchParams.get('secret') === secret;
+  return request.headers.get('authorization') === `Bearer ${secret}`;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

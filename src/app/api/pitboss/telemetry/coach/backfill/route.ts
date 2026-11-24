@@ -17,9 +17,10 @@
 // in lib/pitboss-llm.ts); a handful of unlucky laps in one batch could
 // otherwise approach the function's maxDuration.
 //
-// AUTH: same CRON_SECRET gate (Bearer header, or ?secret= to run it from a browser) as the other admin/cron routes
-// in this repo (see api/cron/ea-ratings-all for the original pattern) —
-// reuses the existing env var rather than introducing a new secret.
+// AUTH: same CRON_SECRET gate as the other admin/cron routes in this repo
+// (see api/cron/ea-ratings-all for the original pattern) — only an
+// Authorization: Bearer header is accepted, not a ?secret= query parameter.
+// Reuses the existing env var rather than introducing a new secret.
 //
 // vercel.json:
 //   "src/app/api/pitboss/telemetry/coach/backfill/route.ts": { "maxDuration": 300 }
@@ -51,9 +52,7 @@ export async function GET(request: NextRequest) {
   // An unset CRON_SECRET must not turn this into the string "Bearer undefined".
   const secret = process.env.CRON_SECRET;
   const authorized =
-    !!secret &&
-    (request.headers.get('authorization') === `Bearer ${secret}` ||
-      request.nextUrl.searchParams.get('secret') === secret);
+    !!secret && request.headers.get('authorization') === `Bearer ${secret}`;
   if (!authorized) {
     return new Response('Unauthorized', { status: 401 });
   }

@@ -12,8 +12,8 @@
 // Only franchises that have an espn_team_id and a baseline record
 // (irl_lifetime_wins not null) are touched.
 //
-// Auth: Authorization: Bearer CRON_SECRET (what Vercel Cron sends), or
-// ?secret=CRON_SECRET for running it by hand from a browser.
+// Auth: Authorization: Bearer CRON_SECRET (what Vercel Cron sends). A
+// ?secret= query parameter is not accepted.
 // Options: ?dry=1 (report only, writes nothing), ?season=2026.
 
 import { NextResponse } from 'next/server';
@@ -45,8 +45,7 @@ function isAuthorized(request: Request): boolean {
   const secret = process.env.CRON_SECRET;
   // An unset CRON_SECRET must not match anything.
   if (!secret) return false;
-  if (request.headers.get('authorization') === `Bearer ${secret}`) return true;
-  return new URL(request.url).searchParams.get('secret') === secret;
+  return request.headers.get('authorization') === `Bearer ${secret}`;
 }
 
 // FBS season year: Jan-Jun belongs to the season that started the year before.
