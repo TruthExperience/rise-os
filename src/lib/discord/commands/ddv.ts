@@ -549,10 +549,10 @@ registerCommand("ddv_team", async (ctx) => {
     targetTeam = ownTeams[0];
   }
 
-  const { data: roster, error: rosterError } = await supabase
+  const { data: rosterRows, error: rosterError } = await supabase
     .schema("pitboss")
     .from("team_rosters")
-    .select("driver_id, drivers!inner(display_name, discord_username)")
+    .select("driver_id, is_team_principal, drivers!inner(display_name, discord_username)")
     .eq("league_id", leagueId)
     .eq("car_class_team_id", targetTeam.id)
     .eq("season", season);
@@ -561,14 +561,14 @@ registerCommand("ddv_team", async (ctx) => {
     console.error("[ddv_team] roster lookup failed:", rosterError);
     return { content: `Couldn't load the roster: ${rosterError.message}`, ephemeral: true };
   }
-  if (!roster || roster.length === 0) {
+  if (rosterRows.length === 0) {
     return {
       content: `**${targetTeam.teamName}** has no drivers signed for season ${season}.`,
       ephemeral: true,
     };
   }
 
-  const driverIds = roster.map((r) => r.driver_id);
+  const driverIds = rosterRows.map((r) => r.driver_id);
 
   const { data: ddvRows, error: ddvError } = await supabase
     .schema("pitboss")
@@ -583,6 +583,23 @@ registerCommand("ddv_team", async (ctx) => {
   }
 
   const ddvByDriver = new Map((ddvRows ?? []).map((r) => [r.driver_id, r]));
+
+  // Team Principals sit on team_rosters but don't race, so they never accrue a
+  // DDV. Listing them made every non-racing TP look like a driver missing a
+  // DDV record — that's what put them in the missing-DDV audit. Only TP-flagged
+  // drivers with no DDV are dropped: several principals do race, hold a DDV and
+  // must stay in the list.
+  const roster = rosterRows.filter((r) => {
+    const flaggedTp = (r as { is_team_principal?: boolean }).is_team_principal === true;
+    return !(flaggedTp && !ddvByDriver.has(r.driver_id));
+  });
+
+  if (roster.length === 0) {
+    return {
+      content: `**${targetTeam.teamName}** has no racing drivers signed for season ${season}.`,
+      ephemeral: true,
+    };
+  }
 
   const lines = [`**${targetTeam.teamName}** — Team DDV (${season})`];
   let total = 0;

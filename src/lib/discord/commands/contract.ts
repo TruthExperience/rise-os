@@ -81,7 +81,11 @@ function fmtSalaryBySeason(v: Record<string, number | string> | null): string | 
     .join(", ");
 }
 
-function formatContract(row: DriverContractRow, franchiseName: string): string {
+function formatContract(
+  row: DriverContractRow,
+  franchiseName: string,
+  currentDdv: number | null = null
+): string {
   const lines: string[] = [];
 
   const seasonRange = row.season_end && row.season_end !== row.season_start
@@ -110,6 +114,11 @@ function formatContract(row: DriverContractRow, franchiseName: string): string {
 
   const ddv = fmtMoney(row.ddv_at_signing);
   if (ddv) lines.push(`DDV at signing: ${ddv}`);
+
+  // Live DDV from pitboss.driver_ddv, so a contract can be read against the
+  // driver's current value rather than only the snapshot taken at signing.
+  const liveDdv = fmtMoney(currentDdv);
+  if (liveDdv) lines.push(`Current DDV: ${liveDdv}`);
 
   const buyout = fmtMoney(row.buyout_clause);
   if (buyout) lines.push(`Buyout clause: ${buyout}`);
@@ -180,6 +189,15 @@ registerCommand("contract_view", async (ctx) => {
     };
   }
 
+  const { data: ddvRow } = await supabase
+    .schema("pitboss")
+    .from("driver_ddv")
+    .select("current_ddv")
+    .eq("league_id", leagueId)
+    .eq("driver_id", driver.id)
+    .maybeSingle();
+  const currentDdv = ddvRow ? Number(ddvRow.current_ddv) : null;
+
   let query = supabase
     .schema("pitboss")
     .from("driver_contracts")
@@ -224,7 +242,7 @@ registerCommand("contract_view", async (ctx) => {
   const sections = await Promise.all(
     toShow.map(async (row) => {
       const franchiseName = await getFranchiseName(row.franchise_id);
-      return formatContract(row, franchiseName);
+      return formatContract(row, franchiseName, currentDdv);
     })
   );
 

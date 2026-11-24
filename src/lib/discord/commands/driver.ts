@@ -1,6 +1,13 @@
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
+import {
+  getLeagueCapConfig,
+  validateContractAgainstDDV,
+  checkHardApronCompliance,
+  LeagueNotConfiguredError,
+  type LeagueFinancialConfig,
+} from "@/lib/pitboss/financial-engine";
 
 // Same editor gate roster_assign/roster_remove use. Duplicated here rather
 // than imported because roster.ts doesn't export it — worth centralizing
@@ -97,6 +104,172 @@ async function getOrCreateDriver(discordId: string, resolvedUsername: string | u
     driver = created;
   }
   return { driver } as const;
+}
+
+// Resolves the cap config that applies to a signing. The franchise's own
+// division is authoritative: if we can't find a config for it, the signing is
+// refused rather than priced against some other division's cap. The
+// league-level fallback exists only for leagues that leave
+// rise_os.franchises.division null and keep a single config for the whole
+// league (W11) — never as a rescue for a division that IS set.
+async function resolveFinancialConfig(
+  supabase: ReturnType<typeof createAdminClient>,
+  leagueId: string,
+  franchiseDivision: string | null
+): Promise<LeagueFinancialConfig | null> {
+  if (franchiseDivision) {
+    try {
+      return await getLeagueCapConfig(supabase, leagueId, franchiseDivision);
+    } catch (err) {
+      if (!(err instanceof LeagueNotConfiguredError)) throw err;
+      throw new Error(
+        `No financial config exists for this franchise's division ("${franchiseDivision}"), so there's no cap or DDV band to sign against. Add a league_financial_config row for it — signing is blocked rather than priced against another division's numbers.`
+      );
+    }
+  }
+
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("league_financial_config")
+    .select("*")
+    .eq("league_id", leagueId);
+
+  if (error) {
+    throw new Error(`Failed to fetch league_financial_config: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as LeagueFinancialConfig[];
+  if (rows.length === 0) return null; // no cap model — event-economy league
+  if (rows.length === 1) return rows[0];
+
+  throw new Error(
+    `This league has ${rows.length} financial configs (${rows
+      .map((r) => r.division)
+      .join(", ")}) and this franchise has no division, so there's no way to tell which cap applies. Set the franchise's division before signing.`
+  );
+}
+
+type ContractPreflight = {
+  division: string;
+  contractValue: number;
+  driverDDV: number;
+  floor: number;
+  ceiling: number;
+  /** False when no value was supplied and the deal was priced at the DDV floor. */
+  valueSupplied: boolean;
+};
+
+type PreflightOutcome =
+  | { kind: "not_a_cap_league" }
+  | { kind: "ok"; preflight: ContractPreflight }
+  | { kind: "refused"; message: string };
+
+// The DDV gate for /sign-driver. The proposed value comes from the caller,
+// but the DDV it is measured against is read from pitboss.driver_ddv — never
+// taken from the request. A league that can't resolve a DDV gets a refusal,
+// not a pass: "no DDV on file" must never become "no floor".
+async function preflightContractAgainstDDV(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: {
+    leagueId: string;
+    driverId: string;
+    franchiseId: string;
+    franchiseDivision: string | null;
+    season: string;
+    rawValue: unknown;
+  }
+): Promise<PreflightOutcome> {
+  let config: LeagueFinancialConfig | null;
+  try {
+    config = await resolveFinancialConfig(supabase, params.leagueId, params.franchiseDivision);
+  } catch (err) {
+    return {
+      kind: "refused",
+      message: err instanceof Error ? err.message : "Couldn't load this league's financial config.",
+    };
+  }
+
+  if (!config) return { kind: "not_a_cap_league" };
+
+  const { data: ddvRow, error: ddvError } = await supabase
+    .schema("pitboss")
+    .from("driver_ddv")
+    .select("current_ddv")
+    .eq("league_id", params.leagueId)
+    .eq("driver_id", params.driverId)
+    .maybeSingle();
+
+  if (ddvError) {
+    return { kind: "refused", message: `Couldn't read that driver's DDV: ${ddvError.message}` };
+  }
+  if (!ddvRow) {
+    return {
+      kind: "refused",
+      message:
+        "That driver has no DDV record in this league yet — DDV is created by the race-weekend calc, so a driver who hasn't been classified in a finalized round has none. With no DDV there's no legal contract band, so the signing is blocked.",
+    };
+  }
+
+  const driverDDV = Number(ddvRow.current_ddv);
+
+  const hasValue =
+    (typeof params.rawValue === "number" && Number.isFinite(params.rawValue)) ||
+    (typeof params.rawValue === "string" && params.rawValue.trim() !== "");
+
+  const parsedValue = hasValue
+    ? typeof params.rawValue === "number"
+      ? params.rawValue
+      : Number(params.rawValue)
+    : NaN;
+
+  if (hasValue && (!Number.isFinite(parsedValue) || parsedValue <= 0)) {
+    return {
+      kind: "refused",
+      message: "That contract value isn't a usable amount — give a number greater than zero.",
+    };
+  }
+
+  // No value stated: price the deal at this league's floor, DDV ×
+  // contract_floor_pct — 100% in W11, 20% in TRL. Defaulting to 100% of DDV
+  // would overprice every signing in a low-floor league, and refusing would
+  // break the flow: the floor is the legal minimum, so the deal lands exactly
+  // on it.
+  const contractValue = hasValue
+    ? parsedValue
+    : driverDDV * config.contract_floor_pct;
+
+  const check = validateContractAgainstDDV(contractValue, driverDDV, config);
+  if (!check.valid) {
+    return { kind: "refused", message: `Blocked by the DDV band. ${check.reason}` };
+  }
+
+  // Hard Apron (Charter Art 6.02 / CRRB Financial Regs Art 1.2.2): the signing
+  // must not push projected payroll past the apron. Same gate the cap-check
+  // route applies, using the division the contract will actually be written
+  // against, so the payroll it measures is the one this deal joins.
+  const division = params.franchiseDivision ?? config.division;
+  const apronCheck = await checkHardApronCompliance(supabase, {
+    leagueId: params.leagueId,
+    division,
+    franchiseId: params.franchiseId,
+    season: params.season,
+    proposedNewCapHit: contractValue,
+  });
+  if (!apronCheck.allowed) {
+    return { kind: "refused", message: `Blocked by the hard apron. ${apronCheck.reason}` };
+  }
+
+  return {
+    kind: "ok",
+    preflight: {
+      division,
+      contractValue,
+      driverDDV,
+      floor: check.floor,
+      ceiling: check.ceiling,
+      valueSupplied: hasValue,
+    },
+  };
 }
 
 // Deducts a signing's team_budget_delta from the franchise's wallet and
@@ -234,6 +407,22 @@ registerCommand("sign-driver", async (ctx) => {
     };
   }
 
+  // DDV floor/ceiling gate (DDV Regs Art 4.01). Runs before any write so a
+  // refused deal leaves no half-signed roster row behind. The value is the
+  // caller's proposed contract; the DDV itself comes from pitboss.driver_ddv.
+  const preflight = await preflightContractAgainstDDV(supabase, {
+    leagueId,
+    driverId: driver.id,
+    franchiseId: franchise.id,
+    franchiseDivision: franchise.division,
+    season,
+    rawValue: ctx.options.value ?? ctx.options.contract_value,
+  });
+
+  if (preflight.kind === "refused") {
+    return { content: preflight.message, ephemeral: true };
+  }
+
   const { error: membershipUpsertError } = await supabase
     .schema("pitboss")
     .from("driver_leagues")
@@ -268,24 +457,19 @@ registerCommand("sign-driver", async (ctx) => {
   }
 
   // Branch on financial model: a cap-model league (rows in
-  // league_financial_config) gets a driver_contracts row; an
-  // event-economy league (e.g. HRL, rows in league_event_economy_rules
-  // instead) gets driver_leagues.market_value set from the matching
-  // signing_<tier> rule, AND — as of 2026-09-03 — a wallet deduction if
-  // that rule also carries a team_budget_delta. A league with neither
-  // just gets the roster record above and nothing financial — that's a
-  // legitimate state, not an error, since not every league has set up
-  // its economy yet.
-  const { data: capConfig } = await supabase
-    .schema("pitboss")
-    .from("league_financial_config")
-    .select("division")
-    .eq("league_id", leagueId)
-    .limit(1);
-
+  // league_financial_config) gets a driver_contracts row priced inside the
+  // DDV band the preflight just validated; an event-economy league (e.g.
+  // HRL, rows in league_event_economy_rules instead) gets
+  // driver_leagues.market_value set from the matching signing_<tier> rule,
+  // AND — as of 2026-09-03 — a wallet deduction if that rule also carries a
+  // team_budget_delta. A league with neither just gets the roster record
+  // above and nothing financial — that's a legitimate state, not an error,
+  // since not every league has set up its economy yet.
   const financialNotes: string[] = [];
 
-  if (capConfig && capConfig.length > 0) {
+  if (preflight.kind === "ok") {
+    const { division, contractValue, driverDDV, floor, ceiling, valueSupplied } =
+      preflight.preflight;
     const contractClass = tierInput ? tierInput.toUpperCase() : "T1";
     const { error: contractError } = await supabase
       .schema("pitboss")
@@ -295,9 +479,13 @@ registerCommand("sign-driver", async (ctx) => {
         franchise_id: franchise.id,
         league_id: leagueId,
         contract_class: contractClass,
-        division: franchise.division,
+        division,
         season_start: season,
         status: "active",
+        contract_value: contractValue,
+        ddv_at_signing: driverDDV,
+        contract_floor: floor,
+        contract_ceiling: ceiling,
       });
     if (contractError) {
       console.error("[sign-driver] driver_contracts insert failed:", contractError);
@@ -305,7 +493,11 @@ registerCommand("sign-driver", async (ctx) => {
         `Roster saved, but the contract record failed: ${contractError.message}. Needs manual follow-up.`
       );
     } else {
-      financialNotes.push(`Contract created (${contractClass}).`);
+      financialNotes.push(
+        `Contract created (${contractClass}) at ${contractValue.toLocaleString()}${
+          valueSupplied ? "" : " (no value given — priced at the league's DDV floor)"
+        } — DDV ${driverDDV.toLocaleString()}, allowed band ${floor.toLocaleString()}–${ceiling.toLocaleString()}.`
+      );
     }
   } else {
     const tierKey = tierInput.toLowerCase().replace(/\s+/g, "_");
