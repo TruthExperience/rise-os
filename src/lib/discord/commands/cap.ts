@@ -395,15 +395,41 @@ registerCommand("cap_board", async (ctx) => {
   const divisionFilter = ctx.options.division as string | undefined;
   const seasonFilter = ctx.options.season as string | undefined; // "25" | "26"
 
+  // The label in franchise_wallets.division is a per-league car-class string
+  // (F1_26 in some leagues, T1 in others), so resolve the label for the
+  // requested season from league_financial_config rather than assuming an
+  // "F1_<season>" shape. A league configured for a single division accepts
+  // that one whatever it is called.
+  let seasonDivisions: string[] | null = null;
+  let seasonLabel: string | null = null;
+  if (seasonFilter) {
+    const { data: configs } = await supabase
+      .schema("pitboss")
+      .from("league_financial_config")
+      .select("division")
+      .eq("league_id", leagueId);
+
+    const configured = (configs ?? [])
+      .map((c) => c.division as string | null)
+      .filter((d): d is string => !!d);
+    const bySeason = configured.filter((d) => d.endsWith(`_${seasonFilter}`));
+    const resolved = bySeason.length > 0 ? bySeason : configured.length === 1 ? configured : [];
+
+    if (resolved.length === 0) {
+      return { content: `No franchises found for season "${seasonFilter}" in this league.`, ephemeral: true };
+    }
+    seasonDivisions = resolved;
+    seasonLabel = resolved.join(", ");
+  }
+
   let walletQuery = supabase
     .schema("pitboss")
     .from("franchise_wallets")
     .select("franchise_id, division")
     .eq("league_id", leagueId);
 
-  if (seasonFilter) {
-    // Exact match against the season choice, e.g. "26" -> "F1_26".
-    walletQuery = walletQuery.eq("division", `F1_${seasonFilter}`);
+  if (seasonDivisions) {
+    walletQuery = walletQuery.in("division", seasonDivisions);
   } else if (divisionFilter) {
     walletQuery = walletQuery.ilike("division", `%${divisionFilter}%`);
   }
@@ -453,8 +479,8 @@ registerCommand("cap_board", async (ctx) => {
     return `**${s.franchiseName}** — ${fmtMoney(s.computedSpend)} / ${fmtMoney(s.startingWallet)} (${fmtMoney(s.computedRemaining)} left, ${s.driverCount} contracts)${freeze}${flag}`;
   });
 
-  const header = seasonFilter
-    ? `**Salary Cap Board — F1_${seasonFilter}**`
+  const header = seasonLabel
+    ? `**Salary Cap Board — ${seasonLabel}**`
     : divisionFilter
     ? `**Salary Cap Board — ${divisionFilter}**`
     : `**Salary Cap Board**`;
