@@ -70,6 +70,7 @@ export interface ParamRationale {
     | "feedback_adjusted"
     | "trait_adjusted"
     | "session_adjusted"
+    | "track_archetype"
     | "performance_adjusted";
   override_applied: boolean;
   contributors: ParamContributor[];
@@ -411,8 +412,15 @@ function accumulateWeightedDeltas(params: {
   paramRanges: ParamRange[];
   overrides: TrackOverride[];
   sources: Array<{ label: string; normalizedValue: number; map: ParamWeightMap }>;
+  // Optional. Measure each weight against the param's class range instead of
+  // a track override's narrowed span. The archetype layer needs this: its
+  // fractions were calibrated against the full class span, so evaluating them
+  // against a half-width override range (e.g. Monza's wings limited to 0..25)
+  // silently halves the shift. Final values are still clamped to the override
+  // range by applyDeltas.
+  spanFromRange?: boolean;
 }): DeltaAdjustment[] {
-  const { paramRanges, overrides, sources } = params;
+  const { paramRanges, overrides, sources, spanFromRange = false } = params;
   const overrideByKey = new Map(overrides.map((o) => [o.param_key, o]));
   const rangeByKey = new Map(paramRanges.map((r) => [r.param_key, r]));
 
@@ -427,7 +435,7 @@ function accumulateWeightedDeltas(params: {
       const override = overrideByKey.get(paramKey);
       const min = override?.override_min ?? range.min_value;
       const max = override?.override_max ?? range.max_value;
-      const span = max - min;
+      const span = spanFromRange ? range.max_value - range.min_value : max - min;
 
       const delta = span * weightPerUnit * source.normalizedValue;
       const entry = totals.get(paramKey) ?? { delta: 0, reasons: [] };
@@ -587,6 +595,176 @@ export function applySessionBias(params: {
     origin: "session_adjusted",
     maxDeltaFraction: MAX_SESSION_DELTA_FRACTION,
     modelSuffix: "session-bias-v1",
+    confidenceMultiplier: 1.0,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Track archetype bias (deterministic)
+// ---------------------------------------------------------------------------
+//
+// pitboss.tracks tags every circuit with an archetype. That tag is documented
+// as "used to key rules-based setup generation", but until now it only ever
+// reached the UI: with no community submissions a track fell straight through
+// to its car class's default_value, which is identical for every circuit in
+// the class. This layer turns the archetype into a per-circuit starter setup
+// by shifting the class default (or range midpoint) toward what that kind of
+// circuit actually asks for.
+//
+// Two deliberate constraints:
+//  - Callers only apply this when buildRecommendation had no submissions
+//    (baseline_used). Real community data for the track already carries the
+//    circuit's signal; stacking an archetype shift on top would move it twice.
+//  - A param whose track_setup_overrides row pins a default_value is skipped,
+//    so a hand-tuned per-track default always outranks the archetype's generic
+//    lean. Rows that only narrow min/max do NOT skip: they are a legality
+//    constraint, not an opinion about the starting value (and 384 of the 404
+//    existing rows are exactly that), so skipping them would silently disable
+//    the archetype shift on most tracks that have any override at all.
+//
+// Calibration: each fraction is (mean verified F1 2025 community submission
+// for that archetype − the F1 2025 class default) divided by the param's
+// legal span, i.e. the shift that actually lands the starter on what league
+// drivers run at that kind of circuit. Because the generic class default sits
+// noticeably away from real setups in a few params (front ARB 15 vs ~7–13,
+// rear suspension 19 vs ~3–6), several archetypes carry a negative delta for
+// those params — that is the correction, not a mistake. `mixed` is the
+// measured neutral target for the archetype-less majority of circuits, so it
+// is deliberately not empty: without it, mixed tracks would stay on the
+// generic default while every other archetype moved to real-world values.
+//
+// Camber is intentionally absent. On F1 2025 the measured means for every
+// archetype sit within 0.02° of each other at the negative end of a
+// −3.50..−2.50 range (front) and −2.00..−1.00 (rear) — there is no archetype
+// signal, less than two steps of headroom from the class default, and a
+// fraction-of-span delta on a negative range is easy to sign-flip by mistake.
+
+export type TrackArchetype =
+  | "street_circuit"
+  | "high_downforce_technical"
+  | "high_speed_low_downforce"
+  | "high_kerb"
+  | "mixed";
+
+// Deliberately loose. A measured offset can reach ~0.4 of the class span, and
+// the clamp is computed against the *overridden* span when a track narrows a
+// param's range — e.g. Monza's front wing is limited to 0..25, so its −18.7
+// low-downforce shift is 0.75 of that narrowed span. A tighter cap would
+// silently undershoot the calibration for exactly the tracks that need it
+// most. Values are still clamped to the legal (possibly overridden) range.
+const MAX_ARCHETYPE_DELTA_FRACTION = 0.8;
+
+const TRACK_ARCHETYPE_PARAM_MAP: Record<TrackArchetype, ParamWeightMap> = {
+  // n=5 verified F1 2025 submissions: more wing, less front ARB, little rear
+  // ride-height drop (street setups carry rake, not a uniformly low car).
+  street_circuit: {
+    front_wing_aero: 0.116, // 28.8 vs 23
+    rear_wing_aero: 0.136, // 29.8 vs 23
+    front_ride_height: -0.27, // 19.6 vs 25
+    rear_ride_height: -0.05, // 49.0 vs 50
+    front_arb: -0.25, // 10.0 vs 15
+    rear_arb: 0.5, // 19.2 vs 9, capped from 0.51
+    front_suspension: 0.08, // 40.2 vs 37
+    rear_suspension: -0.35, // 5.0 vs 19
+  },
+  // n=8: the strongest downforce lean of any archetype, but a lower front ARB
+  // and much lower rear suspension than the class default.
+  high_downforce_technical: {
+    front_wing_aero: 0.262, // 36.1 vs 23
+    rear_wing_aero: 0.238, // 34.9 vs 23
+    front_ride_height: -0.17, // 21.6 vs 25
+    rear_ride_height: -0.12, // 47.6 vs 50
+    front_arb: -0.18, // 11.4 vs 15
+    rear_arb: 0.5, // 19.4 vs 9, capped from 0.52
+    front_suspension: 0.058, // 39.3 vs 37
+    rear_suspension: -0.39, // 3.4 vs 19
+  },
+  // n=9: winged down hard, but — unlike the first pass — the front ride height
+  // goes DOWN and the bars go UP relative to neutral; only the rear ride
+  // height stays high. Sign fix from the measured means.
+  high_speed_low_downforce: {
+    front_wing_aero: -0.352, // 5.4 vs 23
+    rear_wing_aero: -0.374, // 4.3 vs 23
+    front_ride_height: -0.265, // 19.7 vs 25
+    rear_ride_height: -0.16, // 46.8 vs 50
+    front_arb: -0.23, // 10.4 vs 15
+    rear_arb: 0.415, // 17.3 vs 9
+    front_suspension: 0.098, // 40.9 vs 37
+    rear_suspension: -0.358, // 4.7 vs 19
+  },
+  // n=2 only (Montreal), so treat as indicative: near-neutral wings, softer
+  // suspension, the highest rear ARB of any archetype.
+  high_kerb: {
+    front_wing_aero: -0.08, // 19.0 vs 23
+    rear_wing_aero: -0.1, // 18.0 vs 23
+    front_ride_height: -0.25, // 20.0 vs 25
+    front_arb: -0.1, // 13.0 vs 15
+    rear_arb: 0.5, // 21.0 vs 9, capped from 0.60
+    front_suspension: -0.225, // 28.0 vs 37
+    rear_suspension: -0.375, // 4.0 vs 19
+  },
+  // n=93: the measured neutral target, applied as a baseline correction so
+  // mixed circuits do not keep the generic default while other archetypes move
+  // to measured values.
+  mixed: {
+    front_wing_aero: -0.064, // 19.8 vs 23
+    rear_wing_aero: -0.124, // 16.8 vs 23
+    front_ride_height: -0.12, // 22.6 vs 25
+    rear_ride_height: -0.265, // 44.7 vs 50
+    front_arb: -0.38, // 7.4 vs 15
+    rear_arb: 0.265, // 14.3 vs 9
+    front_suspension: 0.043, // 38.7 vs 37
+    rear_suspension: -0.328, // 5.9 vs 19
+  },
+};
+
+export function applyTrackArchetypeBias(params: {
+  base: GeneratedRecommendation;
+  paramRanges: ParamRange[];
+  overrides: TrackOverride[];
+  archetype: string | null | undefined;
+}): GeneratedRecommendation {
+  const { base, paramRanges, overrides, archetype } = params;
+  if (!archetype) return base;
+
+  const map = TRACK_ARCHETYPE_PARAM_MAP[archetype as TrackArchetype];
+  if (!map) return base;
+
+  // Only a track override that actually pins a DEFAULT outranks the archetype.
+  // Most rows in track_setup_overrides only narrow min/max (override_default
+  // is null — true for 384 of 404 rows), which is a legality constraint, not
+  // an opinion about the starting value. Skipping those was suppressing the
+  // archetype shift on the wings at every low-downforce track.
+  const overriddenKeys = new Set(
+    overrides.filter((o) => o.override_default != null).map((o) => o.param_key)
+  );
+  const unfilteredMap = Object.fromEntries(
+    Object.entries(map).filter(([paramKey]) => !overriddenKeys.has(paramKey))
+  ) as ParamWeightMap;
+  if (Object.keys(unfilteredMap).length === 0) return base;
+
+  const adjustments = accumulateWeightedDeltas({
+    paramRanges,
+    overrides,
+    sources: [
+      {
+        label: `track archetype ${archetype.replace(/_/g, " ")}`,
+        normalizedValue: 1,
+        map: unfilteredMap,
+      },
+    ],
+    spanFromRange: true,
+  });
+  if (adjustments.length === 0) return base;
+
+  return applyDeltas({
+    base,
+    paramRanges,
+    overrides,
+    adjustments,
+    origin: "track_archetype",
+    maxDeltaFraction: MAX_ARCHETYPE_DELTA_FRACTION,
+    modelSuffix: "track-archetype-v1",
     confidenceMultiplier: 1.0,
   });
 }
