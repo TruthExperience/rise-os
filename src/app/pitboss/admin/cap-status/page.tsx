@@ -1,5 +1,6 @@
 // src/app/pitboss/admin/cap-status/page.tsx — Franchise Cap Status (admin)
 import { createAdminClient } from "@/lib/supabase/server";
+import { leagueCurrencySymbol } from "@/lib/currency";
 import LeagueSelect from "./LeagueSelect";
 
 // Live data on every request; must not be prerendered at build time.
@@ -63,15 +64,17 @@ function divisionSortKey(division: string) {
   return match ? -Number(match[1]) : -9999;
 }
 
-// Prefix uses the league's own currency_code.
-function formatMoney(n: number, currencyCode: string) {
+// Prefix comes from the league's own currency: W11 is UK-based (£W11), TRL and
+// WSC stay in dollars ($TRL, $WSC). See @/lib/currency.
+function formatMoney(n: number, currencyCode: string, leagueSlug?: string) {
+  const prefix = leagueCurrencySymbol(leagueSlug, `$${currencyCode}`);
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
   })
     .format(n)
-    .replace("$", `$${currencyCode} `);
+    .replace("$", `${prefix} `);
 }
 
 async function getLeagues(): Promise<League[]> {
@@ -244,8 +247,8 @@ export default async function CapStatusPage({
               <h2 className="text-lg font-medium">{group.label}</h2>
               {group.cap ? (
                 <p className="text-sm text-[#8A8D93]">
-                  Soft cap {formatMoney(group.cap.soft_cap, currencyCode)} &middot; Hard apron{" "}
-                  {formatMoney(group.cap.hard_apron, currencyCode)}
+                  Soft cap {formatMoney(group.cap.soft_cap, currencyCode, selected.slug)} &middot; Hard apron{" "}
+                  {formatMoney(group.cap.hard_apron, currencyCode, selected.slug)}
                 </p>
               ) : (
                 <p className="text-sm text-[#8A8D93]">Uncapped</p>
@@ -311,7 +314,7 @@ export default async function CapStatusPage({
                         <div className="flex items-baseline justify-between text-sm">
                           <span className="text-[#8A8D93]">Wallet</span>
                           <span className="tabular-nums font-medium">
-                            {formatMoney(wallet.balance, currencyCode)}
+                            {formatMoney(wallet.balance, currencyCode, selected.slug)}
                           </span>
                         </div>
                         <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#232428]">
@@ -325,8 +328,8 @@ export default async function CapStatusPage({
                         </div>
                         <p className="mt-1.5 text-[11px] text-[#8A8D93]">
                           {cap
-                            ? `${formatMoney(spend, currencyCode)} spent of ${formatMoney(cap.soft_cap, currencyCode)} soft cap`
-                            : `${formatMoney(spend, currencyCode)} spent · uncapped`}
+                            ? `${formatMoney(spend, currencyCode, selected.slug)} spent of ${formatMoney(cap.soft_cap, currencyCode, selected.slug)} soft cap`
+                            : `${formatMoney(spend, currencyCode, selected.slug)} spent · uncapped`}
                         </p>
                       </div>
                     ) : (
