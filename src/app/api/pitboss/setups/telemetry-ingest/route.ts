@@ -118,6 +118,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import { fetchParamRanges } from '@/lib/pitboss/setup-engine-data';
+import { isSetupParamSupported } from '@/lib/pitboss/setup-capabilities';
 import type { SessionType } from '@/lib/pitboss/setup-engine';
 import { getTelemetrySession } from '@/lib/telemetry';
 import { buildCoachingReport } from '@/lib/pitboss/telemetry-coach';
@@ -127,11 +128,6 @@ export const dynamic = 'force-dynamic';
 
 const DEFAULT_CAR_CLASS_CODE = 'F1_2025';
 const TELEMETRY_CONFIDENCE = 0.85;
-// Only these classes expose engine braking on the setup screen. F1 23, F1 25
-// and their F1 World cars don't, but F1 2026's Season Pack does, so an
-// engine-braking value must not be added to the classes that lack it (the
-// range check would reject it as unknown anyway).
-const ENGINE_BRAKING_CAR_CLASS_CODES = new Set(['F1_2024', 'F1_2026', 'F1_WORLD_F124']);
 
 function conditionsFromWeatherCode(code: number): 'dry' | 'wet' | 'mixed' {
   if (code <= 2) return 'dry';
@@ -504,9 +500,12 @@ export async function POST(req: NextRequest) {
 
   let setup_values: Record<string, number>;
   try {
+    // Shared capability map: only classes whose setup screen exposes engine
+    // braking may write the captured field (the range check would reject it
+    // as unknown on the others anyway).
     setup_values = mapCarSetupToParamValues(
       lap.carSetup,
-      ENGINE_BRAKING_CAR_CLASS_CODES.has(car_class_code)
+      isSetupParamSupported(car_class_code, 'engine_braking')
     );
   } catch {
     return NextResponse.json({ error: 'carSetup payload is missing expected fields' }, { status: 400 });
