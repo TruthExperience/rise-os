@@ -920,7 +920,22 @@ const DDV_COMMAND = {
       ],
     },
     { type: 1, name: "leaderboard", description: "League DDV leaderboard" },
-    { type: 1, name: "guide", description: "Post the short DDV explainer so it can be pinned" },
+    {
+      type: 1,
+      name: "guide",
+      description: "Post the short DDV explainer so it can be pinned",
+      // Only needed for leagues with several division configs (TRL); the
+      // handler also accepts the division's own channel, and refuses with the
+      // list of divisions when it can't tell which one applies.
+      options: [
+        {
+          type: 3,
+          name: "division",
+          description: "Division to explain (only for leagues with several configs)",
+          required: false,
+        },
+      ],
+    },
   ],
 };
 
