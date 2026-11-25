@@ -815,3 +815,40 @@ begin
   perform tests.eq_int('neither has a wallet to debit yet', v_fixable, 0);
 end
 $t$;
+
+-- ---- 19. parts are charged on the season's base, not the whole deal
+insert into pitboss.drivers (id, discord_id) values
+  ('bbbbbbbb-0000-0000-0000-000000000015', 'd15');
+
+insert into pitboss.driver_contracts
+  (driver_id, franchise_id, league_id, contract_class, division, season_start, season_end,
+   base_salary_per_season, signing_bonus, performance_bonuses, status, contract_value, dead_cap_pct)
+values
+  ('bbbbbbbb-0000-0000-0000-000000000015', 'aaaaaaaa-0000-0000-0000-000000000001',
+   '11111111-1111-1111-1111-111111111111', 'T1', 'F1', '1', '3',
+   '{"1": 4000000, "2": 4000000, "3": 4000000}'::jsonb, 0, '[]'::jsonb,
+   'active', 12000000, 0);
+
+insert into rise_os.calendar_rounds (id, league_id, season_number, round_number) values
+  ('dddddddd-0000-0000-0000-000000000013', '11111111-1111-1111-1111-111111111111', 1, 12);
+
+insert into pitboss.results
+  (league_id, driver_id, season, round, round_id, dnf, dnf_reason)
+values
+  ('11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000015',
+   '1', 12, 'dddddddd-0000-0000-0000-000000000013', true, 'Collision');
+
+do $t$
+declare v_bal numeric;
+begin
+  perform pitboss.post_round_earnings('dddddddd-0000-0000-0000-000000000013');
+
+  perform tests.eq_num('parts charge 2% of the season base, not of the 12M deal',
+    (select amount from pitboss.contract_earnings
+      where round_id = 'dddddddd-0000-0000-0000-000000000013' and kind = 'dnf_parts'), 80000);
+
+  select balance into v_bal from pitboss.franchise_wallets
+   where franchise_id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  perform tests.eq_num('wallet debited 80,000, not 240,000', v_bal, 39740000);
+end
+$t$;

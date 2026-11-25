@@ -10,7 +10,6 @@
 -- TEST: supabase/tests/local/run.sh (real Postgres via PGlite, throwaway db)
 -- ============================================================================
 
-begin;
 -- ---------------------------------------------------------------------------
 -- 1. Divisions: W11 (T1) and TRL F2_26
 -- ---------------------------------------------------------------------------
@@ -76,6 +75,24 @@ as $fn$
   end;
 $fn$;
 
+-- A contract's base for one season: its own map when present, otherwise an
+-- even split of the total value (deals written by /sign-driver's direct insert
+-- carry no map). Shared by the bonus ceiling and DNF parts so both are charged
+-- per season rather than per contract lifetime.
+create or replace function pitboss.contract_season_base(
+  p_base jsonb, p_value numeric, p_start text, p_end text, p_season text
+)
+returns numeric
+language sql
+immutable
+as $fn$
+  select coalesce(
+    nullif(pitboss.contract_base_for_season(p_base, p_season), 0),
+    coalesce(p_value, 0) / greatest(
+      coalesce(pitboss.season_num(p_end), pitboss.season_num(p_start))
+        - coalesce(pitboss.season_num(p_start), 0) + 1, 1));
+$fn$;
+
 -- 25% of the season's base, from the division's config.
 create or replace function pitboss.contract_bonus_ceiling(p_contract uuid, p_season text)
 returns numeric
@@ -83,15 +100,10 @@ language sql
 stable
 as $fn$
   select round(
-           coalesce(
-             -- base_salary_per_season is authoritative when present
-             nullif(pitboss.contract_base_for_season(c.base_salary_per_season, p_season), 0),
-             -- fall back to an even split of the deal for contracts written
-             -- without the per-season map (e.g. /sign-driver's direct insert)
-             coalesce(c.contract_value, 0) / greatest(
-               coalesce(pitboss.season_num(c.season_end), pitboss.season_num(c.season_start))
-                 - coalesce(pitboss.season_num(c.season_start), 0) + 1, 1)
-           ) * coalesce(cfg.performance_bonus_cap_pct, 0), 2)
+           pitboss.contract_season_base(
+             c.base_salary_per_season, c.contract_value,
+             c.season_start, c.season_end, p_season)
+           * coalesce(cfg.performance_bonus_cap_pct, 0), 2)
   from pitboss.driver_contracts c
   left join lateral (
     select f.performance_bonus_cap_pct
@@ -375,7 +387,13 @@ begin
          and (i.reported_by = r.driver_id or v_crash));
 
     if coalesce(r.dnf, false) and not v_caused_by_other then
-      v_charge := round(coalesce(c.contract_value, 0) * coalesce(cfg.dnf_parts_pct, 0), 2);
+      -- 2% of this season's salary, not of the whole deal: a three-season
+      -- 12M contract pays the same per DNF as a one-season 4M one.
+      v_charge := round(
+        pitboss.contract_season_base(
+          c.base_salary_per_season, c.contract_value,
+          c.season_start, c.season_end, r.season)
+        * coalesce(cfg.dnf_parts_pct, 0), 2);
 
       if v_charge > 0 then
         insert into pitboss.contract_earnings
@@ -780,4 +798,3 @@ begin
 end;
 $fn$;
 
-commit;

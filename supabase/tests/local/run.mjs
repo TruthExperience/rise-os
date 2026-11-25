@@ -32,6 +32,23 @@ let failed = false;
 
 for (const rel of files) {
   const sql = readFileSync(join(repo, rel), 'utf8');
+
+  // A migration must never control its own transaction. If it does, running it
+  // inside a BEGIN ... ROLLBACK verification would COMMIT for real, and the
+  // "rolled back" run would silently apply everything.
+  if (rel.startsWith('supabase/migrations/')) {
+    const own = sql.match(/^\s*(begin|commit)\s*;\s*$/im);
+    if (own) {
+      failed = true;
+      console.error(`FAILED   ${rel}`);
+      console.error(
+        `  contains its own "${own[1].toUpperCase()};" — the caller owns BEGIN/COMMIT, ` +
+        'so a rollback verification cannot commit by accident. Remove it.'
+      );
+      break;
+    }
+  }
+
   try {
     await db.exec(sql);
     console.log(`applied  ${rel}`);
