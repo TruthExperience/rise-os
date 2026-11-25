@@ -128,9 +128,10 @@ export const dynamic = 'force-dynamic';
 const DEFAULT_CAR_CLASS_CODE = 'F1_2025';
 const TELEMETRY_CONFIDENCE = 0.85;
 // Only these classes expose engine braking on the setup screen. F1 23, F1 25
-// and their F1 World cars don't, so an engine-braking value must not be added
-// to their submissions (the range check would reject it as unknown anyway).
-const ENGINE_BRAKING_CAR_CLASS_CODES = new Set(['F1_2024', 'F1_WORLD_F124']);
+// and their F1 World cars don't, but F1 2026's Season Pack does, so an
+// engine-braking value must not be added to the classes that lack it (the
+// range check would reject it as unknown anyway).
+const ENGINE_BRAKING_CAR_CLASS_CODES = new Set(['F1_2024', 'F1_2026', 'F1_WORLD_F124']);
 
 function conditionsFromWeatherCode(code: number): 'dry' | 'wet' | 'mixed' {
   if (code <= 2) return 'dry';
