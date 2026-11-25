@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 import { SetupFeedbackPanel } from '@/components/setups/SetupFeedbackPanel'
 import { SubmitSetupForm } from '@/components/setups/SubmitSetupForm'
+import { setupParamLabel } from '@/lib/pitboss/setup-labels'
 
 interface CarClass {
   id: string
@@ -119,23 +120,6 @@ const SETUP_PARAM_ORDER: Record<string, readonly string[]> = {
 }
 
 const SETUP_SECTION_ORDER = Object.keys(SETUP_PARAM_ORDER)
-
-// In-game names that aren't a straight title-case of the param key.
-const SETUP_PARAM_LABEL_OVERRIDES: Record<string, string> = {
-  diff_adjustment_on_throttle: 'Differential Adjustment On Throttle',
-  diff_adjustment_off_throttle: 'Differential Adjustment Off Throttle',
-  front_arb: 'Front Anti-Roll Bar',
-  rear_arb: 'Rear Anti-Roll Bar',
-  front_toe_out: 'Front Toe-Out',
-  rear_toe_in: 'Rear Toe-In',
-}
-
-function setupParamLabel(key: string): string {
-  return (
-    SETUP_PARAM_LABEL_OVERRIDES[key] ??
-    key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-  )
-}
 
 interface SetupSection {
   group: string
