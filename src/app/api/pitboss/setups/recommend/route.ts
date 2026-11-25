@@ -8,6 +8,7 @@ import {
   applyDriverStyleBias,
   applyComparisonBias,
   applyTelemetryPerformanceBias,
+  applyTrackArchetypeBias,
 } from '@/lib/pitboss/setup-engine';
 import {
   fetchParamRanges,
@@ -16,6 +17,7 @@ import {
   fetchTeamTraits,
   fetchCareerDriverStats,
   fetchDriverStyleProfile,
+  fetchTrackArchetype,
 } from '@/lib/pitboss/setup-engine-data';
 import {
   fetchTelemetryPerformanceSamples,
@@ -87,9 +89,9 @@ export async function POST(req: NextRequest) {
   const driver_id: string | null = authedDriver?.id ?? null;
 
   let paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile;
-  let telemetrySamples, telemetryContext;
+  let telemetrySamples, telemetryContext, trackArchetype;
   try {
-    [paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile, telemetrySamples, telemetryContext] =
+    [paramRanges, overrides, submissions, teamTraits, careerDriverStats, driverStyleProfile, telemetrySamples, telemetryContext, trackArchetype] =
       await Promise.all([
         fetchParamRanges(car_class_id, session_type),
         fetchOverrides(track_id, car_class_id),
@@ -114,6 +116,7 @@ export async function POST(req: NextRequest) {
           carClassId: car_class_id,
           sessionType: session_type,
         }),
+        fetchTrackArchetype(track_id),
       ]);
   } catch (err) {
     return NextResponse.json(
@@ -135,6 +138,19 @@ export async function POST(req: NextRequest) {
     submissions,
     requestingLeagueId: league_id,
   });
+
+  // Track-archetype starter — only when this track has no community
+  // submissions of its own (baseline_used). Otherwise the submissions already
+  // carry the circuit's signal. Params with a real track override are skipped
+  // inside the layer, so a hand-tuned override always wins.
+  if (engineResult.baseline_used) {
+    engineResult = applyTrackArchetypeBias({
+      base: engineResult,
+      paramRanges,
+      overrides,
+      archetype: trackArchetype,
+    });
+  }
 
   // Layer the deterministic team/driver bias on top, only if either source
   // was actually requested and resolved to a real row.

@@ -127,6 +127,10 @@ export const dynamic = 'force-dynamic';
 
 const DEFAULT_CAR_CLASS_CODE = 'F1_2025';
 const TELEMETRY_CONFIDENCE = 0.85;
+// Only these classes expose engine braking on the setup screen. F1 23, F1 25
+// and their F1 World cars don't, so an engine-braking value must not be added
+// to their submissions (the range check would reject it as unknown anyway).
+const ENGINE_BRAKING_CAR_CLASS_CODES = new Set(['F1_2024', 'F1_WORLD_F124']);
 
 function conditionsFromWeatherCode(code: number): 'dry' | 'wet' | 'mixed' {
   if (code <= 2) return 'dry';
@@ -185,8 +189,11 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
   }
 }
 
-function mapCarSetupToParamValues(carSetup: any): Record<string, number> {
-  return {
+function mapCarSetupToParamValues(
+  carSetup: any,
+  includeEngineBraking = false
+): Record<string, number> {
+  const values: Record<string, number> = {
     front_arb: carSetup.suspension.frontAntiRollBars,
     rear_arb: carSetup.suspension.rearAntiRollBars,
     front_ride_height: carSetup.suspension.frontRideHeight,
@@ -208,6 +215,21 @@ function mapCarSetupToParamValues(carSetup: any): Record<string, number> {
     front_wing_aero: carSetup.aerodynamics.frontWing,
     rear_wing_aero: carSetup.aerodynamics.rearWing,
   };
+
+  // The export groups engine braking with the transmission settings, but
+  // accept a top-level value too so older capture tools still map it. Omit
+  // the key entirely when the payload doesn't carry one.
+  const engineBraking =
+    carSetup?.transmission?.engineBraking ?? carSetup?.engineBraking;
+  if (
+    includeEngineBraking &&
+    typeof engineBraking === 'number' &&
+    Number.isFinite(engineBraking)
+  ) {
+    values.engine_braking = engineBraking;
+  }
+
+  return values;
 }
 
 function average(values: number[]): number {
@@ -481,7 +503,10 @@ export async function POST(req: NextRequest) {
 
   let setup_values: Record<string, number>;
   try {
-    setup_values = mapCarSetupToParamValues(lap.carSetup);
+    setup_values = mapCarSetupToParamValues(
+      lap.carSetup,
+      ENGINE_BRAKING_CAR_CLASS_CODES.has(car_class_code)
+    );
   } catch {
     return NextResponse.json({ error: 'carSetup payload is missing expected fields' }, { status: 400 });
   }

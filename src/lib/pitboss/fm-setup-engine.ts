@@ -458,3 +458,56 @@ export function optimalRanges(feedbackForBias: FmFeedbackPoint[]): Interval[] {
   }
   return ranges;
 }
+
+// ---------------------------------------------------------------------------
+// Per-circuit starting preset — downforce lean
+// ---------------------------------------------------------------------------
+//
+// pitboss.fm_circuits.downforce_lean ('low' | 'medium' | 'high') exists to
+// nudge a computed starting preset toward more/less downforce instead of
+// storing exact per-circuit values (see that column's own table comment).
+// This is the setup a brand-new circuit starts from before any driver feedback
+// exists: every slider sits at its own range midpoint, and the two wing angles
+// shift by a fraction of their legal span for the circuit's lean. Nothing else
+// is moved, so the first search only has the opinion it was actually given.
+//
+// Without this, a circuit with no feedback and no converged memory anchored to
+// neutralAnchorBias() — identical numbers at every track in the calendar.
+//
+// Magnitude is deliberately small. The five verified dry setups in
+// fm_setup_memory do not show a monotonic lean split (high lean averages 6.25°
+// front wing, low lean 7.0° on a 0–10 slider), so the lean is a nudge in the
+// direction the column is documented for, not a claim the data supports
+// strongly; driver feedback owns the rest. A 15%-of-span shift was three times
+// what those setups justify.
+
+export type TrackDownforceLean = "low" | "medium" | "high";
+
+const DOWNFORCE_LEAN_WING_SHIFT: Record<TrackDownforceLean, { front: number; rear: number }> = {
+  low: { front: -0.05, rear: -0.05 },
+  medium: { front: 0, rear: 0 },
+  high: { front: 0.05, rear: 0.05 },
+};
+
+/** Midpoint-based starting setup for a circuit's downforce lean, snapped to each slider's step grid. */
+export function startingSetupForLean(
+  ranges: FmParamRange[],
+  lean: TrackDownforceLean,
+): Record<FmSetupParamKey, number> {
+  const rbk = rangesByKey(ranges);
+  const shift = DOWNFORCE_LEAN_WING_SHIFT[lean] ?? DOWNFORCE_LEAN_WING_SHIFT.medium;
+  const out = {} as Record<FmSetupParamKey, number>;
+
+  for (const key of FM_SETUP_PARAM_ORDER) {
+    const range = rbk[key];
+    const span = range.max_value - range.min_value;
+    const mid = range.min_value + span / 2;
+    const fraction =
+      key === "front_wing_angle" ? shift.front : key === "rear_wing_angle" ? shift.rear : 0;
+    const stepIndex = Math.round((mid + span * fraction - range.min_value) / range.step);
+    // Round away binary floating-point drift (e.g. 3.1000000000000005) so the
+    // seeded values land on the exact step grid the solver searches.
+    out[key] = Number(stepIndexToRaw(stepIndex, range).toFixed(4));
+  }
+  return out;
+}

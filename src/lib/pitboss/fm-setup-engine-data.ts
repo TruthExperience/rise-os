@@ -5,7 +5,14 @@
 // convention as setup-engine.ts / setup-engine-data.ts on the F1 25 side.
 
 import { createAdminClient } from "@/lib/supabase/server";
-import type { FmParamRange, FmSetupParamKey, FmFeedbackByBias, FmBiasKey, FmFeedbackValue } from "./fm-setup-engine";
+import type {
+  FmParamRange,
+  FmSetupParamKey,
+  FmFeedbackByBias,
+  FmBiasKey,
+  FmFeedbackValue,
+  TrackDownforceLean,
+} from "./fm-setup-engine";
 import { FM_BIAS_ORDER } from "./fm-setup-engine";
 
 function getSupabase() {
@@ -191,6 +198,70 @@ export async function logFmFeedback(params: {
   });
 
   if (error) throw new Error(`Failed to log fm feedback: ${error.message}`);
+}
+
+/**
+ * A circuit's downforce lean ('low' | 'medium' | 'high'). Drives the starting
+ * preset a brand-new circuit gets before any driver feedback exists — see
+ * startingSetupForLean in fm-setup-engine.ts. Defaults to 'medium' for a
+ * circuit row with an unexpected/missing value rather than failing a
+ * calculation over a preset hint.
+ */
+export async function fetchFmCircuitLean(circuitId: string): Promise<TrackDownforceLean> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("fm_circuits")
+    .select("downforce_lean")
+    .eq("id", circuitId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to load fm circuit downforce lean: ${error.message}`);
+
+  const lean = data?.downforce_lean;
+  return lean === "low" || lean === "high" ? lean : "medium";
+}
+
+/**
+ * Writes a circuit's lean-derived starting setup into the memory bank so the
+ * warm start is visible (and shared by every driver) instead of being
+ * recomputed per request.
+ *
+ * lowest_rule_break is 1, deliberately NOT 0: upsertFmSetupMemory only
+ * overwrites a strictly better entry, and 0 is the best score a genuinely
+ * converged setup can reach. A seed at 0 would be permanent. At 1 the seed
+ * anchors new sessions but the first real convergence (0 rule-breaks) takes
+ * over.
+ *
+ * ignoreDuplicates keeps the write race-safe: if another request seeded or a
+ * driver converged this circuit between our read and this insert, the existing
+ * row is left untouched.
+ */
+export async function seedFmSetupMemory(params: {
+  circuitId: string;
+  conditions: "dry" | "wet";
+  setupValues: Record<FmSetupParamKey, number>;
+}): Promise<void> {
+  const supabase = getSupabase();
+  const { error } = await supabase
+    .schema("pitboss")
+    .from("fm_setup_memory")
+    .upsert(
+      {
+        circuit_id: params.circuitId,
+        conditions: params.conditions,
+        setup_values: params.setupValues,
+        lowest_rule_break: 1,
+        possible_setups: 0,
+        sample_count: 0,
+        verified: false,
+        verified_session_id: null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "circuit_id,conditions", ignoreDuplicates: true },
+    );
+
+  if (error) throw new Error(`Failed to seed fm setup memory: ${error.message}`);
 }
 
 /**

@@ -20,20 +20,77 @@ function getSupabase() {
   return createAdminClient();
 }
 
+// Params the game does not expose for a car class, keyed by
+// pitboss.car_classes.code. The UDP CarSetupData struct carries fields that
+// the setup screen doesn't offer, so serving every seeded range row put
+// impossible sliders in the submit form and impossible entries in generated
+// setups:
+//   - ballast: F1 23, F1 24 and F1 25 cars don't expose it (a captured setup
+//     carries only wings, differential, geometry, suspension, brakes and tyre
+//     pressures), and F2 runs a spec chassis with a fixed weight
+//     distribution, so no F1 or F2 class exposes it. The 0-100% row is part of
+//     the blanket seed every class received.
+//   - engine_braking: only the 2026 Season Pack's 2026 F1 cars have it (a
+//     50% baseline in every fast setup). F1 25's 2025 cars and the F2 cars
+//     have no such setting, and F1 2023 predates the field entirely (f24.ts
+//     records engineBraking as new in the F1 24 packet). F1_2026 is
+//     therefore deliberately absent here.
+const UNSUPPORTED_PARAMS_BY_CAR_CLASS: Record<string, readonly string[]> = {
+  // F1 23 has neither setting: engine braking arrived in F1 24, and ballast
+  // is only a UDP field there, not a setup-screen slider.
+  F1_2023: ["ballast", "engine_braking"],
+  // F1 2024 keeps engine braking (the setting arrived in F1 24, see f24.ts)
+  // but has no ballast setting either. Ballast is not seeded for the class;
+  // the entry guards against a future blanket seed re-adding it.
+  F1_2024: ["ballast"],
+  F1_2025: ["ballast", "engine_braking"],
+  // Each game's F1 World Car reuses that game's own F1 setup screen: F1 23
+  // has no engine braking, F1 24 has engine braking but no ballast, and F1 25
+  // has neither. Ranges are copied from the matching F1 class. F1_WORLD is
+  // the F1 25 class and stays on its original code (league tiers reference it).
+  F1_WORLD: ["ballast", "engine_braking"],
+  F1_WORLD_F123: ["ballast", "engine_braking"],
+  F1_WORLD_F124: ["ballast"],
+  // F2 runs the spec chassis in every game, and engine braking is missing
+  // from the F2 setup screen in F1 24 (simracingsetup's F1 24 F2 guide).
+  F2_2023_F123: ["ballast", "engine_braking"],
+  F2_2023_F124: ["ballast", "engine_braking"],
+  F2_2024_F124: ["ballast", "engine_braking"],
+  F2_2024_F125: ["ballast", "engine_braking"],
+  F2_2025: ["ballast", "engine_braking"],
+  F2_2026: ["ballast", "engine_braking"],
+};
+
 export async function fetchParamRanges(
   carClassId: string,
   sessionType: string
 ): Promise<ParamRange[]> {
   const supabase = getSupabase();
-  const { data, error } = await supabase
-    .schema("pitboss")
-    .from("setup_parameter_ranges")
-    .select("param_key, param_group, min_value, max_value, default_value, step, unit, applicable_session_types")
-    .eq("car_class_id", carClassId);
+  const [rangesResult, carClassResult] = await Promise.all([
+    supabase
+      .schema("pitboss")
+      .from("setup_parameter_ranges")
+      .select("param_key, param_group, min_value, max_value, default_value, step, unit, applicable_session_types")
+      .eq("car_class_id", carClassId),
+    // Best-effort: if this lookup fails we keep every range row rather than
+    // failing the whole request over a class-level exclusion.
+    supabase
+      .schema("pitboss")
+      .from("car_classes")
+      .select("code")
+      .eq("id", carClassId)
+      .maybeSingle(),
+  ]);
 
+  const { data, error } = rangesResult;
   if (error) throw new Error(`Failed to load param ranges: ${error.message}`);
 
+  const unsupported = new Set(
+    UNSUPPORTED_PARAMS_BY_CAR_CLASS[carClassResult.data?.code ?? ""] ?? []
+  );
+
   return (data ?? [])
+    .filter((r) => !unsupported.has(r.param_key))
     .filter((r) => !r.applicable_session_types || r.applicable_session_types.includes(sessionType))
     .map((r) => ({
       param_key: r.param_key,
@@ -74,6 +131,25 @@ export async function fetchOverrides(
     weight: o.weight == null ? null : Number(o.weight),
     basis: o.basis,
   }));
+}
+
+/**
+ * The circuit's archetype tag (street_circuit, high_downforce_technical, ...).
+ * Used as the fallback starter when a track has no community submissions: see
+ * applyTrackArchetypeBias in setup-engine.ts. Null for a track that has no tag
+ * yet, which the caller treats as "no archetype bias".
+ */
+export async function fetchTrackArchetype(trackId: string): Promise<string | null> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("tracks")
+    .select("archetype")
+    .eq("id", trackId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to load track archetype: ${error.message}`);
+  return data?.archetype ?? null;
 }
 
 export async function fetchSubmissions(params: {
