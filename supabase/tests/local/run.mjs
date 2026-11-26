@@ -25,6 +25,7 @@ const files = [
   'supabase/migrations/20261125_01_bonus_ceiling_and_divisions.sql',
   'supabase/migrations/20261125_02_contract_schedule_rewrites.sql',
   'supabase/migrations/20261126_01_trl_opening_balances.sql',
+  'supabase/migrations/20261126_02_trl_config_resets.sql',
   'supabase/tests/local/assertions.sql',
 ];
 
