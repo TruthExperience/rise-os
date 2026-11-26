@@ -18,6 +18,27 @@ create table rise_os.leagues (
   name text
 );
 
+create table rise_os.league_divisions (
+  id uuid primary key default gen_random_uuid(),
+  league_id uuid not null references rise_os.leagues(id),
+  division_code text not null,
+  division_name text,
+  discord_checkin_channel_id text,
+  created_at timestamptz not null default now(),
+  discord_checkin_role_id text,
+  discord_category_id text,
+  tier_order integer not null default 1,
+  max_drivers integer,
+  discord_incident_channel_id text,
+  discord_transcript_channel_id text,
+  default_race_time time,
+  race_timezone text not null default 'Europe/London',
+  default_ping_delivery text,
+  checkin_autopost_enabled boolean not null default false,
+  roster_division text,
+  unique (league_id, division_code)
+);
+
 create table rise_os.calendar_rounds (
   id uuid primary key default gen_random_uuid(),
   league_id uuid not null references rise_os.leagues(id),
