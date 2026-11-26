@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/server";
 import { getLeagueMembership, hasAnyFlag } from "../permissions";
 import { getOrCreateDriver } from "./checkin";
 
-// /division create | list | assign | remove | link | delete
+// /division create | list | assign | remove | link | sync | delete
 //
 // Divisions live in rise_os.league_divisions — the same table check-in
 // already resolves against (resolveDivision / resolveDivisionByChannel in
@@ -227,6 +227,155 @@ registerCommand("division_create", async (ctx) => {
       }
       lines.push(...warnings);
       return { content: lines.join("\n") };
+    },
+  };
+});
+
+// ---------------------------------------------------------------------
+// /division sync — give every division row the Discord objects it lacks.
+//
+// Divisions can be seeded straight into rise_os.league_divisions (TRL's
+// ten arrived that way), so the database — not the command that made the
+// row — is the source of truth for what a division is called. This reads
+// the league's rows and fills in the missing pieces: a mentionable role,
+// a category and the check-in text channel inside it. Names come from the
+// row (division_name, else division_code), the channel from
+// channelSlug(division_code). Every object is written back to its row as
+// it is created, so a run that fails half way through can simply be run
+// again — completed divisions are skipped.
+// ---------------------------------------------------------------------
+registerCommand("division_sync", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league server.", ephemeral: true };
+  }
+  if (!(await isDivisionAdmin(ctx.discordUserId, leagueId))) {
+    return { content: "You don't have permission to create division channels.", ephemeral: true };
+  }
+
+  const guildId = ctx.guildId;
+  if (!guildId) {
+    return { content: "Can't create Discord channels outside a server.", ephemeral: true };
+  }
+
+  // Division codes may contain spaces ("T1 F1 26"), so unlike the other
+  // subcommands this one takes the code as typed instead of cleanCode.
+  const code = String(ctx.options.code ?? "").trim();
+  const supabase = createAdminClient();
+
+  return {
+    defer: true,
+    ephemeral: true,
+    background: async () => {
+      const base = supabase
+        .schema("rise_os")
+        .from("league_divisions")
+        .select(DIVISION_COLUMNS)
+        .eq("league_id", leagueId)
+        .order("tier_order", { ascending: true })
+        .order("division_code", { ascending: true });
+
+      const { data: divisions, error } = code ? await base.ilike("division_code", code) : await base;
+
+      if (error) {
+        console.error("[division_sync] lookup failed:", error);
+        return { content: `Something went wrong pulling divisions: ${error.message}` };
+      }
+      if (!divisions || divisions.length === 0) {
+        return {
+          content: code
+            ? `No division "${code}" in this league.`
+            : "No divisions set up for this league yet. Use `/division create`.",
+        };
+      }
+
+      const lines: string[] = [];
+      let touched = 0;
+      let skipped = 0;
+      let failed = 0;
+
+      for (const d of divisions) {
+        const name: string = (d.division_name ?? "").trim() || d.division_code;
+        const made: string[] = [];
+        const updates: Record<string, string> = {};
+        let failure: string | null = null;
+
+        let roleId: string | null = d.discord_checkin_role_id;
+        if (!roleId) {
+          const role = await discordRequest("POST", `/guilds/${guildId}/roles`, {
+            name,
+            mentionable: true,
+          });
+          if (!role.ok) {
+            failure = `role (${role.status}) — check the bot has Manage Roles`;
+          } else {
+            roleId = role.data.id;
+            updates.discord_checkin_role_id = role.data.id;
+            made.push(`role <@&${role.data.id}>`);
+          }
+        }
+
+        let categoryId: string | null = d.discord_category_id;
+        if (!failure && !categoryId) {
+          const category = await discordRequest("POST", `/guilds/${guildId}/channels`, {
+            name,
+            type: 4,
+          });
+          if (!category.ok) {
+            failure = `category (${category.status}) — check the bot has Manage Channels`;
+          } else {
+            categoryId = category.data.id;
+            updates.discord_category_id = category.data.id;
+            made.push(`category "${name}"`);
+          }
+        }
+
+        if (!failure && !d.discord_checkin_channel_id && categoryId) {
+          const channel = await discordRequest("POST", `/guilds/${guildId}/channels`, {
+            name: channelSlug(d.division_code),
+            type: 0,
+            parent_id: categoryId,
+          });
+          if (!channel.ok) {
+            failure = `check-in channel (${channel.status}) — check the bot has Manage Channels`;
+          } else {
+            updates.discord_checkin_channel_id = channel.data.id;
+            made.push(`channel <#${channel.data.id}>`);
+          }
+        }
+
+        if (Object.keys(updates).length > 0) {
+          const { error: updateError } = await supabase
+            .schema("rise_os")
+            .from("league_divisions")
+            .update(updates)
+            .eq("id", d.id);
+          if (updateError) {
+            console.error("[division_sync] save failed:", updateError);
+            failure = `${failure ? `${failure}; ` : ""}couldn't save the ids: ${updateError.message}`;
+          }
+        }
+
+        if (failure) {
+          failed += 1;
+          lines.push(`**${d.division_code}** — couldn't create the ${failure}.`);
+        } else if (made.length > 0) {
+          touched += 1;
+          lines.push(`**${d.division_code}** — created ${made.join(", ")}.`);
+        } else {
+          skipped += 1;
+        }
+      }
+
+      const summary = [
+        touched > 0
+          ? `Created Discord objects for ${touched} division${touched === 1 ? "" : "s"}.`
+          : "Every division already has its channel, category and role.",
+      ];
+      if (skipped > 0) summary.push(`${skipped} already linked.`);
+      if (failed > 0) summary.push(`${failed} need attention — run \`/division sync\` again once fixed.`);
+
+      return { content: [summary.join(" "), "", ...lines].join("\n").trim() };
     },
   };
 });
