@@ -10,6 +10,7 @@ import { verifyCard, type CardKind } from "@/lib/discord/card-url";
 import { loadDriverLabels, labelFull } from "@/lib/discord/driver-labels";
 import { computeExtraStats } from "@/lib/pitboss/driver-stats";
 import { standingsThrough } from "@/lib/pitboss/standings-through";
+import { scopeToDivision } from "@/lib/discord/division-label";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +18,7 @@ export const dynamic = "force-dynamic";
 const W = 1000;
 const ROW = 64;
 const MAX_ROWS = 40;
-const KINDS: CardKind[] = ["race", "sprint", "quali", "drivers", "teams", "stats", "stats2"];
+const KINDS: CardKind[] = ["race", "sprint", "quali", "drivers", "teams", "stats", "stats2", "checkin"];
 
 type Line = { pos: string; name: string; sub: string; right: string; gap?: string };
 
@@ -66,10 +67,16 @@ const statCell = (row: any, key: string) => {
   return String(v);
 };
 
+// satori cannot decode webp, and every team logo on media.formula1.com and
+// Cloudinary is one. Both hosts serve a PNG variant when the path extension is
+// swapped (checked against live F1 and F2 URLs), so ask for that. A webp URL
+// used to be dropped outright by the check below, so this only ever adds logos
+// — nothing that rendered before renders differently.
 async function logoData(url?: string | null): Promise<string | null> {
   if (!url || !/^https?:\/\//.test(url)) return null;
+  const src = url.replace(/\.webp(\?.*)?$/i, ".png$1");
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    const res = await fetch(src, { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return null;
     const type = (res.headers.get("content-type") ?? "").split(";")[0];
     if (!/^image\/(png|jpe?g|gif)$/.test(type)) return null;
@@ -85,16 +92,24 @@ export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const kind = sp.get("kind") as CardKind | null;
   const leagueId = sp.get("league_id");
-  const season = sp.get("season");
+  // Empty string rather than null: the check-in card carries no season (it is
+  // division-scoped), and every other kind still requires a non-empty value.
+  const season = sp.get("season") ?? "";
   const roundRaw = sp.get("round");
   // Standings/stats cards pinned to "after round N" when a round is given.
   const upTo = Number.isInteger(Number(roundRaw)) && Number(roundRaw) > 0 ? Number(roundRaw) : null;
   const afterRound = upTo != null ? ` · after round ${upTo}` : "";
 
-  if (!kind || !KINDS.includes(kind) || !leagueId || !season) {
+  const division = sp.get("division");
+  if (!kind || !KINDS.includes(kind) || !leagueId) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
-  const params = { kind, league_id: leagueId, season, round: roundRaw };
+  // The check-in card is a division's team strip, so it is scoped by division
+  // and has no season of its own; every other kind still needs one.
+  if (kind !== "checkin" && !season) {
+    return NextResponse.json({ error: "Bad request" }, { status: 400 });
+  }
+  const params = { kind, league_id: leagueId, season, round: roundRaw, division };
   if (!verifyCard(params, sp.get("sig"))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -102,6 +117,92 @@ export async function GET(req: NextRequest) {
   const supabase = createAdminClient();
   const pb = supabase.schema("pitboss");
   const { data: league } = await pb.from("leagues").select("name, logo_url").eq("id", leagueId).single();
+
+  // ---- Check-in team strip -----------------------------------------------
+  // Every team in one division with its logo, shown as the image on a
+  // division's check-in card. Discord embeds hold a single image and no
+  // per-field icons, so a logo per team line is only possible as a rendered
+  // strip like this. Falls back to the whole league when the league's
+  // franchises carry no matching division label (nothing to scope by).
+  if (kind === "checkin") {
+    const { data: teamRows } = await supabase
+      .schema("rise_os")
+      .from("franchises")
+      .select("name, abbreviation, logo_url, division")
+      .eq("league_id", leagueId)
+      .order("name");
+
+    type TeamRow = { name: string; abbreviation: string | null; logo_url: string | null; division: string | null };
+    const teams = scopeToDivision(
+      (teamRows ?? []) as TeamRow[],
+      division,
+      (t) => t.division
+    ).filter((t) => !!(t.name ?? "").trim());
+
+    const COLS = 4;
+    const CELL_W = 236;
+    const CELL_H = 150;
+    const PAD = 28;
+    const HEAD = 128;
+    const rows = Math.max(1, Math.ceil(teams.length / COLS));
+    const width = COLS * CELL_W + PAD * 2;
+    const height = HEAD + rows * CELL_H + PAD;
+    const logos = await Promise.all(teams.map((t) => logoData(t.logo_url)));
+    const label = (t: { name: string; abbreviation: string | null }) => {
+      const raw = (t.abbreviation || t.name || "").trim();
+      return raw.length > 22 ? `${raw.slice(0, 21)}…` : raw;
+    };
+
+    return new ImageResponse(
+      (
+        <div
+          style={{
+            width,
+            height,
+            display: "flex",
+            flexDirection: "column",
+            background: "#07070b",
+            color: "#ffffff",
+            padding: PAD,
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", height: HEAD, marginBottom: 0 }}>
+            <div style={{ fontSize: 20, color: "#8b93a1", letterSpacing: 2 }}>CHECK-IN</div>
+            <div style={{ fontSize: 40, fontWeight: 700, marginTop: 6 }}>
+              {league?.name ?? "League"}
+            </div>
+            <div style={{ fontSize: 22, color: "#9aa4b2", marginTop: 4 }}>Division {division}</div>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", width: COLS * CELL_W }}>
+            {teams.map((t, i) => (
+              <div
+                key={i}
+                style={{
+                  width: CELL_W,
+                  height: CELL_H,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                {logos[i] ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={logos[i] as string} width={96} height={96} style={{ objectFit: "contain" }} />
+                ) : (
+                  <div style={{ width: 96, height: 96, display: "flex" }} />
+                )}
+                <div style={{ fontSize: 15, color: "#d5d9e0", marginTop: 10, textAlign: "center" }}>
+                  {label(t)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ),
+      { width, height }
+    );
+  }
 
 
   // ---- Full driver stats cards -------------------------------------------
