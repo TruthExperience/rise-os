@@ -147,7 +147,28 @@ begin
 end
 $t$;
 
--- ------------------------------------------- 3. earnings index split
+-- ------------------------------------------- 3. earnings kind CHECK
+-- The live CHECK rejected sprint keys, and finalize_round swallows that error,
+-- so a sprint bonus would simply never post. The migration must widen it; the
+-- insert is undone by the deliberate error so it leaves no row behind.
+do $t$
+begin
+  begin
+    insert into pitboss.contract_earnings
+      (contract_id, league_id, franchise_id, season, kind, amount)
+    values
+      ('cccccccc-0000-0000-0000-000000000003',
+       '11111111-1111-1111-1111-111111111111',
+       'aaaaaaaa-0000-0000-0000-000000000001',
+       '99', 'sprint_win', 1000);
+    raise sqlstate 'P0001' using message = 'probe rollback';
+  exception when sqlstate 'P0001' then
+    perform tests.ok('sprint earnings pass the live kind CHECK', true);
+  end;
+end
+$t$;
+
+-- ------------------------------------------- 4. earnings index split
 do $t$
 begin
   insert into pitboss.contract_earnings (contract_id, league_id, franchise_id, season, kind, amount)

@@ -23,6 +23,12 @@ alter table pitboss.driver_contracts
 -- ---------------------------------------------------------------------------
 -- 2. contract_earnings: separate per-round uniqueness from per-season awards
 -- ---------------------------------------------------------------------------
+-- Live this name is a UNIQUE NULLS NOT DISTINCT constraint, not a plain
+-- index (the local stub used the index shape until 2026-11-26). Drop the
+-- constraint first: Postgres refuses to drop the index a constraint owns.
+alter table pitboss.contract_earnings
+  drop constraint if exists contract_earnings_contract_id_round_id_kind_key;
+
 drop index if exists pitboss.contract_earnings_contract_id_round_id_kind_key;
 
 create unique index if not exists contract_earnings_round_kind_key
@@ -35,6 +41,21 @@ create unique index if not exists contract_earnings_season_kind_key
 
 create index if not exists contract_earnings_contract_season_idx
   on pitboss.contract_earnings (contract_id, season);
+
+-- The live CHECK allows race/podium/lap/pole/parts and wdc*/wcc*, but not the
+-- sprint keys post_round_earnings now posts. Left alone, every sprint bonus
+-- would fail with 23514 inside finalize_round's exception block and be
+-- swallowed as "finalized, but no earnings". Widen it here.
+alter table pitboss.contract_earnings
+  drop constraint if exists contract_earnings_kind_check;
+
+alter table pitboss.contract_earnings
+  add constraint contract_earnings_kind_check
+  check (
+    kind = any (array['race_win','podium','fastest_lap','pole',
+                       'sprint_win','sprint_podium','sprint_pole','dnf_parts'])
+    or kind ~ '^(wdc|wcc)_[a-z0-9_]+$'
+  );
 
 -- ---------------------------------------------------------------------------
 -- 3. Helpers

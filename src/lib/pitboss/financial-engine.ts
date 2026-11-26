@@ -70,7 +70,10 @@ export interface LeagueFinancialConfig {
 }
 
 export interface CapHitBreakdown {
+  // Contract base for the season plus signing bonuses signed that season:
+  // pitboss.franchise_cap_payroll's active_total without its bonus_total.
   activeContractsTotal: number;
+  signingBonusTotal: number;
   deadCapTotal: number;
   deadCapCountedTowardSoft: number;
   deadCapCountedTowardApron: number;
@@ -229,7 +232,9 @@ export async function calculateCapHit(
   const { data: activeContracts, error: activeErr } = await supabase
     .schema('pitboss')
     .from('driver_contracts')
-    .select('contract_value, base_salary_per_season, season_start, season_end')
+    .select(
+      'contract_value, base_salary_per_season, season_start, season_end, grace_period_sessions_remaining'
+    )
     .eq('league_id', params.leagueId)
     .eq('franchise_id', params.franchiseId)
     .eq('division', params.division)
@@ -239,9 +244,45 @@ export async function calculateCapHit(
     throw new Error(`Failed to fetch active contracts: ${activeErr.message}`);
   }
 
-  const activeContractsTotal = (activeContracts ?? [])
+  // A contract inside its grace period is on the roster but costs nothing yet,
+  // exactly as franchise_cap_payroll charges it.
+  const activeContractsBase = (activeContracts ?? [])
     .filter((c) => contractCoversSeason(c, params.season))
-    .reduce((sum, c) => sum + contractSeasonBase(c, params.season), 0);
+    .reduce(
+      (sum, c) =>
+        sum +
+        (Number(c.grace_period_sessions_remaining ?? 0) > 0
+          ? 0
+          : contractSeasonBase(c, params.season)),
+      0
+    );
+
+  // Signing bonus is cash handed over when the deal was signed: it is charged
+  // once, in the season the contract starts, and releasing the driver later
+  // must not refund it — so this deliberately ignores status, like
+  // franchise_cap_payroll. Seasons we cannot parse are never a match.
+  const { data: signingBonusRows, error: signingErr } = await supabase
+    .schema('pitboss')
+    .from('driver_contracts')
+    .select('signing_bonus, season_start')
+    .eq('league_id', params.leagueId)
+    .eq('franchise_id', params.franchiseId)
+    .eq('division', params.division)
+    .gt('signing_bonus', 0);
+
+  if (signingErr) {
+    throw new Error(`Failed to fetch signing bonuses: ${signingErr.message}`);
+  }
+
+  const targetSeason = seasonNumber(params.season);
+  const signingBonusTotal = (signingBonusRows ?? []).reduce((sum, c) => {
+    const start = seasonNumber(c.season_start);
+    if (targetSeason === null || start === null || start !== targetSeason) return sum;
+    const bonus = Number(c.signing_bonus ?? 0);
+    return sum + (Number.isFinite(bonus) ? bonus : 0);
+  }, 0);
+
+  const activeContractsTotal = activeContractsBase + signingBonusTotal;
 
   // Dead cap: for 'released' and 'bought_out' contracts, dead cap dollar
   // amount = contract_value * dead_cap_pct (the rate CRRB Fin Regs and
@@ -285,6 +326,7 @@ export async function calculateCapHit(
 
   return {
     activeContractsTotal,
+    signingBonusTotal,
     deadCapTotal,
     deadCapCountedTowardSoft,
     deadCapCountedTowardApron,

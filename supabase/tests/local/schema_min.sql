@@ -128,12 +128,18 @@ create table pitboss.contract_earnings (
   amount numeric not null,
   wallet_transaction_id uuid,
   created_at timestamptz not null default now(),
-  clipped_amount numeric not null default 0
+  clipped_amount numeric not null default 0,
+  -- the live constraint this migration replaces (NULLS NOT DISTINCT is the bug).
+  -- Production has it as a table constraint, not a bare index, so the stub must
+  -- too: dropping the index alone fails with 2BP01 against the real database.
+  constraint contract_earnings_contract_id_round_id_kind_key
+    unique nulls not distinct (contract_id, round_id, kind),
+  -- the live kind CHECK, which does not yet allow the sprint keys
+  constraint contract_earnings_kind_check check (
+    kind = any (array['race_win','podium','fastest_lap','pole','dnf_parts'])
+    or kind ~ '^(wdc|wcc)_[a-z0-9_]+$'
+  )
 );
-
--- the live index this migration replaces (NULLS NOT DISTINCT is the bug)
-create unique index contract_earnings_contract_id_round_id_kind_key
-  on pitboss.contract_earnings (contract_id, round_id, kind) nulls not distinct;
 
 create table pitboss.results (
   id uuid primary key default gen_random_uuid(),
