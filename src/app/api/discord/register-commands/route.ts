@@ -703,8 +703,10 @@ const APPEAL_COMMAND = {
   ],
 };
 
-// /division: create | list | assign | remove | link | delete (handlers in
-// src/lib/discord/commands/division.ts, dispatched as division_<sub>).
+// /division: create | list | assign | remove | link | sync | delete (handlers
+// in src/lib/discord/commands/division.ts, dispatched as division_<sub>).
+// `sync` creates the Discord role/category/check-in channel that rows already
+// in the database are missing, so divisions seeded by SQL get channels too.
 // `reserve` on assign/remove targets the division's reserve list instead of
 // its main drivers. Reserves don't count against max_drivers.
 // Option types: 1 = SUB_COMMAND, 3 = STRING, 4 = INTEGER, 5 = BOOLEAN,
@@ -758,6 +760,14 @@ const DIVISION_COMMAND = {
         { type: 8, name: "role", description: "Division role", required: false },
         { type: 4, name: "max_drivers", description: "Maximum main drivers", required: false },
         { type: 3, name: "name", description: "Display name", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "sync",
+      description: "Create the missing Discord channel, category and role for divisions in the database",
+      options: [
+        { type: 3, name: "code", description: "Only this division, e.g. T1 F1 26 (default: every division in the league)", required: false },
       ],
     },
     {
