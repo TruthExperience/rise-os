@@ -1,8 +1,8 @@
 // src/app/api/discord/register-commands/route.ts
 //
 // Registers /setup, /division, /signups (open, resume, status, list, close, invite,
-// tracks, test), /signup (photos), /timetrial, /steward and /appeal and /progression with
-// Discord. Each command is POSTed BY NAME, which overwrites that one command
+// tracks, test), /signup (photos), /timetrial, /steward and /appeal and /progression
+// and /ddv with Discord. Each command is POSTed BY NAME, which overwrites that one command
 // and leaves every other registered command alone, so this contains EVERY
 // option/subcommand of each command listed here, not just the new ones.
 //
@@ -888,6 +888,68 @@ const REGRESSION_COMMAND = {
   ],
 };
 
+// /ddv: view | edit | team | leaderboard | guide (handlers in
+// src/lib/discord/commands/ddv.ts, dispatched as ddv_<sub>). `guide` posts the
+// short explainer into the channel on purpose (not ephemeral) so it can be
+// pinned. POSTing /ddv by name replaces the whole command, so every existing
+// subcommand has to stay listed here.
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 6 = USER, 10 = NUMBER
+const DDV_COMMAND = {
+  name: "ddv",
+  description: "Dynamic Driver Value: look up, adjust and explain DDV",
+  options: [
+    {
+      type: 1,
+      name: "view",
+      description: "Show a driver's DDV (default: your own)",
+      options: [
+        {
+          type: 6,
+          name: "driver",
+          description: "Driver to look up (default: you)",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "edit",
+      description: "Manually set a driver's DDV (owners)",
+      options: [
+        { type: 6, name: "driver", description: "Driver whose DDV to change", required: true },
+        { type: 10, name: "ddv", description: "New DDV value", required: true, min_value: 0 },
+        { type: 3, name: "reason", description: "Why (required, it's logged)", required: true },
+      ],
+    },
+    {
+      type: 1,
+      name: "team",
+      description: "DDV of every driver on a team (Team Principals)",
+      options: [
+        { type: 3, name: "team", description: "Team name (default: your own team)", required: false },
+        { type: 3, name: "season", description: "Season (default: current)", required: false },
+      ],
+    },
+    { type: 1, name: "leaderboard", description: "League DDV leaderboard" },
+    {
+      type: 1,
+      name: "guide",
+      description: "Post the short DDV explainer so it can be pinned",
+      // Only needed for leagues with several division configs (TRL); the
+      // handler also accepts the division's own channel, and refuses with the
+      // list of divisions when it can't tell which one applies.
+      options: [
+        {
+          type: 3,
+          name: "division",
+          description: "Division to explain (only for leagues with several configs)",
+          required: false,
+        },
+      ],
+    },
+  ],
+};
+
 // /cap. Subcommands in src/lib/discord/commands/cap.ts. Every option each
 // handler reads is listed here: view falls back to your own franchise, edit
 // needs a franchise and an amount (it refuses without them), league takes
@@ -1141,6 +1203,7 @@ async function register(): Promise<NextResponse> {
     GAMERTAGS_COMMAND,
     PROGRESSION_COMMAND,
     REGRESSION_COMMAND,
+    DDV_COMMAND,
     ...RESTORED_COMMANDS,
   ]) {
     // Discord rate-limits command writes (a 429 comes back with

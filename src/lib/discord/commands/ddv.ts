@@ -1,6 +1,12 @@
 // ddv.ts
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
+import {
+  formatLeagueMoney,
+  leagueCurrencyLabel,
+  leagueCurrencySymbol,
+} from "@/lib/currency";
+import { buildDdvGuide } from "../ddv-guide";
 
 type DriverMatch = {
   id: string;
@@ -253,23 +259,10 @@ async function resolveOwnTPTeams(
   }));
 }
 
-// Leagues are inconsistently slugged: some are already abbreviations
-// (trl, wsc, aarl, awc), others are full hyphenated names
-// (halo-racing-league). Short slugs are used as-is; hyphenated ones
-// get initialized (halo-racing-league -> HRL) to match the short-form
-// convention the rest of the codebase already uses in comments/docs.
-function leagueCurrencyLabel(slug: string): string {
-  if (!slug.includes("-")) return slug.toUpperCase();
-  return slug
-    .split("-")
-    .map((word) => word[0])
-    .join("")
-    .toUpperCase();
-}
-
+// Money is formatted per league (see @/lib/currency): W11 is a UK league, so
+// its figures render in pounds (£) rather than a "$W11" prefix.
 function fmtDDV(n: number | null | undefined, leagueSlug: string): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return `$${n.toLocaleString("en-US")} ${leagueCurrencyLabel(leagueSlug)}`;
+  return formatLeagueMoney(n, leagueSlug);
 }
 
 registerCommand("ddv_view", async (ctx) => {
@@ -677,4 +670,144 @@ registerCommand("ddv_leaderboard", async (ctx) => {
   });
 
   return { content: lines.join("\n"), ephemeral: false };
+});
+
+// The pinnable explainer: what moves DDV, the weekend cap, and the contract
+// floor/ceiling, in under Discord's 2000-character limit. Open to everyone in
+// the league (it's nobody's private figures) and posted in the channel rather
+// than ephemerally so an admin can pin it. Every number comes from this
+// league's league_financial_config, so it can't drift from what /sign-driver
+// and /cap actually enforce.
+registerCommand("ddv_guide", async (ctx) => {
+  const leagueId = ctx.leagueId;
+  if (!leagueId) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const leagueSlug = ctx.leagueSlug;
+  if (!leagueSlug) {
+    return { content: "This command must be used in a league channel.", ephemeral: true };
+  }
+
+  const supabase = createAdminClient();
+
+  // A league has one config row per division, and TRL has four (F1, F1_25,
+  // F2_24, F2_25) whose caps differ — F2 is 28M/42M against F1's 150M/175M.
+  // Reading a single arbitrary row would advertise the wrong caps in a
+  // division's channel, so resolve the division first and refuse when it is
+  // ambiguous, the same fail-loud rule as /sign-driver's
+  // resolveFinancialConfig. Never guess between divisions.
+  const { data: configs, error } = await supabase
+    .schema("pitboss")
+    .from("league_financial_config")
+    .select(
+      "division, contract_floor_pct, contract_ceiling_pct, soft_cap, hard_apron, ddv_weekend_gain_cap, ddv_weekend_loss_cap, ddv_base_rate_per_bps, attendance_config"
+    )
+    .eq("league_id", leagueId)
+    .order("division", { ascending: true });
+
+  if (error) {
+    console.error("[ddv_guide] config lookup failed:", error);
+    return { content: `Couldn't load this league's DDV config: ${error.message}`, ephemeral: true };
+  }
+  if (!configs || configs.length === 0) {
+    return {
+      content:
+        "This league has no DDV/financial config yet, so there's nothing to explain. Add a league_financial_config row for it first.",
+      ephemeral: true,
+    };
+  }
+
+  const divisions = configs
+    .map((row) => String(row.division ?? ""))
+    .filter((code) => code.length > 0);
+  const multipleDivisions = configs.length > 1;
+
+  let config = configs[0];
+  if (multipleDivisions) {
+    const optionDivision =
+      typeof ctx.options.division === "string" ? ctx.options.division.trim() : "";
+    let wanted = optionDivision;
+
+    // Running the command in a division's own channel scopes it without an
+    // option. Channels that aren't tied to a division stay ambiguous.
+    if (!wanted && ctx.channelId) {
+      const { data: channelDivision } = await supabase
+        .schema("rise_os")
+        .from("league_divisions")
+        .select("division_code")
+        .eq("league_id", leagueId)
+        .eq("discord_checkin_channel_id", ctx.channelId)
+        .maybeSingle();
+      wanted = ((channelDivision?.division_code as string | undefined) ?? "").trim();
+    }
+
+    if (!wanted) {
+      return {
+        content: `This league has ${configs.length} division configs (${divisions.join(
+          ", "
+        )}), so the guide has to know which one to explain. Run \`/ddv guide division:<code>\` or run it in that division's channel.`,
+        ephemeral: true,
+      };
+    }
+
+    const matched = configs.find(
+      (row) => String(row.division ?? "").toUpperCase() === wanted.toUpperCase()
+    );
+    if (!matched) {
+      return {
+        content: `No DDV config for "${wanted}" in this league. Configured divisions: ${divisions.join(
+          ", "
+        )}.`,
+        ephemeral: true,
+      };
+    }
+    config = matched;
+  }
+
+  const attendance = (config.attendance_config ?? {}) as {
+    noshow_pct?: number;
+    decline_pct?: number;
+    penalty_min?: number;
+    penalty_max?: number;
+    streak_bonus_cap?: number;
+  };
+
+  // The per-event money rates scale linearly with the league's DDV base rate.
+  // These multiples were measured against W11 T1's real engine output at its
+  // base rate of 15,000 (race point ≈ 21,000, quali place ≈ 9,000, sprint
+  // point ≈ 15,000, head-to-head ≈ ±337,500, clean weekend +12,000, penalty
+  // point ≈ −6,000), so another league's figures follow its own rate instead
+  // of borrowing W11's numbers.
+  const baseRate = Number(config.ddv_base_rate_per_bps ?? 15000);
+  const per = (multiple: number) => Math.round((baseRate * multiple) / 500) * 500;
+
+  const content = buildDdvGuide({
+    money: (n) => formatLeagueMoney(n, leagueSlug, { withLabel: false }),
+    currencyName: `${leagueCurrencyLabel(leagueSlug)} (${leagueCurrencySymbol(leagueSlug)})`,
+    floorPct: Number(config.contract_floor_pct),
+    ceilingPct: Number(config.contract_ceiling_pct),
+    softCap: Number(config.soft_cap),
+    apron: Number(config.hard_apron),
+    gainCap: Number(config.ddv_weekend_gain_cap),
+    lossCap: Number(config.ddv_weekend_loss_cap),
+    noshowPct: Number(attendance.noshow_pct ?? 0.05),
+    declinePct: Number(attendance.decline_pct ?? 0.015),
+    penaltyMin: Number(attendance.penalty_min ?? 150000),
+    penaltyMax: Number(attendance.penalty_max ?? 1000000),
+    attendanceCap: Number(attendance.streak_bonus_cap ?? 250000),
+    perPoint: per(1.4),
+    perQuali: per(0.6),
+    perSprint: per(1),
+    headToHead: per(22.5),
+    cleanWeekend: per(0.8),
+    penaltyPoint: per(0.4),
+  });
+
+  return {
+    // A division-scoped guide says which division it describes, since the caps
+    // and floor numbers only apply to that division.
+    content: multipleDivisions ? `**Division: ${config.division}**\n\n${content}` : content,
+    ephemeral: false,
+  };
 });
