@@ -877,6 +877,70 @@ const REGRESSION_COMMAND = {
   ],
 };
 
+// /sign-driver. Registered BY NAME, so this must list EVERY option the handler
+// reads (src/lib/discord/commands/driver.ts): a POST replaces the whole
+// command, and an option missing here simply never reaches the handler. It had
+// dropped out of this file entirely, which is why seasons/signing_bonus and the
+// bonus schedule could be read by the handler but never sent by Discord.
+// Option types: 3 = STRING, 4 = INTEGER, 6 = USER, 10 = NUMBER
+const SIGN_DRIVER_COMMAND = {
+  name: "sign-driver",
+  description: "Sign a driver to a franchise (employment — contracts/cap, not the EA car-class roster)",
+  options: [
+    {
+      type: 6,
+      name: "driver",
+      description: "Driver to sign",
+      required: true,
+    },
+    {
+      type: 3,
+      name: "franchise",
+      description: "Franchise name or abbreviation (e.g. McLaren, or 'McLaren 25' if a division match is ambiguous)",
+      required: true,
+    },
+    {
+      type: 3,
+      name: "season",
+      description: "Season (e.g. 2026)",
+      required: true,
+    },
+    {
+      type: 3,
+      name: "tier",
+      description: "Contract/pricing tier (e.g. T1, T2, D1, Reserve) — league-specific",
+      required: false,
+    },
+    {
+      type: 4,
+      name: "seasons",
+      description: "Deal length in seasons (default 1)",
+      required: false,
+      min_value: 1,
+      max_value: 10,
+    },
+    {
+      type: 10,
+      name: "signing_bonus",
+      description: "Signing bonus, paid once and debited from the wallet (default 0)",
+      required: false,
+      min_value: 0,
+    },
+    {
+      type: 3,
+      name: "bonus_schedule",
+      description: 'Keyed bonuses as JSON, e.g. [{"key":"race_win","amount":30000}]',
+      required: false,
+    },
+    {
+      type: 3,
+      name: "bonus_template",
+      description: "Saved bonus template name, instead of bonus_schedule",
+      required: false,
+    },
+  ],
+};
+
 // Option types: 1 = SUB_COMMAND, 5 = BOOLEAN, 7 = CHANNEL
 const GAMERTAGS_COMMAND = {
   name: "gamertags",
@@ -925,6 +989,7 @@ async function register(): Promise<NextResponse> {
     SETUP_COMMAND,
     SIGNUPS_COMMAND,
     SIGNUP_COMMAND,
+    SIGN_DRIVER_COMMAND,
     TIMETRIAL_COMMAND,
     STEWARD_COMMAND,
     APPEAL_COMMAND,
