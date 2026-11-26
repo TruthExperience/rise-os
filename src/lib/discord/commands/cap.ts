@@ -148,7 +148,13 @@ async function buildCapSummary(
     .select("amount")
     .eq("league_id", leagueId)
     .eq("franchise_id", franchiseId)
-    .not("transaction_type", "in", '("season_start_grant","contract_signing")');
+    .not("transaction_type", "in", '("season_start_grant","contract_signing")')
+    // A config_reset row restates the opening balance: the wallet was moved to
+    // a new starting_wallet when the cap model changed, so the same money is
+    // counted twice against the new figure. Counting it as spend made every
+    // team read as -70M remaining (40M wallet, -110M reset row) with a balance
+    // drift warning, in every league, before any contract existed.
+    .or("related_type.is.null,related_type.neq.config_reset");
 
   // Positive amounts (bonuses) reduce spend; negative amounts (penalties) increase it.
   const netAdjustment = (ledgerAdjustments ?? []).reduce(
