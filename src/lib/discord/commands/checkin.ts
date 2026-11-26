@@ -752,7 +752,7 @@ registerCommand("checkin-create", async (ctx) => {
 
   const [teams, allTeams] = await Promise.all([
     fetchTeamLabels(leagueId, groupedDiscordIds(groupedResult.grouped)),
-    fetchLeagueTeamNames(leagueId),
+    fetchLeagueTeamNames(leagueId, division.division_code),
   ]);
 
   const embed = buildCheckinEmbed({
@@ -762,6 +762,7 @@ registerCommand("checkin-create", async (ctx) => {
     grouped: groupedResult.grouped,
     teams,
     allTeams,
+    leagueId,
   });
   const components = buildCheckinComponents(post.id, post.race_time);
 

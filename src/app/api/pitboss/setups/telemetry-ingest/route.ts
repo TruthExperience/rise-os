@@ -118,6 +118,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getAuthedDriver } from '@/lib/getSupabaseUserId';
 import { fetchParamRanges } from '@/lib/pitboss/setup-engine-data';
+import { isSetupParamSupported } from '@/lib/pitboss/setup-capabilities';
 import type { SessionType } from '@/lib/pitboss/setup-engine';
 import { getTelemetrySession } from '@/lib/telemetry';
 import { buildCoachingReport } from '@/lib/pitboss/telemetry-coach';
@@ -185,8 +186,11 @@ function resolveSessionType(rawSessionType: string, tyreCompound: string | undef
   }
 }
 
-function mapCarSetupToParamValues(carSetup: any): Record<string, number> {
-  return {
+function mapCarSetupToParamValues(
+  carSetup: any,
+  includeEngineBraking = false
+): Record<string, number> {
+  const values: Record<string, number> = {
     front_arb: carSetup.suspension.frontAntiRollBars,
     rear_arb: carSetup.suspension.rearAntiRollBars,
     front_ride_height: carSetup.suspension.frontRideHeight,
@@ -208,6 +212,21 @@ function mapCarSetupToParamValues(carSetup: any): Record<string, number> {
     front_wing_aero: carSetup.aerodynamics.frontWing,
     rear_wing_aero: carSetup.aerodynamics.rearWing,
   };
+
+  // The export groups engine braking with the transmission settings, but
+  // accept a top-level value too so older capture tools still map it. Omit
+  // the key entirely when the payload doesn't carry one.
+  const engineBraking =
+    carSetup?.transmission?.engineBraking ?? carSetup?.engineBraking;
+  if (
+    includeEngineBraking &&
+    typeof engineBraking === 'number' &&
+    Number.isFinite(engineBraking)
+  ) {
+    values.engine_braking = engineBraking;
+  }
+
+  return values;
 }
 
 function average(values: number[]): number {
@@ -481,7 +500,13 @@ export async function POST(req: NextRequest) {
 
   let setup_values: Record<string, number>;
   try {
-    setup_values = mapCarSetupToParamValues(lap.carSetup);
+    // Shared capability map: only classes whose setup screen exposes engine
+    // braking may write the captured field (the range check would reject it
+    // as unknown on the others anyway).
+    setup_values = mapCarSetupToParamValues(
+      lap.carSetup,
+      isSetupParamSupported(car_class_code, 'engine_braking')
+    );
   } catch {
     return NextResponse.json({ error: 'carSetup payload is missing expected fields' }, { status: 400 });
   }

@@ -9,6 +9,8 @@
 // so it can go straight into a Discord REST body or an interaction response.
 
 import { createAdminClient } from "@/lib/supabase/server";
+import { buildCardUrl, dayCacheBuster } from "../card-url";
+import { scopeToDivision } from "../division-label";
 
 export const CHECKIN_STATUSES = [
   "confirmed",
@@ -104,21 +106,35 @@ export async function fetchTeamLabels(
 }
 
 /**
- * Every team (franchise) in the league, A-Z, so the Confirmed list can show
+ * Every team (franchise) in one division, A-Z, so the Confirmed list can show
  * teams that have no driver checked in yet. Never throws: on failure the
  * embed just lists the teams that do have drivers.
+ *
+ * The division is not cosmetic. A league running F1 and F2 has the same shape
+ * of franchise rows for both, and passing no division used to list all 43 TRL
+ * teams on every card — an F2 check-in showed F1 teams and vice versa. When
+ * the league's franchises carry no matching division label (some leagues leave
+ * it null, and VRC names its tiers differently from them) the whole league's
+ * teams are returned, which is the old behaviour.
  */
-export async function fetchLeagueTeamNames(leagueId: string): Promise<string[]> {
+export async function fetchLeagueTeamNames(
+  leagueId: string,
+  divisionCode?: string | null
+): Promise<string[]> {
   try {
     const supabase = createAdminClient();
     const { data } = await supabase
       .schema("rise_os")
       .from("franchises")
-      .select("name")
+      .select("name, division")
       .eq("league_id", leagueId);
-    const names = ((data ?? []) as { name: string | null }[])
-      .map((f) => f.name)
-      .filter((n): n is string => !!n);
+
+    const rows = ((data ?? []) as { name: string | null; division: string | null }[]).filter(
+      (f) => !!f.name
+    );
+    const names = scopeToDivision(rows, divisionCode, (f) => f.division).map(
+      (f) => f.name as string
+    );
     return [...new Set(names)].sort((a, b) => a.localeCompare(b));
   } catch (err) {
     console.error("[checkin] league team lookup failed:", err);
@@ -274,8 +290,13 @@ function mentionList(ids: string[], teams?: TeamLabels, allTeams?: string[]): st
   const noTeam: string[] = [];
   // Every team gets a line, even with nobody in it (shown as "—").
   for (const t of allTeams ?? []) byTeam.set(t, []);
+  const scoped = (allTeams?.length ?? 0) > 0;
   for (const id of ids) {
-    const team = teams?.[id];
+    // A roster row for another division (an F1 roster entry on an F2 card)
+    // would print a team that isn't in this division's list — and isn't on the
+    // logo strip — so it is treated as no team.
+    const listed = teams?.[id];
+    const team = listed && (!scoped || allTeams!.includes(listed)) ? listed : undefined;
     if (!team) {
       noTeam.push(id);
       continue;
@@ -316,10 +337,12 @@ export function buildCheckinEmbed(args: {
   grouped: GroupedCheckins;
   /** Optional team names (see fetchTeamLabels). */
   teams?: TeamLabels;
-  /** Every team in the league (see fetchLeagueTeamNames); all shown under Confirmed. */
+  /** Every team in the division (see fetchLeagueTeamNames); all shown under Confirmed. */
   allTeams?: string[];
+  /** Needed to sign the team-logo strip URL; without it the card is text-only. */
+  leagueId?: string;
 }): Record<string, unknown> {
-  const { round, divisionCode, post, grouped, teams, allTeams } = args;
+  const { round, divisionCode, post, grouped, teams, allTeams, leagueId } = args;
   const showTeams =
     (!!teams && Object.keys(teams).length > 0) || (!!allTeams && allTeams.length > 0);
 
@@ -382,6 +405,25 @@ export function buildCheckinEmbed(args: {
 
   if (flag.code) {
     embed.thumbnail = { url: `https://flagcdn.com/w160/${flag.code}.png` };
+  }
+
+  // Team logos for this division. Discord gives an embed one image and no
+  // per-field icons, so a logo beside every team line can't be done inline;
+  // the card route renders the strip and the embed points at it. buildCardUrl
+  // returns null when the app URL or signing key isn't configured, and the
+  // card then looks exactly as it did before.
+  // A check-in card is re-rendered on every button click, so it uses the
+  // day-grained buster rather than a fresh timestamp: one URL and one image
+  // fetch while nobody touches the division, still refreshed daily.
+  const teamsImageUrl =
+    leagueId && divisionCode
+      ? buildCardUrl(
+          { kind: "checkin", league_id: leagueId, division: divisionCode },
+          dayCacheBuster()
+        )
+      : null;
+  if (teamsImageUrl && allTeams?.length) {
+    embed.image = { url: teamsImageUrl };
   }
 
   return embed;

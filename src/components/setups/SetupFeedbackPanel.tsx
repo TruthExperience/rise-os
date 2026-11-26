@@ -2,6 +2,7 @@
 'use client';
 
 import { useState } from 'react';
+import { setupParamLabel } from '@/lib/pitboss/setup-labels';
 
 interface SetupAdjustment {
   param_key:  string;
@@ -161,7 +162,7 @@ function SetupFeedbackResult({
               const after  = before + adj.delta;
               return (
                 <tr key={adj.param_key} className="border-t border-gray-800">
-                  <td className="px-3 py-2.5 text-gray-300 font-mono text-xs">{adj.param_key}</td>
+                  <td className="px-3 py-2.5 text-gray-300 text-xs">{setupParamLabel(adj.param_key)}</td>
                   <td className="px-3 py-2.5 text-right text-gray-500 font-mono text-xs">{before}</td>
                   <td className="px-3 py-2.5 text-right font-mono text-xs">
                     <span className={after > before ? 'text-green-400' : after < before ? 'text-[#E8284A]' : 'text-gray-500'}>

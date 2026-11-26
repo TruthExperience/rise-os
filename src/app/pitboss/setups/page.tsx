@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 import { SetupFeedbackPanel } from '@/components/setups/SetupFeedbackPanel'
 import { SubmitSetupForm } from '@/components/setups/SubmitSetupForm'
+import { setupParamLabel } from '@/lib/pitboss/setup-labels'
 
 interface CarClass {
   id: string
@@ -82,6 +83,103 @@ interface SavedSetup extends Recommendation {
 const CONDITIONS = ['dry', 'wet', 'mixed'] as const
 const SESSION_TYPES = ['race', 'qualifying', 'sprint', 'time_trial', 'practice'] as const
 const DRIVER_MODES = ['league', 'career'] as const
+
+// The game's setup screen shows the parameters in this order. The key order
+// here is also the section order; groups not listed here (e.g. fuel) keep
+// their natural order after these sections. Classes without a parameter skip
+// that row; engine braking only appears for the classes whose setup screen
+// has it (F1 24, F1 26, and the F1 24 World car).
+const SETUP_PARAM_ORDER: Record<string, readonly string[]> = {
+  aerodynamics: ['front_wing_aero', 'rear_wing_aero'],
+  transmission: [
+    'diff_adjustment_on_throttle',
+    'diff_adjustment_off_throttle',
+    'engine_braking',
+  ],
+  suspension_geometry: [
+    'front_camber',
+    'rear_camber',
+    'front_toe_out',
+    'rear_toe_in',
+  ],
+  suspension: [
+    'front_suspension',
+    'rear_suspension',
+    'front_arb',
+    'rear_arb',
+    'front_ride_height',
+    'rear_ride_height',
+  ],
+  brakes: ['front_brake_bias', 'brake_pressure'],
+  tyres: [
+    'front_right_tyre_pressure',
+    'front_left_tyre_pressure',
+    'rear_right_tyre_pressure',
+    'rear_left_tyre_pressure',
+  ],
+}
+
+const SETUP_SECTION_ORDER = Object.keys(SETUP_PARAM_ORDER)
+
+interface SetupSection {
+  group: string
+  label: string
+  entries: [string, number][]
+}
+
+/**
+ * Splits a generated setup into the game's setup-screen sections. param_group
+ * comes from pitboss.setup_parameter_ranges (the same rows the setup engine
+ * built the recommendation from), so groups never drift from the DB. If the
+ * group lookup is unavailable, everything falls back to one unlabelled list.
+ *
+ * Params the selected class doesn't have are dropped rather than listed as
+ * "Other" — a setup saved before a param was removed for that class (e.g.
+ * ballast on F2 2024 cars in F1 25) must not keep showing it.
+ */
+function orderSectionEntries(
+  group: string,
+  entries: [string, number][]
+): [string, number][] {
+  const order = SETUP_PARAM_ORDER[group]
+  if (!order) return entries
+
+  const rank = new Map(order.map((key, index) => [key, index]))
+  return [...entries].sort((a, b) => {
+    const aRank = rank.get(a[0]) ?? order.length
+    const bRank = rank.get(b[0]) ?? order.length
+    return aRank - bRank
+  })
+}
+
+function groupSetup(
+  entries: [string, number][],
+  groups: Record<string, string>
+): SetupSection[] {
+  if (Object.keys(groups).length === 0) {
+    return [{ group: 'all', label: '', entries }]
+  }
+
+  const buckets = new Map<string, [string, number][]>()
+  for (const entry of entries) {
+    if (groups[entry[0]] === undefined) continue
+    const group = groups[entry[0]]
+    const bucket = buckets.get(group) ?? []
+    bucket.push(entry)
+    buckets.set(group, bucket)
+  }
+
+  const ordered = [
+    ...SETUP_SECTION_ORDER.filter((g) => buckets.has(g)),
+    ...[...buckets.keys()].filter((g) => !SETUP_SECTION_ORDER.includes(g)),
+  ]
+
+  return ordered.map((group) => ({
+    group,
+    label: group.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+    entries: orderSectionEntries(group, buckets.get(group)!),
+  }))
+}
 
 const CAREER_STAT_KEYS = ['pace', 'racecraft', 'awareness', 'experience', 'focus'] as const
 type CareerStatKey = typeof CAREER_STAT_KEYS[number]
@@ -255,6 +353,10 @@ export default function SetupsPage() {
   const [statHistory, setStatHistory]       = useState<StatSnapshot[]>([])
 
 
+  // param_key -> param_group for the selected car class/session, used to
+  // present the generated setup in the game's setup-screen sections.
+  const [paramGroups, setParamGroups] = useState<Record<string, string>>({})
+
   const [generating, setGenerating]   = useState(false)
   const [error, setError]             = useState('')
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null)
@@ -292,6 +394,22 @@ export default function SetupsPage() {
       .catch(() => setTeams([]))
       .finally(() => setLoadingTeams(false))
   }, [carClassId])
+
+  // Load the param groupings used to section the generated setup. Best-effort:
+  // on failure the setup still renders as one flat list.
+  useEffect(() => {
+    setParamGroups({})
+    if (!carClassId || !sessionType) return
+
+    fetch(`/api/pitboss/setups/params?car_class_id=${carClassId}&session_type=${sessionType}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.error) throw new Error(data.error)
+        const params: { param_key: string; param_group: string }[] = data.params ?? []
+        setParamGroups(Object.fromEntries(params.map((p) => [p.param_key, p.param_group])))
+      })
+      .catch(() => setParamGroups({}))
+  }, [carClassId, sessionType])
 
   // Load career mode drivers once, when the mode is first switched to career.
   useEffect(() => {
@@ -951,27 +1069,44 @@ export default function SetupsPage() {
                 <SectionHeader title="Generated Setup" />
                 <div className="text-right">
                   <p className="text-xs text-gray-500">
-                    {recommendation.baseline_used ? 'Class default' : `${Math.round(recommendation.confidence * 100)}% confidence`}
+                    {recommendation.baseline_used
+                      ? recommendation.model.includes('track-archetype')
+                        ? 'Track-type default'
+                        : 'Class default'
+                      : `${Math.round(recommendation.confidence * 100)}% confidence`}
                   </p>
                 </div>
               </div>
 
               <div className="rounded-xl border border-gray-800 overflow-hidden">
-                <table className="w-full text-sm">
-                  <tbody>
-                    {Object.entries(recommendation.generated_setup).map(([key, value], i) => (
-                      <tr key={key} className={i > 0 ? 'border-t border-gray-800' : ''}>
-                        <td className="px-4 py-2.5 text-gray-400 font-mono text-xs">{key}</td>
-                        <td className="px-4 py-2.5 text-right text-white font-mono text-xs">
-                          {value}
-                          {recommendation.rationale[key]?.unit && (
-                            <span className="text-gray-600 ml-1">{recommendation.rationale[key].unit}</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {groupSetup(Object.entries(recommendation.generated_setup), paramGroups).map(
+                  (section) => (
+                    <div key={section.group}>
+                      {section.label && (
+                        <p className="px-4 pt-3 pb-1.5 bg-gray-900 text-gray-300 text-xs font-semibold uppercase tracking-widest">
+                          {section.label}
+                        </p>
+                      )}
+                      <table className="w-full text-sm">
+                        <tbody>
+                          {section.entries.map(([key, value]) => (
+                            <tr key={key} className="border-t border-gray-800">
+                              <td className="px-4 py-2.5 text-gray-400 text-xs">{setupParamLabel(key)}</td>
+                              <td className="px-4 py-2.5 text-right text-white font-mono text-xs">
+                                {value}
+                                {recommendation.rationale[key]?.unit && (
+                                  <span className="text-gray-600 ml-1">
+                                    {recommendation.rationale[key].unit}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )
+                )}
               </div>
             </div>
 

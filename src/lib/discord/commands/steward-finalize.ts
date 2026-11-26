@@ -113,7 +113,7 @@ registerCommand("steward_finalize_round", async (ctx) => {
     };
   }
 
-  const { error: finalizeErr } = await supabase
+  const { data: posted, error: finalizeErr } = await supabase
     .schema("pitboss")
     .rpc("finalize_round", { p_round_id: round.id, p_finalized_by: finalizer.id });
 
@@ -142,8 +142,19 @@ registerCommand("steward_finalize_round", async (ctx) => {
       ? `DDV updated for ${ddvRows} driver(s).`
       : "⚠️ Round finalized, but no DDV rows were written. Check the logs for a `ddv calc failed` warning.";
 
+  // finalize_round returns how many earnings rows post_round_earnings wrote.
+  // It deliberately never blocks the finalize, so silence here would look like
+  // a clean success even when every bonus and parts charge failed to post.
+  // A null count means the function predates the bonus migration (still void).
+  const earningsLine =
+    typeof posted === "number"
+      ? posted > 0
+        ? `Earnings posted: ${posted}.`
+        : "⚠️ Round finalized, but no earnings were posted — no contract carried a bonus schedule, or the bonus step failed. Check the logs for a `post_round_earnings failed` warning."
+      : "⚠️ Earnings: the database did not report a count. Apply the bonus migration so this can be checked.";
+
   return {
-    content: `✅ **${label}** finalized. Appeals for this round are now closed. ${ddvLine}`,
+    content: `✅ **${label}** finalized. Appeals for this round are now closed. ${ddvLine} ${earningsLine}`,
     ephemeral: true,
   };
 });

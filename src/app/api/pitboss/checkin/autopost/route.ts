@@ -87,7 +87,9 @@ export async function POST(req: NextRequest) {
   }
 
   const { league_id: leagueId, ...round } = roundRes.data as typeof roundRes.data & { league_id: string };
-  const allTeams = leagueId ? await fetchLeagueTeamNames(leagueId) : [];
+  const allTeams = leagueId
+    ? await fetchLeagueTeamNames(leagueId, divisionRes.data.division_code)
+    : [];
 
   const embed = buildCheckinEmbed({
     round,
@@ -96,6 +98,7 @@ export async function POST(req: NextRequest) {
     grouped: {},
     teams: {},
     allTeams,
+    leagueId,
   });
   const components = buildCheckinComponents(post.id, post.race_time);
 

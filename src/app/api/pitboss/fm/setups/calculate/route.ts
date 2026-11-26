@@ -3,6 +3,7 @@ import {
   nearestSetup,
   setupToBiasKeyed,
   neutralAnchorBias,
+  startingSetupForLean,
   FM_BIAS_ORDER,
   FM_SETUP_PARAM_ORDER,
   MAX_SETUP_CANDIDATES,
@@ -16,6 +17,8 @@ import {
   updateFmSetupSession,
   logFmFeedback,
   fetchFmSetupMemory,
+  fetchFmCircuitLean,
+  seedFmSetupMemory,
   upsertFmSetupMemory,
   resetFmSetupSessionFeedback,
 } from "@/lib/pitboss/fm-setup-engine-data";
@@ -176,9 +179,11 @@ export async function POST(req: NextRequest) {
 
   // Anchor the search's tie-breaking distance against: the driver's own
   // current setup if they have one this session, otherwise the best
-  // community-converged setup on record for this circuit + conditions (a
-  // warm start instead of neutral), falling back to neutral only if neither
-  // exists yet.
+  // community-converged setup on record for this circuit + conditions, and
+  // failing that the circuit's downforce-lean starting preset (seeded into
+  // the memory bank so it is shared and visible). neutralAnchorBias() is now
+  // only the last resort for a circuit whose lean lookup failed — it is the
+  // same at every track, which is exactly what the lean preset replaces.
   let anchorBias: number[];
   if (Object.keys(currentValues).length === FM_SETUP_PARAM_ORDER.length) {
     anchorBias = FM_BIAS_ORDER.map((k) => setupToBiasKeyed(currentValues, ranges)[k]);
@@ -192,9 +197,33 @@ export async function POST(req: NextRequest) {
         { status: 500 },
       );
     }
-    anchorBias = memory
-      ? FM_BIAS_ORDER.map((k) => setupToBiasKeyed(memory.setup_values, ranges)[k])
-      : neutralAnchorBias();
+
+    if (memory) {
+      anchorBias = FM_BIAS_ORDER.map((k) => setupToBiasKeyed(memory.setup_values, ranges)[k]);
+    } else {
+      // A brand-new circuit: derive its starting preset from downforce_lean
+      // (fm_circuits) rather than anchoring every track to the same neutral
+      // values, then seed that preset into the memory bank for later drivers.
+      let seed: Record<FmSetupParamKey, number> | null = null;
+      try {
+        const lean = await fetchFmCircuitLean(circuit_id);
+        seed = startingSetupForLean(ranges, lean);
+      } catch (err) {
+        console.error("[fm/setups/calculate] fm circuit lean lookup failed", err);
+      }
+
+      if (seed) {
+        anchorBias = FM_BIAS_ORDER.map((k) => setupToBiasKeyed(seed!, ranges)[k]);
+        try {
+          await seedFmSetupMemory({ circuitId: circuit_id, conditions, setupValues: seed });
+        } catch (err) {
+          // Non-fatal — the driver still gets their result this call.
+          console.error("[fm/setups/calculate] fm setup memory seed failed", err);
+        }
+      } else {
+        anchorBias = neutralAnchorBias();
+      }
+    }
   }
 
   const result = nearestSetup({ ranges, feedbackByBias: currentFeedback, anchorBias });
@@ -234,11 +263,13 @@ export async function POST(req: NextRequest) {
     }
 
     // Record this converged setup as the new memory-bank best for this
-    // circuit + conditions, if it's at least as good as whatever's already
-    // on record. No-op on the very first neutral-anchor pass before any
-    // feedback has been given, since result.best is only meaningful once
-    // the search has something to converge toward.
-    if (result.best) {
+    // circuit + conditions. Only when feedback was actually given this call:
+    // with an empty feedback history every candidate ties at 0 rule-breaks and
+    // result.best is just whichever setup sits closest to the anchor, so
+    // writing it would (a) stamp the anchor back into memory and (b) at 0
+    // rule-breaks make the row permanently un-replaceable, since
+    // upsertFmSetupMemory only overwrites strictly better entries.
+    if (result.best && loggedPoints.length > 0) {
       try {
         await upsertFmSetupMemory({
           circuitId: circuit_id,

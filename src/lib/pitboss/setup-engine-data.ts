@@ -6,6 +6,7 @@
 // / career driver stats the same way.
 
 import { createAdminClient } from "@/lib/supabase/server";
+import { getUnsupportedSetupParams } from "./setup-capabilities";
 import type {
   ParamRange,
   TrackOverride,
@@ -25,15 +26,33 @@ export async function fetchParamRanges(
   sessionType: string
 ): Promise<ParamRange[]> {
   const supabase = getSupabase();
-  const { data, error } = await supabase
-    .schema("pitboss")
-    .from("setup_parameter_ranges")
-    .select("param_key, param_group, min_value, max_value, default_value, step, unit, applicable_session_types")
-    .eq("car_class_id", carClassId);
+  const [rangesResult, carClassResult] = await Promise.all([
+    supabase
+      .schema("pitboss")
+      .from("setup_parameter_ranges")
+      .select("param_key, param_group, min_value, max_value, default_value, step, unit, applicable_session_types")
+      .eq("car_class_id", carClassId),
+    // Best-effort: if this lookup fails we keep every range row rather than
+    // failing the whole request over a class-level exclusion.
+    supabase
+      .schema("pitboss")
+      .from("car_classes")
+      .select("code")
+      .eq("id", carClassId)
+      .maybeSingle(),
+  ]);
 
+  const { data, error } = rangesResult;
   if (error) throw new Error(`Failed to load param ranges: ${error.message}`);
 
+  // Capability rules live in setup-capabilities.ts so this filter and the
+  // telemetry ingest route stay in lockstep.
+  const unsupported = new Set(
+    getUnsupportedSetupParams(carClassResult.data?.code)
+  );
+
   return (data ?? [])
+    .filter((r) => !unsupported.has(r.param_key))
     .filter((r) => !r.applicable_session_types || r.applicable_session_types.includes(sessionType))
     .map((r) => ({
       param_key: r.param_key,
@@ -74,6 +93,25 @@ export async function fetchOverrides(
     weight: o.weight == null ? null : Number(o.weight),
     basis: o.basis,
   }));
+}
+
+/**
+ * The circuit's archetype tag (street_circuit, high_downforce_technical, ...).
+ * Used as the fallback starter when a track has no community submissions: see
+ * applyTrackArchetypeBias in setup-engine.ts. Null for a track that has no tag
+ * yet, which the caller treats as "no archetype bias".
+ */
+export async function fetchTrackArchetype(trackId: string): Promise<string | null> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("tracks")
+    .select("archetype")
+    .eq("id", trackId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to load track archetype: ${error.message}`);
+  return data?.archetype ?? null;
 }
 
 export async function fetchSubmissions(params: {
