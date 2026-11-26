@@ -912,6 +912,13 @@ const SIGN_DRIVER_COMMAND = {
       required: false,
     },
     {
+      type: 10,
+      name: "value",
+      description: "Contract value per season; defaults to this driver's DDV floor",
+      required: false,
+      min_value: 1,
+    },
+    {
       type: 4,
       name: "seasons",
       description: "Deal length in seasons (default 1)",
