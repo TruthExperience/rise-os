@@ -1,6 +1,10 @@
 // cap.ts
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
+import {
+  contractCoversSeason,
+  contractSeasonBase,
+} from "@/lib/pitboss/financial-engine";
 
 type FranchiseMatch = {
   id: string;
@@ -94,15 +98,18 @@ type CapSummary = {
   balanceDrift: boolean;
 };
 
-// Cap usage is computed from active driver_contracts.contract_value
-// PLUS any non-signing wallet ledger adjustments (race bonuses, DNF/attendance
-// penalties, etc. from league_event_economy_rules). Contract signings and the
-// season start grant are already reflected in contract_value/startingWallet,
-// so they're excluded here to avoid double-counting. We still don't trust
-// franchise_wallets.balance as the primary source (see steward chat note on
-// signing-flow writes being unreliable) — instead we recompute independently
-// and use balanceDrift to flag genuine anomalies (manual edits, bad writes),
-// which no longer fires on every team that's simply played a race.
+// Cap usage is computed from each active contract's BASE FOR THIS SEASON
+// (pitboss.contract_season_base, mirrored by contractSeasonBase) PLUS any
+// non-signing wallet ledger adjustments (race bonuses, DNF/attendance
+// penalties, etc. from league_event_economy_rules). Charging the whole
+// multi-year contract_value here would count a three-year deal three times.
+// Contract signings and the season start grant are already reflected in the
+// base/startingWallet, so they're excluded here to avoid double-counting. We
+// still don't trust franchise_wallets.balance as the primary source (see
+// steward chat note on signing-flow writes being unreliable) — instead we
+// recompute independently and use balanceDrift to flag genuine anomalies
+// (manual edits, bad writes), which no longer fires on every team that's
+// simply played a race.
 async function buildCapSummary(
   supabase: ReturnType<typeof createAdminClient>,
   leagueId: string,
@@ -112,15 +119,28 @@ async function buildCapSummary(
   const { data: contracts } = await supabase
     .schema("pitboss")
     .from("driver_contracts")
-    .select("contract_value")
+    .select("contract_value, base_salary_per_season, season_start, season_end")
     .eq("league_id", leagueId)
     .eq("franchise_id", franchiseId)
     .eq("status", "active");
 
-  const contractSpend = (contracts ?? []).reduce(
-    (sum, c) => sum + (Number(c.contract_value) || 0),
-    0
-  );
+  const { data: wallet } = await supabase
+    .schema("pitboss")
+    .from("franchise_wallets")
+    .select("starting_wallet, balance, seasons_over_soft_cap, cap_freeze_active, season")
+    .eq("league_id", leagueId)
+    .eq("franchise_id", franchiseId)
+    .maybeSingle();
+
+  // The wallet is for one season; charge every contract its base for that
+  // season. Without a wallet season, fall back to each contract's own first
+  // season so the number still means "one season of salary".
+  const walletSeason = wallet?.season != null ? String(wallet.season) : null;
+  const contractSpend = (contracts ?? []).reduce((sum, c) => {
+    const season = walletSeason ?? (c.season_start != null ? String(c.season_start) : "");
+    if (!season || !contractCoversSeason(c, season)) return sum;
+    return sum + contractSeasonBase(c, season);
+  }, 0);
 
   const { data: ledgerAdjustments } = await supabase
     .schema("pitboss")
@@ -136,14 +156,6 @@ async function buildCapSummary(
     0
   );
   const computedSpend = contractSpend - netAdjustment;
-
-  const { data: wallet } = await supabase
-    .schema("pitboss")
-    .from("franchise_wallets")
-    .select("starting_wallet, balance, seasons_over_soft_cap, cap_freeze_active")
-    .eq("league_id", leagueId)
-    .eq("franchise_id", franchiseId)
-    .maybeSingle();
 
   const startingWallet = wallet ? Number(wallet.starting_wallet) : null;
   const storedBalance = wallet ? Number(wallet.balance) : null;
