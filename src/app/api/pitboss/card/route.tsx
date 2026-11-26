@@ -10,6 +10,7 @@ import { verifyCard, type CardKind } from "@/lib/discord/card-url";
 import { loadDriverLabels, labelFull } from "@/lib/discord/driver-labels";
 import { computeExtraStats } from "@/lib/pitboss/driver-stats";
 import { standingsThrough } from "@/lib/pitboss/standings-through";
+import { scopeToDivision } from "@/lib/discord/division-label";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,33 +67,16 @@ const statCell = (row: any, key: string) => {
   return String(v);
 };
 
-// Team logos on media.formula1.com and Cloudinary are .webp, which satori
-// cannot decode, and logoData below refuses them. Both CDNs serve a PNG
-// variant when the path extension is swapped (verified against live URLs for
-// an F1 and an F2 team), so ask for that instead of dropping the logo.
-async function teamLogoData(url?: string | null): Promise<string | null> {
+// satori cannot decode webp, and every team logo on media.formula1.com and
+// Cloudinary is one. Both hosts serve a PNG variant when the path extension is
+// swapped (checked against live F1 and F2 URLs), so ask for that. A webp URL
+// used to be dropped outright by the check below, so this only ever adds logos
+// — nothing that rendered before renders differently.
+async function logoData(url?: string | null): Promise<string | null> {
   if (!url || !/^https?:\/\//.test(url)) return null;
   const src = url.replace(/\.webp(\?.*)?$/i, ".png$1");
   try {
     const res = await fetch(src, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return null;
-    const type = (res.headers.get("content-type") ?? "").split(";")[0];
-    if (!/^image\/(png|jpe?g|gif|webp)$/.test(type)) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > 1_500_000) return null;
-    return `data:${type};base64,${buf.toString("base64")}`;
-  } catch {
-    return null;
-  }
-}
-
-// "F2_24" -> "f2 24", so a division label matches however it was typed.
-const normDivision = (v: string) => v.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
-
-async function logoData(url?: string | null): Promise<string | null> {
-  if (!url || !/^https?:\/\//.test(url)) return null;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return null;
     const type = (res.headers.get("content-type") ?? "").split(";")[0];
     if (!/^image\/(png|jpe?g|gif)$/.test(type)) return null;
@@ -125,7 +109,7 @@ export async function GET(req: NextRequest) {
   if (kind !== "checkin" && !season) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
-  const params = { kind, league_id: leagueId, season: season ?? "", round: roundRaw, division };
+  const params = { kind, league_id: leagueId, season, round: roundRaw, division };
   if (!verifyCard(params, sp.get("sig"))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -148,10 +132,12 @@ export async function GET(req: NextRequest) {
       .eq("league_id", leagueId)
       .order("name");
 
-    const wanted = normDivision(division ?? "");
-    const all = (teamRows ?? []) as { name: string; abbreviation: string | null; logo_url: string | null; division: string | null }[];
-    const scoped = all.filter((t) => normDivision(t.division ?? "") === wanted);
-    const teams = (scoped.length > 0 ? scoped : all).filter((t) => !!(t.name ?? "").trim());
+    type TeamRow = { name: string; abbreviation: string | null; logo_url: string | null; division: string | null };
+    const teams = scopeToDivision(
+      (teamRows ?? []) as TeamRow[],
+      division,
+      (t) => t.division
+    ).filter((t) => !!(t.name ?? "").trim());
 
     const COLS = 4;
     const CELL_W = 236;
@@ -161,7 +147,7 @@ export async function GET(req: NextRequest) {
     const rows = Math.max(1, Math.ceil(teams.length / COLS));
     const width = COLS * CELL_W + PAD * 2;
     const height = HEAD + rows * CELL_H + PAD;
-    const logos = await Promise.all(teams.map((t) => teamLogoData(t.logo_url)));
+    const logos = await Promise.all(teams.map((t) => logoData(t.logo_url)));
     const label = (t: { name: string; abbreviation: string | null }) => {
       const raw = (t.abbreviation || t.name || "").trim();
       return raw.length > 22 ? `${raw.slice(0, 21)}…` : raw;

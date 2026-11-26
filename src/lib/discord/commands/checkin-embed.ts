@@ -9,7 +9,8 @@
 // so it can go straight into a Discord REST body or an interaction response.
 
 import { createAdminClient } from "@/lib/supabase/server";
-import { buildCardUrl } from "../card-url";
+import { buildCardUrl, dayCacheBuster } from "../card-url";
+import { scopeToDivision } from "../division-label";
 
 export const CHECKIN_STATUSES = [
   "confirmed",
@@ -131,14 +132,9 @@ export async function fetchLeagueTeamNames(
     const rows = ((data ?? []) as { name: string | null; division: string | null }[]).filter(
       (f) => !!f.name
     );
-    const wanted = (divisionCode ?? "").toLowerCase().replace(/[_\s-]+/g, "").trim();
-    const scoped = wanted
-      ? rows.filter(
-          (f) => (f.division ?? "").toLowerCase().replace(/[_\s-]+/g, "").trim() === wanted
-        )
-      : [];
-
-    const names = (scoped.length > 0 ? scoped : rows).map((f) => f.name as string);
+    const names = scopeToDivision(rows, divisionCode, (f) => f.division).map(
+      (f) => f.name as string
+    );
     return [...new Set(names)].sort((a, b) => a.localeCompare(b));
   } catch (err) {
     console.error("[checkin] league team lookup failed:", err);
@@ -294,8 +290,13 @@ function mentionList(ids: string[], teams?: TeamLabels, allTeams?: string[]): st
   const noTeam: string[] = [];
   // Every team gets a line, even with nobody in it (shown as "—").
   for (const t of allTeams ?? []) byTeam.set(t, []);
+  const scoped = (allTeams?.length ?? 0) > 0;
   for (const id of ids) {
-    const team = teams?.[id];
+    // A roster row for another division (an F1 roster entry on an F2 card)
+    // would print a team that isn't in this division's list — and isn't on the
+    // logo strip — so it is treated as no team.
+    const listed = teams?.[id];
+    const team = listed && (!scoped || allTeams!.includes(listed)) ? listed : undefined;
     if (!team) {
       noTeam.push(id);
       continue;
@@ -411,16 +412,17 @@ export function buildCheckinEmbed(args: {
   // the card route renders the strip and the embed points at it. buildCardUrl
   // returns null when the app URL or signing key isn't configured, and the
   // card then looks exactly as it did before.
+  // A check-in card is re-rendered on every button click, so it uses the
+  // day-grained buster rather than a fresh timestamp: one URL and one image
+  // fetch while nobody touches the division, still refreshed daily.
   const teamsImageUrl =
     leagueId && divisionCode
-      ? buildCardUrl({
-          kind: "checkin",
-          league_id: leagueId,
-          season: "",
-          division: divisionCode,
-        })
+      ? buildCardUrl(
+          { kind: "checkin", league_id: leagueId, division: divisionCode },
+          dayCacheBuster()
+        )
       : null;
-  if (teamsImageUrl && (allTeams?.length ?? 0) > 0) {
+  if (teamsImageUrl && allTeams?.length) {
     embed.image = { url: teamsImageUrl };
   }
 
