@@ -367,7 +367,7 @@ async function handleCheckinButton(interaction: any, customId: string) {
 
   const [teams, allTeams] = await Promise.all([
     fetchTeamLabels(league.id, groupedDiscordIds(grouped)),
-    fetchLeagueTeamNames(league.id),
+    fetchLeagueTeamNames(league.id, division.division_code),
   ]);
 
   const embed = buildCheckinEmbed({
@@ -377,6 +377,7 @@ async function handleCheckinButton(interaction: any, customId: string) {
     grouped,
     teams,
     allTeams,
+    leagueId: league.id,
   });
   const components = buildCheckinComponents(post.id, post.race_time);
 

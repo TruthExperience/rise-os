@@ -7,12 +7,26 @@
 // every edit without invalidating it.
 import { createHmac, timingSafeEqual } from "crypto";
 
-export type CardKind = "race" | "sprint" | "quali" | "drivers" | "teams" | "stats" | "stats2";
+export type CardKind =
+  | "race"
+  | "sprint"
+  | "quali"
+  | "drivers"
+  | "teams"
+  | "stats"
+  | "stats2"
+  | "checkin";
 export interface CardParams {
   kind: CardKind;
   league_id: string;
   season: string;
   round?: number | string | null;
+  /**
+   * Division label for kind "checkin" (e.g. F2_24): the team logo strip is
+   * per division, not per season. Appended to the signed payload only when
+   * set, so every card URL signed before this existed still verifies.
+   */
+  division?: string | null;
 }
 
 function secret(): string {
@@ -20,7 +34,10 @@ function secret(): string {
 }
 
 function payload(p: CardParams): string {
-  return [p.kind, p.league_id, p.season, p.round ?? ""].join("|");
+  const base = [p.kind, p.league_id, p.season, p.round ?? ""].join("|");
+  // Appended, never inserted: cards without a division keep the exact payload
+  // they were signed with.
+  return p.division ? `${base}|${p.division}` : base;
 }
 
 export function signCard(p: CardParams): string {
@@ -49,6 +66,7 @@ export function buildCardUrl(p: CardParams): string | null {
     league_id: p.league_id,
     season: p.season,
     ...(p.round != null && p.round !== "" ? { round: String(p.round) } : {}),
+    ...(p.division ? { division: p.division } : {}),
     sig: signCard(p),
     v: String(Date.now()),
   });

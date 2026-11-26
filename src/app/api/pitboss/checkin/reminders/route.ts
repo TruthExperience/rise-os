@@ -184,7 +184,7 @@ async function refreshEmbed(token: string, payload: ReminderPayload) {
     const [teams, allTeams] = leagueId
       ? await Promise.all([
           fetchTeamLabels(leagueId, groupedDiscordIds(grouped)),
-          fetchLeagueTeamNames(leagueId),
+          fetchLeagueTeamNames(leagueId, divisionRes.data.division_code),
         ])
       : [{}, [] as string[]];
 
@@ -195,6 +195,7 @@ async function refreshEmbed(token: string, payload: ReminderPayload) {
       grouped,
       teams,
       allTeams,
+      leagueId,
     });
 
     const patchRes = await fetch(
