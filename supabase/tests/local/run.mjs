@@ -1,4 +1,4 @@
-// Runs the two migrations and the assertions against a throwaway PGlite
+// Runs the migrations and the assertions against a throwaway PGlite
 // database (real PostgreSQL compiled to WASM). Nothing here touches Supabase.
 //
 //   supabase/tests/local/run.sh          # installs PGlite in a temp dir, runs this
@@ -24,6 +24,7 @@ const files = [
   'supabase/tests/local/schema_min.sql',
   'supabase/migrations/20261125_01_bonus_ceiling_and_divisions.sql',
   'supabase/migrations/20261125_02_contract_schedule_rewrites.sql',
+  'supabase/migrations/20261126_01_trl_opening_balances.sql',
   'supabase/tests/local/assertions.sql',
 ];
 
