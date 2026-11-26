@@ -383,6 +383,11 @@ const STEWARD_COMMAND = {
     },
     {
       type: 1,
+      name: "open",
+      description: "Reopen a closed incident ticket (run inside the ticket)",
+    },
+    {
+      type: 1,
       name: "close",
       description: "Close this incident ticket and save a transcript (run inside the ticket)",
     },
@@ -877,6 +882,107 @@ const REGRESSION_COMMAND = {
   ],
 };
 
+// /cap. Subcommands in src/lib/discord/commands/cap.ts. Every option each
+// handler reads is listed here: view falls back to your own franchise, edit
+// needs a franchise and an amount (it refuses without them), league takes
+// none, board filters by division and season.
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 10 = NUMBER
+const CAP_COMMAND = {
+  name: "cap",
+  description: "Salary cap: a franchise's position, the league board, or an owner adjustment",
+  options: [
+    {
+      type: 1,
+      name: "view",
+      description: "Show a franchise's cap position (default: your own)",
+      options: [
+        { type: 3, name: "franchise", description: "Franchise name or abbreviation", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "edit",
+      description: "Set a franchise's cap amount (owners)",
+      options: [
+        { type: 3, name: "franchise", description: "Franchise name or abbreviation", required: true },
+        { type: 10, name: "amount", description: "New cap amount", required: true, min_value: 0 },
+      ],
+    },
+    {
+      type: 1,
+      name: "league",
+      description: "League-wide cap summary by division",
+    },
+    {
+      type: 1,
+      name: "board",
+      description: "Cap board for a division and season",
+      options: [
+        { type: 3, name: "division", description: "Division label, e.g. F1 or T1", required: false },
+        { type: 3, name: "season", description: "Season, e.g. 26", required: false },
+      ],
+    },
+  ],
+};
+
+// /roster. Subcommands in src/lib/discord/commands/roster.ts. assign reads
+// driver, team, tier, season and principal; remove reads driver and season;
+// view reads tier. The defaults the handler applies (Tier 1, S2) are left to it.
+// Option types: 1 = SUB_COMMAND, 3 = STRING, 5 = BOOLEAN, 6 = USER
+const ROSTER_COMMAND = {
+  name: "roster",
+  description: "Team rosters: view, assign or remove a driver",
+  options: [
+    {
+      type: 1,
+      name: "view",
+      description: "Show the active roster",
+      options: [
+        { type: 3, name: "tier", description: "Only show this tier", required: false },
+      ],
+    },
+    {
+      type: 1,
+      name: "assign",
+      description: "Add a driver to a team's roster",
+      options: [
+        { type: 6, name: "driver", description: "Driver to add", required: true },
+        { type: 3, name: "team", description: "Team name", required: true },
+        { type: 3, name: "tier", description: "Roster tier (default: Tier 1)", required: false },
+        { type: 3, name: "season", description: "Season (default: S2)", required: false },
+        {
+          type: 5,
+          name: "principal",
+          description: "Assign as team principal instead of a driver",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: 1,
+      name: "remove",
+      description: "Remove a driver from their roster",
+      options: [
+        { type: 6, name: "driver", description: "Driver to remove", required: true },
+        { type: 3, name: "season", description: "Season (default: S2)", required: false },
+      ],
+    },
+  ],
+};
+
+// /standings. A flat command in src/lib/discord/commands/standings.ts: it reads
+// season and limit, and resolves the league's current season itself when no
+// season is given.
+// Option types: 3 = STRING, 4 = INTEGER
+const STANDINGS_COMMAND = {
+  name: "standings",
+  description: "Driver and constructor standings for a season",
+  options: [
+    { type: 3, name: "season", description: "Season (default: the league's current one)", required: false },
+    { type: 4, name: "limit", description: "How many rows to show", required: false, min_value: 1 },
+  ],
+};
+
 // /sign-driver. Registered BY NAME, so this must list EVERY option the handler
 // reads (src/lib/discord/commands/driver.ts): a POST replaces the whole
 // command, and an option missing here simply never reaches the handler. It had
@@ -1001,6 +1107,9 @@ async function register(): Promise<NextResponse> {
     STEWARD_COMMAND,
     APPEAL_COMMAND,
     DIVISION_COMMAND,
+    CAP_COMMAND,
+    ROSTER_COMMAND,
+    STANDINGS_COMMAND,
     GAMERTAGS_COMMAND,
     PROGRESSION_COMMAND,
     REGRESSION_COMMAND,
