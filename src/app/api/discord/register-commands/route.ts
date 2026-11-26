@@ -1054,6 +1054,27 @@ const SIGN_DRIVER_COMMAND = {
   ],
 };
 
+// /release-driver. The counterpart of /sign-driver (src/lib/discord/commands/
+// driver.ts): without it a mis-signed driver could be signed but never released
+// from Discord. driver and reason are read directly; season is optional by
+// design — the release is found by driver+league+released_at, and a season is
+// only echoed back as a note, so it is not required here.
+// Option types: 3 = STRING, 6 = USER
+const RELEASE_DRIVER_COMMAND = {
+  name: "release-driver",
+  description: "Release a driver from their current franchise",
+  options: [
+    { type: 6, name: "driver", description: "Driver to release", required: true },
+    {
+      type: 3,
+      name: "season",
+      description: "Season, for the record only (not used to find the deal)",
+      required: false,
+    },
+    { type: 3, name: "reason", description: "Reason for release", required: false },
+  ],
+};
+
 // Option types: 1 = SUB_COMMAND, 5 = BOOLEAN, 7 = CHANNEL
 const GAMERTAGS_COMMAND = {
   name: "gamertags",
@@ -1103,6 +1124,7 @@ async function register(): Promise<NextResponse> {
     SIGNUPS_COMMAND,
     SIGNUP_COMMAND,
     SIGN_DRIVER_COMMAND,
+    RELEASE_DRIVER_COMMAND,
     TIMETRIAL_COMMAND,
     STEWARD_COMMAND,
     APPEAL_COMMAND,
