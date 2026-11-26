@@ -1075,6 +1075,28 @@ const RELEASE_DRIVER_COMMAND = {
   ],
 };
 
+// /dm. A flat command in src/lib/discord/commands/dm.ts — sends a direct
+// message from the bot to one user, gated to league owners (owner/co-owner/
+// commissioner flags, or Discord Administrator so an unprovisioned league owner
+// isn't locked out of their own server). message is capped below Discord's 2000
+// character ceiling so an over-long paste fails with a clear reply instead of a
+// 400 from the API.
+// Option types: 3 = STRING, 6 = USER
+const DM_COMMAND = {
+  name: "dm",
+  description: "Send a direct message from the bot to a user (owners)",
+  options: [
+    { type: 6, name: "user", description: "Who to DM", required: true },
+    {
+      type: 3,
+      name: "message",
+      description: "What to send",
+      required: true,
+      max_length: 1800,
+    },
+  ],
+};
+
 // Option types: 1 = SUB_COMMAND, 5 = BOOLEAN, 7 = CHANNEL
 const GAMERTAGS_COMMAND = {
   name: "gamertags",
@@ -1125,6 +1147,7 @@ async function register(): Promise<NextResponse> {
     SIGNUP_COMMAND,
     SIGN_DRIVER_COMMAND,
     RELEASE_DRIVER_COMMAND,
+    DM_COMMAND,
     TIMETRIAL_COMMAND,
     STEWARD_COMMAND,
     APPEAL_COMMAND,
