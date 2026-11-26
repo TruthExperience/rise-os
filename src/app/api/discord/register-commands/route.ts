@@ -9,6 +9,11 @@
 // (Do NOT replace this with a bulk PUT of the whole command list: a bulk PUT
 // deletes every command that isn't in the list.)
 //
+// The rest of what the router implements — /ban, /kick, /checkin, /results,
+// /calendar, /roles and the others — is defined in ./restored.ts and spread
+// into the list below. See the header there: those definitions were deleted
+// from this file in 19526c6 while their handlers stayed.
+//
 // Two ways to call it after deploying:
 //   1. Browser / link:
 //        https://<your-domain>/api/discord/register-commands?secret=<REGISTER_COMMANDS_SECRET>
@@ -30,6 +35,7 @@
 //                        name in that server.)
 
 import { NextRequest, NextResponse } from "next/server";
+import { RESTORED_COMMANDS } from "./restored";
 
 export const dynamic = "force-dynamic";
 // Allow time for rate-limit waits while registering several commands.
@@ -1135,6 +1141,7 @@ async function register(): Promise<NextResponse> {
     GAMERTAGS_COMMAND,
     PROGRESSION_COMMAND,
     REGRESSION_COMMAND,
+    ...RESTORED_COMMANDS,
   ]) {
     // Discord rate-limits command writes (a 429 comes back with
     // retry_after in seconds). Wait that long and try again, up to 4 times,
