@@ -163,6 +163,11 @@ $fn$;
 
 -- ---------------------------------------------------------------------------
 -- 4. Payroll: bonuses paid, not bonuses earned; parts reported separately
+--
+-- Everything charged here is one season's money: a contract is charged its
+-- base for the season being measured (contract_season_base), never its whole
+-- multi-year value. Signing bonuses are cash on signing, so they are charged
+-- once, in the season the deal started.
 -- ---------------------------------------------------------------------------
 drop function if exists pitboss.franchise_cap_payroll(uuid, uuid, text, text);
 
@@ -195,7 +200,9 @@ begin
    order by effective_date desc nulls last, created_at desc limit 1;
 
   select coalesce(sum(case when c.grace_period_sessions_remaining > 0 then 0
-                           else coalesce(c.contract_value, 0) end), 0)
+                           else pitboss.contract_season_base(
+                                  c.base_salary_per_season, c.contract_value,
+                                  c.season_start, c.season_end, p_season) end), 0)
     into v_active
     from pitboss.driver_contracts c
    where c.league_id = p_league and c.franchise_id = p_franchise and c.division = p_division

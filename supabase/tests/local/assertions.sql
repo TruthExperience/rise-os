@@ -852,3 +852,84 @@ begin
   perform tests.eq_num('wallet debited 80,000, not 240,000', v_bal, 39740000);
 end
 $t$;
+
+-- ---- 20. the salary cap charges one season's base, not the whole deal
+insert into pitboss.drivers (id, discord_id) values
+  ('bbbbbbbb-0000-0000-0000-000000000016', 'd16'),
+  ('bbbbbbbb-0000-0000-0000-000000000017', 'd17'),
+  ('bbbbbbbb-0000-0000-0000-000000000018', 'd18');
+
+insert into pitboss.driver_contracts
+  (driver_id, franchise_id, league_id, contract_class, division, season_start, season_end,
+   base_salary_per_season, signing_bonus, performance_bonuses, status, contract_value, dead_cap_pct)
+values
+  ('bbbbbbbb-0000-0000-0000-000000000016', 'aaaaaaaa-0000-0000-0000-000000000009',
+   '11111111-1111-1111-1111-111111111111', 'T1', 'F2_26', '1', '3',
+   '{"1": 2000000, "2": 2000000, "3": 2000000}'::jsonb, 0, '[]'::jsonb,
+   'active', 6000000, 0);
+
+do $t$
+declare p record;
+begin
+  select * into p from pitboss.franchise_cap_payroll(
+    '11111111-1111-1111-1111-111111111111',
+    'aaaaaaaa-0000-0000-0000-000000000009', 'F2_26', '2');
+  perform tests.eq_num('a 3x2M deal charges 2M against the cap, not 6M',
+    p.active_total, 2000000);
+  perform tests.eq_num('apron payroll uses the same per-season base',
+    p.apron_payroll, 2000000);
+end
+$t$;
+
+-- A deal with no schedule of its own still charges one season's share.
+insert into pitboss.driver_contracts
+  (driver_id, franchise_id, league_id, contract_class, division, season_start, season_end,
+   base_salary_per_season, signing_bonus, performance_bonuses, status, contract_value, dead_cap_pct)
+values
+  ('bbbbbbbb-0000-0000-0000-000000000017', 'aaaaaaaa-0000-0000-0000-000000000009',
+   '11111111-1111-1111-1111-111111111111', 'T1', 'F2_26', '1', '3',
+   null, 0, '[]'::jsonb, 'active', 9000000, 0);
+
+do $t$
+declare p record; p_done record;
+begin
+  select * into p from pitboss.franchise_cap_payroll(
+    '11111111-1111-1111-1111-111111111111',
+    'aaaaaaaa-0000-0000-0000-000000000009', 'F2_26', '2');
+  perform tests.eq_num('an unkeyed deal is charged its even share (2M + 3M)',
+    p.active_total, 5000000);
+
+  select * into p_done from pitboss.franchise_cap_payroll(
+    '11111111-1111-1111-1111-111111111111',
+    'aaaaaaaa-0000-0000-0000-000000000009', 'F2_26', '4');
+  perform tests.eq_num('a deal that has ended stops charging the cap',
+    p_done.active_total, 0);
+end
+$t$;
+
+-- create_driver_contract writes one base entry per season, so the signing
+-- path has a schedule to charge against.
+do $t$
+declare v jsonb; v_sched jsonb;
+begin
+  v := pitboss.create_driver_contract(
+    p_driver         => 'bbbbbbbb-0000-0000-0000-000000000018',
+    p_league         => '11111111-1111-1111-1111-111111111111',
+    p_franchise      => 'aaaaaaaa-0000-0000-0000-000000000009',
+    p_division       => 'F2_26',
+    p_season_start   => '3',
+    p_seasons        => 2,
+    p_value          => 1500000,
+    p_contract_class => 'T1',
+    p_signing_bonus  => 0,
+    p_dry_run        => false);
+  perform tests.eq_text('a two-season deal is created', v->>'ok', 'true');
+
+  select base_salary_per_season into v_sched
+    from pitboss.driver_contracts where id = (v->>'contract_id')::uuid;
+  perform tests.eq_int('the base schedule has a key for every season',
+    (select count(*) from jsonb_object_keys(v_sched)), 2);
+  perform tests.eq_num('the second season carries the agreed base',
+    pitboss.contract_base_for_season(v_sched, '4'), 1500000);
+end
+$t$;

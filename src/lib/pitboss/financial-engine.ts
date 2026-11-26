@@ -136,6 +136,71 @@ export async function getLeagueCapConfig(
 }
 
 // ---------------------------------------------------------------------------
+// Per-season contract base
+// ---------------------------------------------------------------------------
+
+function seasonNumber(value: unknown): number | null {
+  const match = String(value ?? '').match(/\d+/);
+  return match ? Number(match[0]) : null;
+}
+
+/**
+ * Whether a contract is on the books for a season at all. Mirrors the window
+ * pitboss.franchise_cap_payroll charges against:
+ *   season_start <= season <= coalesce(season_end, season_start)
+ * Seasons we cannot parse count as covered, matching contractSeasonBase's
+ * latitude for older rows that predate a strict season key.
+ */
+export function contractCoversSeason(
+  contract: { season_start?: unknown; season_end?: unknown },
+  season: string
+): boolean {
+  const target = seasonNumber(season);
+  const start = seasonNumber(contract.season_start);
+  const end = seasonNumber(contract.season_end) ?? start;
+  if (target === null || start === null || end === null) return true;
+  return start <= target && target <= end;
+}
+
+/**
+ * A contract's base for one season. Mirrors pitboss.contract_season_base:
+ * the contract's own schedule when the season is keyed (bare digits, or "S<n>"
+ * for older rows), otherwise an even split of the total value across the deal.
+ * Cap hits are per season, so every caller that turns a contract into payroll
+ * must go through this rather than summing contract_value.
+ */
+export function contractSeasonBase(
+  contract: {
+    base_salary_per_season?: unknown;
+    contract_value?: unknown;
+    season_start?: unknown;
+    season_end?: unknown;
+  },
+  season: string
+): number {
+  const schedule = contract.base_salary_per_season;
+  if (schedule && typeof schedule === 'object' && !Array.isArray(schedule)) {
+    const entries = schedule as Record<string, unknown>;
+    const num = seasonNumber(season);
+    const keys = [num !== null ? String(num) : null, num !== null ? `S${num}` : null, season];
+    for (const key of keys) {
+      if (!key) continue;
+      const raw = entries[key];
+      if (raw === null || raw === undefined || raw === '') continue;
+      const value = Number(raw);
+      if (Number.isFinite(value) && value !== 0) return value;
+    }
+  }
+
+  const total = Number(contract.contract_value ?? 0);
+  if (!Number.isFinite(total)) return 0;
+  const start = seasonNumber(contract.season_start);
+  const end = seasonNumber(contract.season_end) ?? start;
+  const span = start !== null && end !== null ? Math.max(end - start + 1, 1) : 1;
+  return total / span;
+}
+
+// ---------------------------------------------------------------------------
 // Cap-hit calculation
 // ---------------------------------------------------------------------------
 
@@ -155,31 +220,28 @@ export async function calculateCapHit(
 ): Promise<CapHitBreakdown> {
   const config = await getLeagueCapConfig(supabase, params.leagueId, params.division);
 
-  // Active contracts: sum of contract_value for status='active' rows.
-  // NOTE: contract_value is the full contract figure, not a separate
-  // per-season cap_hit column — there is no cap_hit column in the schema.
-  // If multi-season contracts ever need per-season cap smoothing, this
-  // will need to change; today it treats contract_value as the flat
-  // annual cap number, matching how DDV Regs Art 4.01 describes floor/
-  // ceiling (a single contract value, not season-by-season figures).
+  // Active contracts: every contract that covers THIS season is charged its
+  // base for it, from its own base_salary_per_season schedule — the same
+  // window pitboss.franchise_cap_payroll uses. The season window is numeric
+  // (season_start/season_end are text, so "9" sorts above "11"), so it is
+  // filtered here rather than in the query. A three-year deal must never
+  // consume three years of cap at once.
   const { data: activeContracts, error: activeErr } = await supabase
     .schema('pitboss')
     .from('driver_contracts')
-    .select('contract_value')
+    .select('contract_value, base_salary_per_season, season_start, season_end')
     .eq('league_id', params.leagueId)
     .eq('franchise_id', params.franchiseId)
     .eq('division', params.division)
-    .eq('season_start', params.season)
     .eq('status', 'active');
 
   if (activeErr) {
     throw new Error(`Failed to fetch active contracts: ${activeErr.message}`);
   }
 
-  const activeContractsTotal = (activeContracts ?? []).reduce(
-    (sum, c) => sum + Number(c.contract_value ?? 0),
-    0
-  );
+  const activeContractsTotal = (activeContracts ?? [])
+    .filter((c) => contractCoversSeason(c, params.season))
+    .reduce((sum, c) => sum + contractSeasonBase(c, params.season), 0);
 
   // Dead cap: for 'released' and 'bought_out' contracts, dead cap dollar
   // amount = contract_value * dead_cap_pct (the rate CRRB Fin Regs and
@@ -298,7 +360,7 @@ export async function checkHardApronCompliance(
     division: string;
     franchiseId: string;
     season: string; // matches driver_contracts.season_start
-    proposedNewCapHit: number; // the contract_value of the contract being considered
+    proposedNewCapHit: number; // the per-season base of the contract being considered
   }
 ): Promise<CapCheckResult> {
   const config = await getLeagueCapConfig(supabase, params.leagueId, params.division);

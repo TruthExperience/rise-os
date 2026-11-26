@@ -355,7 +355,12 @@ begin
 
   if p_value is not null and cfg.id is not null and array_length(v_errs, 1) is null then
     select * into v_pay from pitboss.franchise_cap_payroll(c.league_id, c.franchise_id, c.division, c.season_start);
-    v_old_hit := case when c.grace_period_sessions_remaining > 0 then 0 else c.contract_value end;
+    -- Payroll is per season, so the hit being replaced is this contract's
+    -- base for the season the payroll was measured in, not the whole deal.
+    v_old_hit := case when c.grace_period_sessions_remaining > 0 then 0
+                      else pitboss.contract_season_base(
+                             c.base_salary_per_season, c.contract_value,
+                             c.season_start, c.season_end, c.season_start) end;
     v_new_hit := case when c.grace_period_sessions_remaining > 0 then 0 else v_new_value end;
     if v_pay.apron_payroll - v_old_hit + v_new_hit > cfg.hard_apron then
       v_errs := array_append(v_errs, 'That change would push the franchise over the hard apron. Blocked.');
