@@ -64,9 +64,12 @@ async function isDivisionAdmin(discordUserId: string, leagueId: string) {
   return hasAnyFlag(membership, [...DIVISION_ADMIN_FLAGS]);
 }
 
+// Division codes may contain spaces ("T1 F1 26"), so internal runs of
+// whitespace collapse to one before the guard runs; the guard still caps a
+// code at 12 characters of letters, numbers, "-", "_" and single spaces.
 function cleanCode(raw: unknown): string | null {
-  const code = String(raw ?? "").trim().toUpperCase();
-  return /^[A-Z0-9_-]{1,12}$/.test(code) ? code : null;
+  const code = String(raw ?? "").trim().replace(/\s+/g, " ").toUpperCase();
+  return /^[A-Z0-9][A-Z0-9 _-]{0,11}$/.test(code) ? code : null;
 }
 
 function channelSlug(code: string) {
@@ -117,7 +120,7 @@ registerCommand("division_create", async (ctx) => {
   const code = cleanCode(ctx.options.code);
   if (!code) {
     return {
-      content: "Division code must be 1-12 characters: letters, numbers, `-` or `_` (e.g. D1, F2, PRO).",
+      content: "Division code must be 1-12 characters: letters, numbers, spaces, `-` or `_` (e.g. D1, T1 F1 26).",
       ephemeral: true,
     };
   }
@@ -231,6 +234,16 @@ registerCommand("division_create", async (ctx) => {
   };
 });
 
+// Creates one Discord object and returns its id, or the status Discord
+// refused with (a channel/role creation failure is reported, not thrown).
+async function createDiscordObject(
+  path: string,
+  body: Record<string, unknown>
+): Promise<{ id: string } | { error: string }> {
+  const res = await discordRequest("POST", path, body);
+  return res.ok ? { id: res.data.id as string } : { error: String(res.status) };
+}
+
 // ---------------------------------------------------------------------
 // /division sync — give every division row the Discord objects it lacks.
 //
@@ -258,9 +271,14 @@ registerCommand("division_sync", async (ctx) => {
     return { content: "Can't create Discord channels outside a server.", ephemeral: true };
   }
 
-  // Division codes may contain spaces ("T1 F1 26"), so unlike the other
-  // subcommands this one takes the code as typed instead of cleanCode.
-  const code = String(ctx.options.code ?? "").trim();
+  const rawCode = ctx.options.code;
+  const code = rawCode ? cleanCode(rawCode) : null;
+  if (rawCode && !code) {
+    return {
+      content: `"${String(rawCode)}" isn't a division code (max 12 characters: letters, numbers, spaces, \`-\` or \`_\`).`,
+      ephemeral: true,
+    };
+  }
   const supabase = createAdminClient();
 
   return {
@@ -270,7 +288,9 @@ registerCommand("division_sync", async (ctx) => {
       const base = supabase
         .schema("rise_os")
         .from("league_divisions")
-        .select(DIVISION_COLUMNS)
+        .select(
+          "id, division_code, division_name, discord_checkin_role_id, discord_category_id, discord_checkin_channel_id"
+        )
         .eq("league_id", leagueId)
         .order("tier_order", { ascending: true })
         .order("division_code", { ascending: true });
@@ -295,70 +315,76 @@ registerCommand("division_sync", async (ctx) => {
       let failed = 0;
 
       for (const d of divisions) {
-        const name: string = (d.division_name ?? "").trim() || d.division_code;
+        const name = String(d.division_name ?? "").trim() || d.division_code;
         const made: string[] = [];
+        const problems: string[] = [];
         const updates: Record<string, string> = {};
-        let failure: string | null = null;
-
-        let roleId: string | null = d.discord_checkin_role_id;
-        if (!roleId) {
-          const role = await discordRequest("POST", `/guilds/${guildId}/roles`, {
-            name,
-            mentionable: true,
-          });
-          if (!role.ok) {
-            failure = `role (${role.status}) — check the bot has Manage Roles`;
-          } else {
-            roleId = role.data.id;
-            updates.discord_checkin_role_id = role.data.id;
-            made.push(`role <@&${role.data.id}>`);
-          }
-        }
-
         let categoryId: string | null = d.discord_category_id;
-        if (!failure && !categoryId) {
-          const category = await discordRequest("POST", `/guilds/${guildId}/channels`, {
-            name,
-            type: 4,
-          });
-          if (!category.ok) {
-            failure = `category (${category.status}) — check the bot has Manage Channels`;
+
+        if (!d.discord_checkin_role_id) {
+          const role = await createDiscordObject(`/guilds/${guildId}/roles`, { name, mentionable: true });
+          if ("id" in role) {
+            updates.discord_checkin_role_id = role.id;
+            made.push(`role <@&${role.id}>`);
           } else {
-            categoryId = category.data.id;
-            updates.discord_category_id = category.data.id;
-            made.push(`category "${name}"`);
+            problems.push(`role (${role.error}) — check the bot has Manage Roles`);
           }
         }
 
-        if (!failure && !d.discord_checkin_channel_id && categoryId) {
-          const channel = await discordRequest("POST", `/guilds/${guildId}/channels`, {
+        if (!categoryId) {
+          const category = await createDiscordObject(`/guilds/${guildId}/channels`, { name, type: 4 });
+          if ("id" in category) {
+            categoryId = category.id;
+            updates.discord_category_id = category.id;
+            made.push(`category "${name}"`);
+          } else {
+            problems.push(`category (${category.error}) — check the bot has Manage Channels`);
+          }
+        }
+
+        // Without a category there is nowhere to put the channel.
+        if (!d.discord_checkin_channel_id && categoryId) {
+          const channel = await createDiscordObject(`/guilds/${guildId}/channels`, {
             name: channelSlug(d.division_code),
             type: 0,
             parent_id: categoryId,
           });
-          if (!channel.ok) {
-            failure = `check-in channel (${channel.status}) — check the bot has Manage Channels`;
+          if ("id" in channel) {
+            updates.discord_checkin_channel_id = channel.id;
+            made.push(`channel <#${channel.id}>`);
           } else {
-            updates.discord_checkin_channel_id = channel.data.id;
-            made.push(`channel <#${channel.data.id}>`);
+            problems.push(`check-in channel (${channel.error}) — check the bot has Manage Channels`);
           }
         }
 
         if (Object.keys(updates).length > 0) {
-          const { error: updateError } = await supabase
+          const { error: saveError } = await supabase
             .schema("rise_os")
             .from("league_divisions")
             .update(updates)
             .eq("id", d.id);
-          if (updateError) {
-            console.error("[division_sync] save failed:", updateError);
-            failure = `${failure ? `${failure}; ` : ""}couldn't save the ids: ${updateError.message}`;
+          if (saveError) {
+            console.error("[division_sync] save failed:", saveError);
+            problems.push(`couldn't save the ids (${saveError.message})`);
+            // Nothing points at the new objects, so remove them rather than
+            // leave orphans behind for the retry to duplicate.
+            if (updates.discord_checkin_channel_id) {
+              await discordRequest("DELETE", `/channels/${updates.discord_checkin_channel_id}`);
+            }
+            if (updates.discord_category_id) {
+              await discordRequest("DELETE", `/channels/${updates.discord_category_id}`);
+            }
+            if (updates.discord_checkin_role_id) {
+              await discordRequest("DELETE", `/guilds/${guildId}/roles/${updates.discord_checkin_role_id}`);
+            }
+            made.length = 0;
           }
         }
 
-        if (failure) {
+        if (problems.length > 0) {
           failed += 1;
-          lines.push(`**${d.division_code}** — couldn't create the ${failure}.`);
+          const createdNote = made.length > 0 ? `created ${made.join(", ")}; ` : "";
+          lines.push(`**${d.division_code}** — ${createdNote}${problems.join("; ")}.`);
         } else if (made.length > 0) {
           touched += 1;
           lines.push(`**${d.division_code}** — created ${made.join(", ")}.`);
