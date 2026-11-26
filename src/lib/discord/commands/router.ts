@@ -251,6 +251,7 @@ import "./steward";
 import "./appeal";
 // Side-effect import: registers the kick/ban/lockdown/endlockdown commands.
 import "./moderation";
+import "./dm";
 // Side-effect import: registers the sign-driver/release-driver commands.
 import "./driver";
 // Side-effect import: registers the contract_* commands.
