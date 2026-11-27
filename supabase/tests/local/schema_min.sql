@@ -44,9 +44,21 @@ create table rise_os.calendar_rounds (
   league_id uuid not null references rise_os.leagues(id),
   season_number integer not null,
   round_number integer not null,
+  type text not null default 'race',
+  name text,
+  circuit text,
+  country text,
+  flag_emoji text,
+  race_date date,
+  break_start date,
+  break_end date,
+  break_label text,
+  is_sprint boolean not null default false,
+  created_at timestamptz not null default now(),
   status text not null default 'scheduled',
   finalized_at timestamptz,
-  finalized_by uuid
+  finalized_by uuid,
+  division_id uuid references rise_os.league_divisions(id)
 );
 
 create table pitboss.league_financial_config (
