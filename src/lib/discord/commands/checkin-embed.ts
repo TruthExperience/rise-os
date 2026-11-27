@@ -11,6 +11,7 @@
 import { createAdminClient } from "@/lib/supabase/server";
 import { buildCardUrl, dayCacheBuster } from "../card-url";
 import { scopeToDivision } from "../division-label";
+import { seasonYearFor } from "../season-year";
 
 export const CHECKIN_STATUSES = [
   "confirmed",
@@ -116,13 +117,20 @@ export async function fetchTeamLabels(
  * the league's franchises carry no matching division label (some leagues leave
  * it null, and VRC names its tiers differently from them) the whole league's
  * teams are returned, which is the old behaviour.
+ *
+ * `seasonNumber` is the round's season, which is what places the year-less
+ * franchise labels ("F1") next to the divisions that spell the year out
+ * ("T1 F1 26"). Without it the league's active season is used; see
+ * season-year.ts for why the season, not the clock, supplies that year.
  */
 export async function fetchLeagueTeamNames(
   leagueId: string,
-  divisionCode?: string | null
+  divisionCode?: string | null,
+  seasonNumber?: number | string | null
 ): Promise<string[]> {
   try {
     const supabase = createAdminClient();
+    const seasonYear = await seasonYearFor(leagueId, seasonNumber);
     const { data } = await supabase
       .schema("rise_os")
       .from("franchises")
@@ -132,7 +140,7 @@ export async function fetchLeagueTeamNames(
     const rows = ((data ?? []) as { name: string | null; division: string | null }[]).filter(
       (f) => !!f.name
     );
-    const names = scopeToDivision(rows, divisionCode, (f) => f.division).map(
+    const names = scopeToDivision(rows, divisionCode, (f) => f.division, seasonYear).map(
       (f) => f.name as string
     );
     return [...new Set(names)].sort((a, b) => a.localeCompare(b));

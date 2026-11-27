@@ -281,7 +281,7 @@ async function handleCheckinButton(interaction: any, customId: string) {
   const { data: round, error: roundError } = await supabase
     .schema("rise_os")
     .from("calendar_rounds")
-    .select("name, round_number, circuit, country, flag_emoji")
+    .select("name, round_number, circuit, country, flag_emoji, season_number")
     .eq("id", post.round_id)
     .maybeSingle();
 
@@ -367,7 +367,7 @@ async function handleCheckinButton(interaction: any, customId: string) {
 
   const [teams, allTeams] = await Promise.all([
     fetchTeamLabels(league.id, groupedDiscordIds(grouped)),
-    fetchLeagueTeamNames(league.id, division.division_code),
+    fetchLeagueTeamNames(league.id, division.division_code, round.season_number),
   ]);
 
   const embed = buildCheckinEmbed({

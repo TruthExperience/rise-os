@@ -141,7 +141,7 @@ async function refreshEmbed(token: string, payload: ReminderPayload) {
       supabase
         .schema("rise_os")
         .from("calendar_rounds")
-        .select("name, round_number, circuit, country, flag_emoji")
+        .select("name, round_number, circuit, country, flag_emoji, season_number")
         .eq("id", round_id)
         .maybeSingle(),
       supabase
@@ -184,7 +184,7 @@ async function refreshEmbed(token: string, payload: ReminderPayload) {
     const [teams, allTeams] = leagueId
       ? await Promise.all([
           fetchTeamLabels(leagueId, groupedDiscordIds(grouped)),
-          fetchLeagueTeamNames(leagueId, divisionRes.data.division_code),
+          fetchLeagueTeamNames(leagueId, divisionRes.data.division_code, roundRes.data.season_number),
         ])
       : [{}, [] as string[]];
 
