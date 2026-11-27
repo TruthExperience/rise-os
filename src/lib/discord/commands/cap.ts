@@ -1,10 +1,7 @@
 // cap.ts
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
-import {
-  contractCoversSeason,
-  contractSeasonBase,
-} from "@/lib/pitboss/financial-engine";
+import { computeCapSpend } from "@/lib/pitboss/cap-spend";
 
 type FranchiseMatch = {
   id: string;
@@ -132,16 +129,6 @@ async function buildCapSummary(
     .eq("franchise_id", franchiseId)
     .maybeSingle();
 
-  // The wallet is for one season; charge every contract its base for that
-  // season. Without a wallet season, fall back to each contract's own first
-  // season so the number still means "one season of salary".
-  const walletSeason = wallet?.season != null ? String(wallet.season) : null;
-  const contractSpend = (contracts ?? []).reduce((sum, c) => {
-    const season = walletSeason ?? (c.season_start != null ? String(c.season_start) : "");
-    if (!season || !contractCoversSeason(c, season)) return sum;
-    return sum + contractSeasonBase(c, season);
-  }, 0);
-
   const { data: ledgerAdjustments } = await supabase
     .schema("pitboss")
     .from("wallet_transactions")
@@ -156,27 +143,27 @@ async function buildCapSummary(
     // drift warning, in every league, before any contract existed.
     .or("related_type.is.null,related_type.neq.config_reset");
 
-  // Positive amounts (bonuses) reduce spend; negative amounts (penalties) increase it.
-  const netAdjustment = (ledgerAdjustments ?? []).reduce(
-    (sum, t) => sum + (Number(t.amount) || 0),
-    0
-  );
-  const computedSpend = contractSpend - netAdjustment;
+  // The wallet is for one season; charge every contract its base for that
+  // season. Shared with the admin cap-status page (computeCapSpend) so the
+  // command and the page can never report different "spent" figures.
+  const spend = computeCapSpend({
+    contracts: contracts ?? [],
+    walletSeason: wallet?.season != null ? String(wallet.season) : null,
+    adjustments: ledgerAdjustments ?? [],
+    startingWallet: wallet ? Number(wallet.starting_wallet) : null,
+    storedBalance: wallet ? Number(wallet.balance) : null,
+  });
 
+  const { computedRemaining, balanceDrift } = spend;
   const startingWallet = wallet ? Number(wallet.starting_wallet) : null;
   const storedBalance = wallet ? Number(wallet.balance) : null;
-  const computedRemaining = startingWallet !== null ? startingWallet - computedSpend : null;
-  const balanceDrift =
-    storedBalance !== null &&
-    computedRemaining !== null &&
-    Math.abs(storedBalance - computedRemaining) > 0.01;
 
   return {
     franchiseId,
     franchiseName,
     startingWallet,
     storedBalance,
-    computedSpend,
+    computedSpend: spend.computedSpend,
     computedRemaining,
     driverCount: contracts?.length ?? 0,
     seasonsOverSoftCap: wallet?.seasons_over_soft_cap ?? 0,
