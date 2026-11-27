@@ -14,6 +14,11 @@
 // into the list below. See the header there: those definitions were deleted
 // from this file in 19526c6 while their handlers stayed.
 //
+// Safe to call as often as you like: it reads the commands Discord already has
+// and only rewrites the ones whose definition here differs, a few at a time,
+// inside a time budget. If any are still pending when the budget runs out, the
+// response lists them — call the same URL again to finish.
+//
 // Two ways to call it after deploying:
 //   1. Browser / link:
 //        https://<your-domain>/api/discord/register-commands?secret=<REGISTER_COMMANDS_SECRET>
@@ -40,6 +45,131 @@ import { RESTORED_COMMANDS } from "./restored";
 export const dynamic = "force-dynamic";
 // Allow time for rate-limit waits while registering several commands.
 export const maxDuration = 60;
+
+// 39 commands (17 above + RESTORED_COMMANDS) POSTed one after another, each
+// with up to five 429 waits of up to 10s, does not fit in 60 seconds — Vercel
+// killed the function and the browser got a bare 504 with nothing to show for
+// it. Three things keep it inside the budget:
+//   - read what Discord already has and only write what is missing or changed,
+//     so a repeat call is one GET and no writes;
+//   - write the remaining commands a few at a time instead of in single file;
+//   - stop starting writes at REGISTER_BUDGET_MS and answer with what is left,
+//     so a second call can finish instead of Vercel timing the request out.
+const REGISTER_CONCURRENCY = 6;
+const REGISTER_BUDGET_MS = 45_000;
+const DISCORD_TIMEOUT_MS = 10_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** fetch with a timeout, so one stalled Discord request can't eat the budget. */
+async function discordFetch(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal, cache: "no-store" });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * True when every field we would send is already what Discord has stored.
+ * Discord fills in defaults we never send (required: false, nsfw: false,
+ * description_localizations, …), so only our own keys are compared, and a null
+ * or undefined on our side means "no opinion".
+ */
+function matchesRegistered(want: unknown, have: unknown): boolean {
+  if (Array.isArray(want)) {
+    if (!Array.isArray(have) || have.length !== want.length) return false;
+    return want.every((item, i) => matchesRegistered(item, have[i]));
+  }
+  if (want !== null && typeof want === "object") {
+    if (have === null || typeof have !== "object") return false;
+    return Object.entries(want as Record<string, unknown>).every(([key, value]) =>
+      value === null || value === undefined
+        ? true
+        : matchesRegistered(value, (have as Record<string, unknown>)[key])
+    );
+  }
+  return want === have;
+}
+
+/** Commands Discord already has, by name. null when the lookup itself failed. */
+async function fetchRegisteredCommands(url: string, token: string) {
+  try {
+    const res = await discordFetch(
+      `${url}?limit=200`,
+      { method: "GET", headers: { Authorization: `Bot ${token}` } },
+      DISCORD_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      console.error("[register-commands] list failed:", res.status, await res.text());
+      return null;
+    }
+    const json: unknown = await res.json().catch(() => null);
+    if (!Array.isArray(json)) return null;
+    const byName = new Map<string, unknown>();
+    for (const command of json) {
+      if (command && typeof command.name === "string") byName.set(command.name, command);
+    }
+    return byName;
+  } catch (err) {
+    console.error("[register-commands] list threw:", err);
+    return null;
+  }
+}
+
+type RegisterOutcome =
+  | { kind: "ok"; command: string; json: any }
+  | { kind: "failed"; command: string; status: number; json: any }
+  | { kind: "pending"; command: string };
+
+/**
+ * POST one command by name. Discord rate-limits command writes (a 429 comes
+ * back with retry_after in seconds), so wait that long and try again — but give
+ * up while the caller still has budget to answer, leaving the command pending
+ * rather than letting the whole function time out.
+ */
+async function registerCommand(
+  url: string,
+  token: string,
+  command: { name: string },
+  deadline: number
+): Promise<RegisterOutcome> {
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    let json: any = {};
+    try {
+      res = await discordFetch(
+        url,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bot ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(command),
+        },
+        DISCORD_TIMEOUT_MS
+      );
+      json = await res.json().catch(() => ({}));
+    } catch (err) {
+      return { kind: "failed", command: command.name, status: 0, json: { error: String(err) } };
+    }
+
+    if (res.status !== 429) {
+      return res.ok
+        ? { kind: "ok", command: command.name, json }
+        : { kind: "failed", command: command.name, status: res.status, json };
+    }
+
+    const waitSeconds = Math.min(Number(json?.retry_after ?? 2) + 0.5, 10);
+    if (attempt >= 4 || Date.now() + waitSeconds * 1000 > deadline) {
+      return { kind: "pending", command: command.name };
+    }
+    await sleep(waitSeconds * 1000);
+  }
+}
 
 // /setup. Every option is optional: the handler (src/lib/discord/commands/
 // setup.ts) auto-detects channels/roles by name and keeps saved values.
@@ -1209,17 +1339,15 @@ async function register(): Promise<NextResponse> {
     );
   }
 
+  // Narrowed once here: the workers below are closures, and TypeScript drops
+  // the `if (!token)` narrowing inside those.
+  const botToken: string = token;
+
   const url = guildId
     ? `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`
     : `https://discord.com/api/v10/applications/${appId}/commands`;
 
-  const results: {
-    command: string;
-    commandId: string;
-    options: string[];
-  }[] = [];
-
-  for (const command of [
+  const commands = [
     SETUP_COMMAND,
     SIGNUPS_COMMAND,
     SIGNUP_COMMAND,
@@ -1238,56 +1366,96 @@ async function register(): Promise<NextResponse> {
     REGRESSION_COMMAND,
     DDV_COMMAND,
     ...RESTORED_COMMANDS,
-  ]) {
-    // Discord rate-limits command writes (a 429 comes back with
-    // retry_after in seconds). Wait that long and try again, up to 4 times,
-    // instead of failing the whole registration part-way through.
-    let res: Response;
-    let json: any = {};
-    for (let attempt = 0; ; attempt++) {
-      res = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bot ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(command),
-      });
-      json = await res.json().catch(() => ({}));
+  ];
 
-      if (res.status !== 429 || attempt >= 4) break;
+  const deadline = Date.now() + REGISTER_BUDGET_MS;
 
-      const waitSeconds = Math.min(Number(json?.retry_after ?? 2) + 0.5, 10);
-      await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+  // Only write what Discord does not already have with these exact fields.
+  // Registering is not a change to most commands, and skipping them is what
+  // makes a second call finish quickly after a timeout.
+  const registered = await fetchRegisteredCommands(url, botToken);
+  const unchanged: string[] = [];
+  const pendingCommands = commands.filter((command) => {
+    if (registered?.has(command.name) && matchesRegistered(command, registered.get(command.name))) {
+      unchanged.push(command.name);
+      return false;
     }
+    return true;
+  });
 
-    if (!res.ok) {
-      console.error("[register-commands] failed:", command.name, res.status, json);
-      return NextResponse.json(
-        {
-          error: "Registration failed",
-          command: command.name,
-          status: res.status,
-          details: json,
-          registeredSoFar: results,
-        },
-        { status: 502 }
-      );
+  const results: {
+    command: string;
+    commandId: string;
+    options: string[];
+  }[] = [];
+  const remaining = pendingCommands.map((command) => command.name);
+  // In an object, not a bare `let`: the failure is set inside the workers, and
+  // a bare local would be narrowed to null at the reads further down.
+  const state: { failure: { command: string; status: number; json: any } | null } = {
+    failure: null,
+  };
+
+  let next = 0;
+  async function worker() {
+    while (!state.failure && Date.now() <= deadline) {
+      const index = next++;
+      if (index >= pendingCommands.length) return;
+
+      const command = pendingCommands[index];
+      const outcome = await registerCommand(url, botToken, command, deadline);
+
+      if (outcome.kind === "ok") {
+        results.push({
+          command: outcome.command,
+          commandId: outcome.json.id,
+          // Subcommand names for /signups etc., option names for /setup.
+          options: (outcome.json.options ?? []).map((o: { name: string }) => o.name),
+        });
+        const left = remaining.indexOf(outcome.command);
+        if (left !== -1) remaining.splice(left, 1);
+      } else if (outcome.kind === "failed") {
+        console.error("[register-commands] failed:", outcome.command, outcome.status, outcome.json);
+        state.failure = { command: outcome.command, status: outcome.status, json: outcome.json };
+        return;
+      } else {
+        // Rate-limited past the budget: leave it in `remaining` for the next call.
+        return;
+      }
     }
-
-    results.push({
-      command: command.name,
-      commandId: json.id,
-      // Subcommand names for /signups etc., option names for /setup.
-      options: (json.options ?? []).map((o: { name: string }) => o.name),
-    });
   }
 
-  return NextResponse.json({
-    ok: true,
-    scope: guildId ? `guild ${guildId}` : "global",
-    commands: results,
-  });
+  await Promise.all(
+    Array.from({ length: Math.min(REGISTER_CONCURRENCY, pendingCommands.length) }, worker)
+  );
+
+  const order = new Map(commands.map((command, i) => [command.name, i] as const));
+  results.sort((a, b) => (order.get(a.command) ?? 0) - (order.get(b.command) ?? 0));
+
+  return NextResponse.json(
+    {
+      ok: !state.failure && remaining.length === 0,
+      scope: guildId ? `guild ${guildId}` : "global",
+      // `commands` are the ones written by this call (with their ids);
+      // `unchanged` were already registered exactly like this.
+      commands: results,
+      ...(unchanged.length ? { unchanged } : {}),
+      ...(state.failure
+        ? {
+            error: "Registration failed",
+            command: state.failure.command,
+            status: state.failure.status,
+            details: state.failure.json,
+          }
+        : {}),
+      ...(remaining.length
+        ? {
+            pending: remaining,
+            retry: "Call this URL again to register the commands still pending.",
+          }
+        : {}),
+    },
+    { status: state.failure ? 502 : 200 }
+  );
 }
 
 // curl / scripts: Authorization: Bearer <secret>
