@@ -28,6 +28,7 @@ const files = [
   'supabase/migrations/20261126_02_trl_config_resets.sql',
   'supabase/migrations/20261126_03_other_leagues_config_resets.sql',
   'supabase/migrations/20261126_04_trl_tier_divisions.sql',
+  'supabase/migrations/20261127_01_trl_season1_round_divisions.sql',
   'supabase/tests/local/assertions.sql',
 ];
 
