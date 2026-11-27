@@ -11,6 +11,7 @@ import { loadDriverLabels, labelFull } from "@/lib/discord/driver-labels";
 import { computeExtraStats } from "@/lib/pitboss/driver-stats";
 import { standingsThrough } from "@/lib/pitboss/standings-through";
 import { scopeToDivision } from "@/lib/discord/division-label";
+import { seasonYearFor } from "@/lib/discord/season-year";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -133,10 +134,16 @@ export async function GET(req: NextRequest) {
       .order("name");
 
     type TeamRow = { name: string; abbreviation: string | null; logo_url: string | null; division: string | null };
+    // The strip has no round of its own, so year-less franchise labels ("F1")
+    // are placed in the league's active season. Reading the clock here would
+    // unpick TRL's "F1" from "T1 F1 26" once the calendar turned. See
+    // season-year.ts.
+    const seasonYear = await seasonYearFor(leagueId);
     const teams = scopeToDivision(
       (teamRows ?? []) as TeamRow[],
       division,
-      (t) => t.division
+      (t) => t.division,
+      seasonYear
     ).filter((t) => !!(t.name ?? "").trim());
 
     const COLS = 4;

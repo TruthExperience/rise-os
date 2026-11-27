@@ -752,7 +752,7 @@ registerCommand("checkin-create", async (ctx) => {
 
   const [teams, allTeams] = await Promise.all([
     fetchTeamLabels(leagueId, groupedDiscordIds(groupedResult.grouped)),
-    fetchLeagueTeamNames(leagueId, division.division_code),
+    fetchLeagueTeamNames(leagueId, division.division_code, round.season_number),
   ]);
 
   const embed = buildCheckinEmbed({

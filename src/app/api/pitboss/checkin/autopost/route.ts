@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
     supabase
       .schema("rise_os")
       .from("calendar_rounds")
-      .select("name, round_number, circuit, country, flag_emoji, league_id")
+      .select("name, round_number, circuit, country, flag_emoji, league_id, season_number")
       .eq("id", post.round_id)
       .maybeSingle(),
     supabase
@@ -88,7 +88,7 @@ export async function POST(req: NextRequest) {
 
   const { league_id: leagueId, ...round } = roundRes.data as typeof roundRes.data & { league_id: string };
   const allTeams = leagueId
-    ? await fetchLeagueTeamNames(leagueId, divisionRes.data.division_code)
+    ? await fetchLeagueTeamNames(leagueId, divisionRes.data.division_code, round.season_number)
     : [];
 
   const embed = buildCheckinEmbed({
