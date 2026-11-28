@@ -57,27 +57,74 @@ function tierAliasKeys(tierKey: string): string[] {
   return keys;
 }
 
+/** Letters and digits only: "F2 25", "f2-25" and "F2_25" all become "f225". */
+function squash(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+type FranchiseRow = {
+  id: string;
+  name: string;
+  abbreviation: string | null;
+  division: string | null;
+};
+
 async function resolveFranchise(leagueId: string, input: string) {
   const supabase = createAdminClient();
+
+  const wanted = squash(input);
+  if (!wanted) {
+    return { error: "Name a franchise to sign the driver to." } as const;
+  }
+
   const { data, error } = await supabase
     .schema("rise_os")
     .from("franchises")
     .select("id, name, abbreviation, division")
-    .eq("league_id", leagueId)
-    .or(`name.ilike.%${input}%,abbreviation.ilike.%${input}%`);
+    .eq("league_id", leagueId);
 
   if (error) return { error: error.message } as const;
-  if (!data || data.length === 0) {
-    return { error: `No franchise matching "${input}" found in this league.` } as const;
+
+  const rows = (data ?? []) as FranchiseRow[];
+  const notFound = {
+    error: `No franchise matching "${input}" found in this league.`,
+  } as const;
+  if (rows.length === 0) return notFound;
+
+  // F2 grids reuse the same team names and abbreviations in every division
+  // (AIX Racing, ART Grand Prix, …), so the name alone cannot pick one and
+  // there was previously no way to sign anyone there at all. Each franchise
+  // is matched on its name, its abbreviation, and either of those followed by
+  // its division, so "AIX Racing F2_25" / "AIX F2_25" means exactly one
+  // franchise while plain "AIX Racing" still reports the ambiguity.
+  const aliasesOf = (f: FranchiseRow) => [
+    squash(f.name),
+    squash(f.abbreviation ?? ""),
+    squash(`${f.name} ${f.division ?? ""}`),
+    squash(`${f.abbreviation ?? ""} ${f.division ?? ""}`),
+  ];
+
+  const matches = rows.filter((f) => aliasesOf(f).some((alias) => alias.includes(wanted)));
+  if (matches.length === 0) return notFound;
+
+  if (matches.length > 1) {
+    // An exact "name + division" match wins outright. Otherwise refuse, and
+    // say which divisions the name exists in and how to name one of them.
+    const exact = matches.filter((f) => squash(`${f.name} ${f.division ?? ""}`) === wanted);
+    if (exact.length === 1) return { franchise: exact[0] } as const;
+
+    const names = matches
+      .map((f) => `${f.name} (${f.division ?? "no division"})`)
+      .join(", ");
+    const example = matches[0].division
+      ? `${matches[0].name} ${matches[0].division}`
+      : matches[0].name;
+    return {
+      error: `"${input}" matches more than one franchise: ${names}. Add the division to pick one, e.g. "${example}".`,
+    } as const;
   }
-  if (data.length > 1) {
-    // Common case: HRL-style leagues where the same real-world team name
-    // exists in multiple divisions ("McLaren 25" / "McLaren 26"). Force
-    // the caller to disambiguate rather than guessing which one they meant.
-    const names = data.map((f) => `${f.name} (${f.division ?? "no division"})`).join(", ");
-    return { error: `"${input}" matches more than one franchise: ${names}. Be more specific.` } as const;
-  }
-  return { franchise: data[0] } as const;
+
+  return { franchise: matches[0] } as const;
 }
 
 async function getOrCreateDriver(discordId: string, resolvedUsername: string | undefined) {
