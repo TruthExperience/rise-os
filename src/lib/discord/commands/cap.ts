@@ -2,40 +2,7 @@
 import { registerCommand } from "./registry";
 import { createAdminClient } from "@/lib/supabase/server";
 import { computeCapSpend } from "@/lib/pitboss/cap-spend";
-
-type FranchiseMatch = {
-  id: string;
-  name: string;
-  abbreviation: string | null;
-};
-
-async function resolveFranchise(
-  supabase: ReturnType<typeof createAdminClient>,
-  leagueId: string,
-  query: string
-): Promise<{ franchise?: FranchiseMatch; error?: string }> {
-  const { data, error } = await supabase
-    .schema("rise_os")
-    .from("franchises")
-    .select("id, name, abbreviation")
-    .eq("league_id", leagueId)
-    .or(`name.ilike.%${query}%,abbreviation.ilike.%${query}%`);
-
-  if (error) {
-    console.error("[cap] franchise lookup failed:", error);
-    return { error: `Couldn't look up that franchise: ${error.message}` };
-  }
-  if (!data || data.length === 0) {
-    return { error: `No franchise matching "${query}" in this league.` };
-  }
-  if (data.length > 1) {
-    const names = data.map((f) => f.name).join(", ");
-    return {
-      error: `That matches more than one franchise: ${names}. Be more specific (e.g. include the season, like "McLaren 26").`,
-    };
-  }
-  return { franchise: data[0] };
-}
+import { resolveFranchiseForLeague, type FranchiseLookup } from "../franchise-resolve";
 
 // Resolves the franchise the calling user currently drives for, used when
 // /cap view is run with no franchise argument.
@@ -43,7 +10,7 @@ async function resolveOwnFranchise(
   supabase: ReturnType<typeof createAdminClient>,
   leagueId: string,
   discordUserId: string
-): Promise<{ franchise?: FranchiseMatch; error?: string }> {
+): Promise<FranchiseLookup> {
   const { data: driver } = await supabase
     .schema("pitboss")
     .from("drivers")
@@ -71,7 +38,7 @@ async function resolveOwnFranchise(
   const { data: franchise } = await supabase
     .schema("rise_os")
     .from("franchises")
-    .select("id, name, abbreviation")
+    .select("id, name, abbreviation, division")
     .eq("id", roster.franchise_id)
     .maybeSingle();
 
@@ -203,11 +170,11 @@ registerCommand("cap_view", async (ctx) => {
   const query = ctx.options.franchise as string | undefined;
 
   const resolved = query
-    ? await resolveFranchise(supabase, leagueId, query)
+    ? await resolveFranchiseForLeague(leagueId, query)
     : await resolveOwnFranchise(supabase, leagueId, ctx.discordUserId);
 
-  if (resolved.error || !resolved.franchise) {
-    return { content: resolved.error ?? "Couldn't resolve a franchise.", ephemeral: true };
+  if ("error" in resolved) {
+    return { content: resolved.error, ephemeral: true };
   }
 
   const summary = await buildCapSummary(
@@ -271,9 +238,9 @@ registerCommand("cap_edit", async (ctx) => {
   }
 
   const supabase = createAdminClient();
-  const resolved = await resolveFranchise(supabase, leagueId, query);
-  if (resolved.error || !resolved.franchise) {
-    return { content: resolved.error ?? "Couldn't resolve a franchise.", ephemeral: true };
+  const resolved = await resolveFranchiseForLeague(leagueId, query);
+  if ("error" in resolved) {
+    return { content: resolved.error, ephemeral: true };
   }
 
   const { data: existingWallet } = await supabase
