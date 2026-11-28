@@ -3,7 +3,7 @@ import { InteractionResponseType } from "discord-interactions";
 import { waitUntil } from "@vercel/functions";
 import { createAdminClient } from "@/lib/supabase/server";
 import { resolveLeagueFromGuild } from "../league-resolver";
-import { getOrCreateDriver } from "../commands/checkin";
+import { checkDivisionMembership, getOrCreateDriver } from "../commands/checkin";
 import {
   buildCheckinEmbed,
   buildCheckinComponents,
@@ -295,6 +295,18 @@ async function handleCheckinButton(interaction: any, customId: string) {
     return ephemeralError(`Couldn't resolve your driver record: ${driverResult.error}`);
   }
   const driverId = driverResult.driver.id;
+
+  // Buttons are scoped by the post, not the clicker: a driver who can see
+  // another division's check-in must not file a response against it.
+  const memberCheck = await checkDivisionMembership(
+    driverId,
+    league.id,
+    post.division_id,
+    division.division_code
+  );
+  if (!memberCheck.ok) {
+    return ephemeralError(memberCheck.message);
+  }
 
   const { data: existing, error: existingError } = await supabase
     .schema("pitboss")

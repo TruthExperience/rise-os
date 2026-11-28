@@ -294,6 +294,63 @@ async function resolveDivisionByChannel(leagueId: string, channelId: string) {
 }
 
 /**
+ * A driver may only respond for the division they belong to. The check-in
+ * commands and buttons scope a division from the channel/message they came
+ * from, not from the caller (see resolveDivisionByChannel), so without this a
+ * driver sitting in another division's channel files a response against that
+ * division. Membership is pitboss.division_members, whose only writer is
+ * /division assign (one active division per driver per league).
+ *
+ * Returns a message rather than a bare boolean so both the slash command and
+ * the check-in buttons can hand the caller something actionable: which
+ * division they are in, or that an admin still has to assign them at all.
+ */
+export async function checkDivisionMembership(
+  driverId: string,
+  leagueId: string,
+  divisionId: string,
+  divisionCode: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .schema("pitboss")
+    .from("division_members")
+    .select("division_id")
+    .eq("driver_id", driverId)
+    .eq("league_id", leagueId)
+    .eq("active", true)
+    .order("assigned_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[checkin] division membership lookup failed:", error);
+    return { ok: false, message: `Something went wrong checking your division: ${error.message}` };
+  }
+
+  if (data?.division_id === divisionId) return { ok: true };
+
+  if (data?.division_id) {
+    const { data: other } = await supabase
+      .schema("rise_os")
+      .from("league_divisions")
+      .select("division_code")
+      .eq("id", data.division_id)
+      .maybeSingle();
+    const otherCode = other?.division_code ?? "another division";
+    return {
+      ok: false,
+      message: `You're in Division **${otherCode}** — check in there, not in Division **${divisionCode}**.`,
+    };
+  }
+
+  return {
+    ok: false,
+    message: `You're not assigned to Division **${divisionCode}** yet, so you can't check in for it. An admin needs to run \`/division assign\` first.`,
+  };
+}
+
+/**
  * Pulls every response for a round+division, grouped by status, as
  * discord_id arrays — the shape buildCheckinEmbed expects.
  */
@@ -355,6 +412,18 @@ registerCommand("checkin", async (ctx) => {
   const driverResult = await getOrCreateDriver(ctx.discordUserId, ctx.resolvedUsers[ctx.discordUserId]?.username);
   if ("error" in driverResult) {
     return { content: `Couldn't resolve your driver record: ${driverResult.error}`, ephemeral: true };
+  }
+
+  // The channel scoped the division, not the caller: refuse a response for a
+  // division this driver isn't assigned to.
+  const memberCheck = await checkDivisionMembership(
+    driverResult.driver.id,
+    leagueId,
+    division.id,
+    division.division_code
+  );
+  if (!memberCheck.ok) {
+    return { content: memberCheck.message, ephemeral: true };
   }
 
   const supabase = createAdminClient();

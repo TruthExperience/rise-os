@@ -343,6 +343,7 @@ registerCommand("division_sync", async (ctx) => {
         const updates: Record<string, string> = {};
         let categoryId: string | null = d.discord_category_id;
         let roleId: string | null = d.discord_checkin_role_id;
+        let roleFailed = false;
 
         if (!roleId) {
           const role = await createDiscordObject(`/guilds/${guildId}/roles`, { name, mentionable: true });
@@ -351,11 +352,21 @@ registerCommand("division_sync", async (ctx) => {
             updates.discord_checkin_role_id = role.id;
             made.push(`role <@&${role.id}>`);
           } else {
+            roleFailed = true;
             problems.push(`role (${role.error}) — check the bot has Manage Roles`);
           }
         }
 
-        if (!categoryId) {
+        // No role means nobody but the bot would ever see the channel:
+        // checkinOverwrites can only let the division's role in, so @everyone
+        // stays denied and the channel is stranded until someone finds it in
+        // the server settings. Leave the category and channel for the next run
+        // instead — creating them now would be worse than creating nothing.
+        if (roleFailed) {
+          problems.push("category and check-in channel not created until the role exists");
+        }
+
+        if (!roleFailed && !categoryId) {
           const category = await createDiscordObject(`/guilds/${guildId}/channels`, {
             name,
             type: 4,
@@ -370,8 +381,9 @@ registerCommand("division_sync", async (ctx) => {
           }
         }
 
-        // Without a category there is nowhere to put the channel.
-        if (!d.discord_checkin_channel_id && categoryId) {
+        // Without a category there is nowhere to put the channel, and without
+        // a role the channel would be invisible (see roleFailed above).
+        if (!roleFailed && !d.discord_checkin_channel_id && categoryId) {
           const channel = await createDiscordObject(`/guilds/${guildId}/channels`, {
             name: channelSlug(d.division_code),
             type: 0,
