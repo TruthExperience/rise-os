@@ -74,9 +74,16 @@ async function discordFetch(url: string, init: RequestInit, timeoutMs: number) {
 
 /**
  * True when every field we would send is already what Discord has stored.
- * Discord fills in defaults we never send (required: false, nsfw: false,
- * description_localizations, …), so only our own keys are compared, and a null
- * or undefined on our side means "no opinion".
+ * Discord fills in defaults we never send (nsfw, description_localizations, …)
+ * and leaves out fields whose value is false — an option we mark
+ * `required: false` comes back with no `required` key at all. Comparing that
+ * naively reported every command with an optional option as changed, so each
+ * call rewrote the same commands, spent the command-write rate limit on them
+ * and never reached the ones still missing. A false on our side therefore
+ * matches an absent field; everything else must be equal.
+ *
+ * Only our own keys are compared, and a null or undefined on our side means
+ * "no opinion".
  */
 function matchesRegistered(want: unknown, have: unknown): boolean {
   if (Array.isArray(want)) {
@@ -85,11 +92,12 @@ function matchesRegistered(want: unknown, have: unknown): boolean {
   }
   if (want !== null && typeof want === "object") {
     if (have === null || typeof have !== "object") return false;
-    return Object.entries(want as Record<string, unknown>).every(([key, value]) =>
-      value === null || value === undefined
-        ? true
-        : matchesRegistered(value, (have as Record<string, unknown>)[key])
-    );
+    return Object.entries(want as Record<string, unknown>).every(([key, value]) => {
+      const stored = (have as Record<string, unknown>)[key];
+      if (value === null || value === undefined) return true;
+      if (value === false && stored === undefined) return true;
+      return matchesRegistered(value, stored);
+    });
   }
   return want === have;
 }
@@ -122,21 +130,40 @@ async function fetchRegisteredCommands(url: string, token: string) {
 type RegisterOutcome =
   | { kind: "ok"; command: string; json: any }
   | { kind: "failed"; command: string; status: number; json: any }
-  | { kind: "pending"; command: string };
+  | { kind: "pending"; command: string; reason: string };
 
 /**
- * POST one command by name. Discord rate-limits command writes (a 429 comes
- * back with retry_after in seconds), so wait that long and try again — but give
- * up while the caller still has budget to answer, leaving the command pending
- * rather than letting the whole function time out.
+ * POST one command by name.
+ *
+ * Discord rate-limits command writes: a 429 comes back with `retry_after` in
+ * seconds, and the whole create/overwrite route shares one bucket, so a 429 on
+ * one command means the next command would be limited too. Waiting the few
+ * seconds Discord actually asks for is correct; the old code instead clamped
+ * every wait to 10s and retried four times, which turned a single rate-limit
+ * window into five more requests from each of six workers and left the command
+ * pending at the end of the budget anyway.
+ *
+ * `cooldown` is shared by every worker, so after one 429 the others wait with
+ * it instead of each collecting their own 429. If the wait does not fit in the
+ * caller's budget the command is reported pending with the reason, rather than
+ * letting the function time out.
  */
 async function registerCommand(
   url: string,
   token: string,
   command: { name: string },
-  deadline: number
+  deadline: number,
+  cooldown: { until: number; reason: string }
 ): Promise<RegisterOutcome> {
   for (let attempt = 0; ; attempt++) {
+    const pause = cooldown.until - Date.now();
+    if (pause > 0) {
+      if (Date.now() + pause > deadline) {
+        return { kind: "pending", command: command.name, reason: cooldown.reason };
+      }
+      await sleep(pause);
+    }
+
     let res: Response;
     let json: any = {};
     try {
@@ -163,11 +190,12 @@ async function registerCommand(
         : { kind: "failed", command: command.name, status: res.status, json };
     }
 
-    const waitSeconds = Math.min(Number(json?.retry_after ?? 2) + 0.5, 10);
-    if (attempt >= 4 || Date.now() + waitSeconds * 1000 > deadline) {
-      return { kind: "pending", command: command.name };
+    const retryAfter = Math.max(Number(json?.retry_after ?? 2), 1);
+    cooldown.until = Date.now() + retryAfter * 1000;
+    cooldown.reason = `Discord rate limited command writes; retry after ${Math.ceil(retryAfter)}s`;
+    if (attempt >= 4) {
+      return { kind: "pending", command: command.name, reason: cooldown.reason };
     }
-    await sleep(waitSeconds * 1000);
   }
 }
 
@@ -1389,6 +1417,10 @@ async function register(): Promise<NextResponse> {
     options: string[];
   }[] = [];
   const remaining = pendingCommands.map((command) => command.name);
+  // Why each command the call could not write is still pending, so the next
+  // call's response says whether waiting will help.
+  const pendingReasons: Record<string, string> = {};
+  const cooldown = { until: 0, reason: "" };
   // In an object, not a bare `let`: the failure is set inside the workers, and
   // a bare local would be narrowed to null at the reads further down.
   const state: { failure: { command: string; status: number; json: any } | null } = {
@@ -1402,7 +1434,7 @@ async function register(): Promise<NextResponse> {
       if (index >= pendingCommands.length) return;
 
       const command = pendingCommands[index];
-      const outcome = await registerCommand(url, botToken, command, deadline);
+      const outcome = await registerCommand(url, botToken, command, deadline, cooldown);
 
       if (outcome.kind === "ok") {
         results.push({
@@ -1419,6 +1451,7 @@ async function register(): Promise<NextResponse> {
         return;
       } else {
         // Rate-limited past the budget: leave it in `remaining` for the next call.
+        pendingReasons[outcome.command] = outcome.reason;
         return;
       }
     }
@@ -1430,6 +1463,13 @@ async function register(): Promise<NextResponse> {
 
   const order = new Map(commands.map((command, i) => [command.name, i] as const));
   results.sort((a, b) => (order.get(a.command) ?? 0) - (order.get(b.command) ?? 0));
+
+  // Anything left that no worker reached: the budget ran out before it started.
+  for (const name of remaining) {
+    if (!pendingReasons[name]) {
+      pendingReasons[name] = "Not started: the 45s write budget ran out";
+    }
+  }
 
   return NextResponse.json(
     {
@@ -1450,6 +1490,9 @@ async function register(): Promise<NextResponse> {
       ...(remaining.length
         ? {
             pending: remaining,
+            // One reason per pending command; a rate-limit reason means wait
+            // out the seconds it names before calling this URL again.
+            pendingReasons,
             retry: "Call this URL again to register the commands still pending.",
           }
         : {}),
