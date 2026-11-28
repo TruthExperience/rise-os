@@ -45,11 +45,14 @@ export async function POST(req: NextRequest) {
 
     // Upsert so re-running initialize for a season already bootstrapped is
     // idempotent rather than erroring on a duplicate (franchise_id, league_id,
-    // division, season) row.
+    // season) row. That is the table's only unique key
+    // (franchise_wallets_franchise_id_league_id_season_key); division is not
+    // part of it, and PostgREST rejects an onConflict that names columns with
+    // no unique constraint behind them.
     const { data: wallets, error: upsertErr } = await admin
       .schema("pitboss")
       .from("franchise_wallets")
-      .upsert(rows, { onConflict: "franchise_id,league_id,division,season" })
+      .upsert(rows, { onConflict: "franchise_id,league_id,season" })
       .select("id, franchise_id, balance");
 
     if (upsertErr) {
