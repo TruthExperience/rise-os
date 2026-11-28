@@ -35,9 +35,12 @@ const UNSUPPORTED_PARAMS_BY_CAR_CLASS: Record<string, readonly string[]> = {
   // has no engine braking, F1 24 has engine braking but no ballast, and F1 25
   // has neither. Ranges are copied from the matching F1 class. F1_WORLD is
   // the F1 25 class and stays on its original code (league tiers reference it).
+  // F1_WORLD_F126 is the 2026 Season Pack's World Car and follows F1_2026:
+  // engine braking present, no ballast slider.
   F1_WORLD: ["ballast", "engine_braking"],
   F1_WORLD_F123: ["ballast", "engine_braking"],
   F1_WORLD_F124: ["ballast"],
+  F1_WORLD_F126: ["ballast"],
   // F2 runs the spec chassis in every game, and engine braking is missing
   // from the F2 setup screen in F1 24 (simracingsetup's F1 24 F2 guide).
   F2_2023_F123: ["ballast", "engine_braking"],
