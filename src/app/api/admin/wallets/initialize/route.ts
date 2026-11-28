@@ -32,7 +32,30 @@ export async function POST(req: NextRequest) {
   try {
     const config = await getLeagueCapConfig(admin, leagueId, division);
 
-    const rows = franchiseIds.map((franchiseId: string) => ({
+    // Re-running initialize for a season that is already bootstrapped has to
+    // be a true no-op: an existing wallet's balance is the league's real
+    // money, so overwriting it back to starting_wallet would wipe every
+    // transaction since the grant, and re-logging the grant would double the
+    // ledger. So read what already exists and only create the missing rows.
+    // The lookup uses (franchise_id, league_id, season) because that is the
+    // table's only unique key (franchise_wallets_franchise_id_league_id_
+    // season_key); division is not part of it.
+    const { data: existing, error: existingErr } = await admin
+      .schema("pitboss")
+      .from("franchise_wallets")
+      .select("franchise_id")
+      .eq("league_id", leagueId)
+      .eq("season", season)
+      .in("franchise_id", franchiseIds);
+
+    if (existingErr) {
+      throw new Error(`Failed to read franchise_wallets: ${existingErr.message}`);
+    }
+
+    const alreadyBootstrapped = new Set((existing ?? []).map((w) => w.franchise_id));
+    const missingIds = franchiseIds.filter((id: string) => !alreadyBootstrapped.has(id));
+
+    const rows = missingIds.map((franchiseId: string) => ({
       franchise_id: franchiseId,
       league_id: leagueId,
       division,
@@ -43,24 +66,26 @@ export async function POST(req: NextRequest) {
       cap_freeze_active: false,
     }));
 
-    // Upsert so re-running initialize for a season already bootstrapped is
-    // idempotent rather than erroring on a duplicate (franchise_id, league_id,
-    // season) row. That is the table's only unique key
-    // (franchise_wallets_franchise_id_league_id_season_key); division is not
-    // part of it, and PostgREST rejects an onConflict that names columns with
-    // no unique constraint behind them.
-    const { data: wallets, error: upsertErr } = await admin
-      .schema("pitboss")
-      .from("franchise_wallets")
-      .upsert(rows, { onConflict: "franchise_id,league_id,season" })
-      .select("id, franchise_id, balance");
+    // ignoreDuplicates keeps this race-safe: if another request created a
+    // wallet between the read above and this write, ON CONFLICT DO NOTHING
+    // leaves its balance alone and returns only the rows we actually inserted.
+    let wallets: { id: string; franchise_id: string; balance: number }[] = [];
+    if (rows.length > 0) {
+      const { data: inserted, error: upsertErr } = await admin
+        .schema("pitboss")
+        .from("franchise_wallets")
+        .upsert(rows, { onConflict: "franchise_id,league_id,season", ignoreDuplicates: true })
+        .select("id, franchise_id, balance");
 
-    if (upsertErr) {
-      throw new Error(`Failed to upsert franchise_wallets: ${upsertErr.message}`);
+      if (upsertErr) {
+        throw new Error(`Failed to insert franchise_wallets: ${upsertErr.message}`);
+      }
+      wallets = inserted ?? [];
     }
 
-    // Log a season_start_grant transaction per wallet for the ledger trail.
-    const txRows = (wallets ?? []).map((w) => ({
+    // Log a season_start_grant transaction per newly created wallet only, so a
+    // re-run adds no ledger rows.
+    const txRows = wallets.map((w) => ({
       wallet_id: w.id,
       franchise_id: w.franchise_id,
       league_id: leagueId,
@@ -84,7 +109,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json({ initialized: wallets?.length ?? 0, wallets });
+    return NextResponse.json({ initialized: wallets.length, skipped: alreadyBootstrapped.size, wallets });
   } catch (err) {
     if (err instanceof LeagueNotConfiguredError) {
       return NextResponse.json(
