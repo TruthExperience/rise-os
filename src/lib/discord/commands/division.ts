@@ -25,6 +25,26 @@ import { getOrCreateDriver } from "./checkin";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
+// /checkin resolves the division from the channel it is run in, not from the
+// caller's membership, so a check-in channel every driver can see and post in
+// lets a driver file a check-in against another division. Channels this file
+// creates therefore deny @everyone and let in only the division's role and the
+// bot (a bot's user id is its application id). Bit 10 is View Channel; the
+// role also needs Send Messages (11) and Read Message History (16).
+const VIEW_CHANNEL = 1n << 10n;
+const CHECKIN_CHANNEL_ALLOW = String((1n << 10n) | (1n << 11n) | (1n << 16n));
+
+type ChannelOverwrite = { id: string; type: 0 | 1; allow?: string; deny?: string };
+
+function checkinOverwrites(guildId: string, roleId: string | null, allow: string): ChannelOverwrite[] {
+  // The guild id doubles as @everyone's role id.
+  const overwrites: ChannelOverwrite[] = [{ id: guildId, type: 0, deny: String(VIEW_CHANNEL) }];
+  if (roleId) overwrites.push({ id: roleId, type: 0, allow });
+  const botId = process.env.PITBOSS_DISCORD_APPLICATION_ID;
+  if (botId) overwrites.push({ id: botId, type: 1, allow });
+  return overwrites;
+}
+
 const DIVISION_ADMIN_FLAGS = ["is_owner", "is_co_owner", "is_commissioner"] as const;
 
 type DiscordResult =
@@ -174,6 +194,7 @@ registerCommand("division_create", async (ctx) => {
         const category = await discordRequest("POST", `/guilds/${guildId}/channels`, {
           name: displayName,
           type: 4,
+          permission_overwrites: checkinOverwrites(guildId, roleId, String(VIEW_CHANNEL)),
         });
         if (!category.ok) {
           await discordRequest("DELETE", `/guilds/${guildId}/roles/${roleId}`);
@@ -185,6 +206,7 @@ registerCommand("division_create", async (ctx) => {
           name: channelSlug(code),
           type: 0,
           parent_id: categoryId,
+          permission_overwrites: checkinOverwrites(guildId, roleId, CHECKIN_CHANNEL_ALLOW),
         });
         if (!channel.ok) {
           await discordRequest("DELETE", `/channels/${categoryId}`);
@@ -320,10 +342,12 @@ registerCommand("division_sync", async (ctx) => {
         const problems: string[] = [];
         const updates: Record<string, string> = {};
         let categoryId: string | null = d.discord_category_id;
+        let roleId: string | null = d.discord_checkin_role_id;
 
-        if (!d.discord_checkin_role_id) {
+        if (!roleId) {
           const role = await createDiscordObject(`/guilds/${guildId}/roles`, { name, mentionable: true });
           if ("id" in role) {
+            roleId = role.id;
             updates.discord_checkin_role_id = role.id;
             made.push(`role <@&${role.id}>`);
           } else {
@@ -332,7 +356,11 @@ registerCommand("division_sync", async (ctx) => {
         }
 
         if (!categoryId) {
-          const category = await createDiscordObject(`/guilds/${guildId}/channels`, { name, type: 4 });
+          const category = await createDiscordObject(`/guilds/${guildId}/channels`, {
+            name,
+            type: 4,
+            permission_overwrites: checkinOverwrites(guildId, roleId, String(VIEW_CHANNEL)),
+          });
           if ("id" in category) {
             categoryId = category.id;
             updates.discord_category_id = category.id;
@@ -348,6 +376,7 @@ registerCommand("division_sync", async (ctx) => {
             name: channelSlug(d.division_code),
             type: 0,
             parent_id: categoryId,
+            permission_overwrites: checkinOverwrites(guildId, roleId, CHECKIN_CHANNEL_ALLOW),
           });
           if ("id" in channel) {
             updates.discord_checkin_channel_id = channel.id;
@@ -400,6 +429,11 @@ registerCommand("division_sync", async (ctx) => {
       ];
       if (skipped > 0) summary.push(`${skipped} already linked.`);
       if (failed > 0) summary.push(`${failed} need attention — run \`/division sync\` again once fixed.`);
+      if (touched > 0) {
+        summary.push(
+          "Drivers can't see a check-in channel until they hold its role — \`/division assign\` adds them and grants it."
+        );
+      }
 
       return { content: [summary.join(" "), "", ...lines].join("\n").trim() };
     },
