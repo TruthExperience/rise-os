@@ -87,6 +87,16 @@ create table pitboss.drivers (
   clean_race_streak integer not null default 0
 );
 
+create table rise_os.franchises (
+  id uuid primary key default gen_random_uuid(),
+  league_id uuid not null references rise_os.leagues(id),
+  name text not null,
+  abbreviation text,
+  division text,
+  logo_url text,
+  created_at timestamptz not null default now()
+);
+
 create table pitboss.franchise_wallets (
   id uuid primary key default gen_random_uuid(),
   franchise_id uuid not null,
@@ -94,6 +104,9 @@ create table pitboss.franchise_wallets (
   division text not null,
   season text not null,
   balance numeric not null,
+  starting_wallet numeric not null default 0,
+  seasons_over_soft_cap integer not null default 0,
+  cap_freeze_active boolean not null default false,
   updated_at timestamptz not null default now()
 );
 
