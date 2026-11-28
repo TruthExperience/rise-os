@@ -11,6 +11,7 @@ const CAR_CLASSES = [
   { value: "F1_WORLD_F123", label: "F1 World (F1 23)" },
   { value: "F1_WORLD_F124", label: "F1 World (F1 24)" },
   { value: "F1_WORLD", label: "F1 World (F1 25)" },
+  { value: "F1_WORLD_F126", label: "F1 World (F1 26)" },
   { value: "F2_2023_F123", label: "F2 2023 (F1 23)" },
   { value: "F2_2023_F124", label: "F2 2023 (F1 24)" },
   { value: "F2_2024_F124", label: "F2 2024 (F1 24)" },
